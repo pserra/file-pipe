@@ -39,6 +39,7 @@ document.addEventListener("alpine:init", () => {
     playerType: "",
     playerTitle: "",
     playerSource: null,
+    playerConnectorLaunch: null,
     hostHls: null,
     hostXrPlayer: null,
     playerRoomLink: "",
@@ -442,9 +443,41 @@ document.addEventListener("alpine:init", () => {
       }
     },
 
-    setTranscodePlaybackMode(mode) {
-      this.transcodePlaybackMode = mode === "segmented" ? "segmented" : "full";
+    async setTranscodePlaybackMode(mode) {
+      const nextMode = mode === "segmented" ? "segmented" : "full";
+      const changed = this.transcodePlaybackMode !== nextMode;
+      this.transcodePlaybackMode = nextMode;
       localStorage.setItem("filePipeTranscodePlaybackMode", this.transcodePlaybackMode);
+      if (changed && this.playerConnectorLaunch && !this.playerLoading) {
+        await this.reloadCurrentConnectorVideoForTranscodeMode();
+      }
+    },
+
+    async reloadCurrentConnectorVideoForTranscodeMode() {
+      const launch = this.playerConnectorLaunch;
+      if (!launch?.item || !launch?.resource || !launch?.mediaInfo?.shouldTranscode) return;
+      this.error = "";
+      this.playerLoading = true;
+      this.resetWatchRoom();
+      if (this.bigscreenTransfer?.channel) this.bigscreenTransfer.channel.close();
+      if (this.bigscreenTransfer?.peer) this.bigscreenTransfer.peer.close();
+      this.bigscreenLink = "";
+      this.bigscreenSessionId = "";
+      this.bigscreenStatus = "";
+      this.bigscreenProgress = 0;
+      this.bigscreenTransfer = null;
+      try {
+        if (this.transcodePlaybackMode === "segmented") {
+          await this.launchSegmentedConnectorVideo(launch.item, launch.resource, launch.mediaInfo, launch.transcodeParts);
+        } else {
+          await this.launchFullTranscodedConnectorVideo(launch.item, launch.resource, launch.mediaInfo, launch.transcodeParts);
+        }
+      } catch (error) {
+        this.error = error.message;
+        this.playerStatus = "";
+      } finally {
+        this.playerLoading = false;
+      }
     },
 
     selectLocalFile(event) {
@@ -851,6 +884,7 @@ document.addEventListener("alpine:init", () => {
           const transcodeParts = [];
           if (!mediaInfo.audioPlayable) transcodeParts.push(`${audioCodec ? audioCodec.toUpperCase() : "audio"} to AAC`);
           if (!mediaInfo.videoPlayable) transcodeParts.push(`${mediaInfo.videoCodec ? mediaInfo.videoCodec.toUpperCase() : "video"} to H.264`);
+          this.playerConnectorLaunch = { item, resource, mediaInfo, transcodeParts };
           if (this.transcodePlaybackMode === "segmented") {
             await this.launchSegmentedConnectorVideo(item, resource, mediaInfo, transcodeParts);
           } else {
@@ -884,6 +918,7 @@ document.addEventListener("alpine:init", () => {
             arrayBuffer: () => blob.arrayBuffer(),
           }),
         };
+        this.playerConnectorLaunch = null;
         if (mediaInfo?.shouldTranscode && !mediaInfo.ffmpegAvailable) {
           this.playerStatus = "Video loaded without audio transcoding because ffmpeg is not available to the connector.";
         } else {
@@ -923,6 +958,7 @@ document.addEventListener("alpine:init", () => {
           arrayBuffer: () => this.localFile.arrayBuffer(),
         }),
       };
+      this.playerConnectorLaunch = null;
       this.playerStatus = "Video loaded.";
       setTimeout(() => {
         this.prepareHostPlayerMedia();
@@ -944,6 +980,7 @@ document.addEventListener("alpine:init", () => {
       this.playerType = "";
       this.playerTitle = "";
       this.playerSource = null;
+      this.playerConnectorLaunch = null;
       this.playerAudioStatus = "";
       this.playerLoading = false;
       this.bigscreenLink = "";
