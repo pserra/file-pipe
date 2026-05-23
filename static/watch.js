@@ -87,6 +87,30 @@ document.addEventListener("alpine:init", () => {
       if (receiveButton) receiveButton.disabled = false;
     },
 
+    async appJson(path, options = {}) {
+      const response = await fetch(path, {
+        ...options,
+        headers: {
+          Accept: "application/json",
+          ...(options.headers || {}),
+        },
+      });
+      const contentType = response.headers.get("Content-Type") || "";
+      const payload = contentType.includes("application/json")
+        ? await response.json().catch(() => ({}))
+        : {};
+      if (!response.ok) {
+        const message = response.status === 401
+          ? "Authentication expired. Reload the watch page and sign in again."
+          : payload.error || `Request failed with ${response.status}.`;
+        throw new Error(message);
+      }
+      if (!contentType.includes("application/json")) {
+        throw new Error(`Expected JSON from ${path}, but received ${contentType || "a non-JSON response"}.`);
+      }
+      return payload;
+    },
+
     async loadRoom() {
       try {
         const keyText = new URLSearchParams(window.location.hash.slice(1)).get("key");
@@ -98,7 +122,7 @@ document.addEventListener("alpine:init", () => {
           false,
           ["decrypt"],
         );
-        const room = await fetch(`/api/watch/rooms/${this.roomId}`).then((response) => response.json());
+        const room = await this.appJson(`/api/watch/rooms/${this.roomId}`);
         if (!room.metadata) {
           this.status = "Waiting for host metadata...";
           return;
@@ -121,7 +145,7 @@ document.addEventListener("alpine:init", () => {
       try {
         const response = await fetch(`/api/watch/rooms/${this.roomId}/participants`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { Accept: "application/json", "Content-Type": "application/json" },
           body: JSON.stringify({ name: this.viewerName }),
         });
         const payload = await response.json().catch(() => ({}));
@@ -137,9 +161,7 @@ document.addEventListener("alpine:init", () => {
 
     async waitForOfferAndAnswer() {
       for (let attempt = 0; attempt < 300; attempt += 1) {
-        const response = await fetch(`/api/watch/rooms/${this.roomId}/participants/${this.participantId}`);
-        const participant = await response.json().catch(() => ({}));
-        if (!response.ok) throw new Error(participant.error || `Participant lookup failed: ${response.status}`);
+        const participant = await this.appJson(`/api/watch/rooms/${this.roomId}/participants/${this.participantId}`);
         if (participant.kicked) throw new Error("The host removed you from this watch room.");
         if (participant.offer) {
           await this.answerOffer(participant.offer);
@@ -196,7 +218,7 @@ document.addEventListener("alpine:init", () => {
       await waitForIceGatheringComplete(this.peer);
       const response = await fetch(`/api/watch/rooms/${this.roomId}/participants/${this.participantId}/answer`, {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
+        headers: { Accept: "application/json", "Content-Type": "application/json" },
         body: JSON.stringify({ answer: this.peer.localDescription }),
       });
       if (!response.ok) {
@@ -230,6 +252,7 @@ document.addEventListener("alpine:init", () => {
         }
         const response = await fetch(`/api/watch/rooms/${this.roomId}/participants/${this.participantId}/reconnect`, {
           method: "POST",
+          headers: { Accept: "application/json" },
         });
         const payload = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(payload.error || `Reconnect failed: ${response.status}`);

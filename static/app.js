@@ -262,6 +262,33 @@ document.addEventListener("alpine:init", () => {
       return payload;
     },
 
+    async appJson(path, options = {}) {
+      const response = await fetch(path, {
+        ...options,
+        headers: {
+          Accept: "application/json",
+          ...(options.headers || {}),
+        },
+      });
+      const contentType = response.headers.get("Content-Type") || "";
+      const payload = contentType.includes("application/json")
+        ? await response.json().catch(() => ({}))
+        : {};
+      if (!response.ok) {
+        const message = response.status === 401
+          ? "Authentication expired. Reload the host page and sign in again."
+          : payload.error || `Request failed with ${response.status}.`;
+        const error = new Error(message);
+        error.status = response.status;
+        error.payload = payload;
+        throw error;
+      }
+      if (!contentType.includes("application/json")) {
+        throw new Error(`Expected JSON from ${path}, but received ${contentType || "a non-JSON response"}.`);
+      }
+      return payload;
+    },
+
     async checkConnector() {
       this.saveConnectorUrl();
       this.error = "";
@@ -710,7 +737,7 @@ document.addEventListener("alpine:init", () => {
         const rawKey = await crypto.subtle.exportKey("raw", key);
         const keyText = base64UrlEncode(new Uint8Array(rawKey));
 
-        const created = await fetch("/api/p2p/shares", { method: "POST" }).then((response) => response.json());
+        const created = await this.appJson("/api/p2p/shares", { method: "POST" });
         if (!created.shareId) throw new Error("Could not create share.");
 
         const metadata = {
@@ -803,7 +830,7 @@ document.addEventListener("alpine:init", () => {
     async waitForPeerAnswer(shareId, peer, transfer) {
       try {
         for (let attempt = 0; attempt < 900; attempt += 1) {
-          const signal = await fetch(`/api/p2p/shares/${shareId}`).then((response) => response.json());
+          const signal = await this.appJson(`/api/p2p/shares/${shareId}`);
           if (signal.answer) {
             await peer.setRemoteDescription(signal.answer);
             transfer.status = "Waiting for acknowledgement";
@@ -1704,11 +1731,7 @@ document.addEventListener("alpine:init", () => {
         const rawKey = await crypto.subtle.exportKey("raw", this.playerRoomKey);
         this.playerRoomKeyText = base64UrlEncode(new Uint8Array(rawKey));
 
-        const createdResponse = await fetch("/api/watch/rooms", {
-          method: "POST",
-        });
-        const created = await createdResponse.json().catch(() => ({}));
-        if (!createdResponse.ok) throw new Error(created.error || `Could not create watch room: ${createdResponse.status}`);
+        const created = await this.appJson("/api/watch/rooms", { method: "POST" });
         if (!created.roomId) throw new Error("Could not create watch room.");
 
         this.playerRoomId = created.roomId;
@@ -1774,7 +1797,7 @@ document.addEventListener("alpine:init", () => {
         );
         const rawKey = await crypto.subtle.exportKey("raw", key);
         const keyText = base64UrlEncode(new Uint8Array(rawKey));
-        const created = await fetch("/api/bigscreen/sessions", { method: "POST" }).then((response) => response.json());
+        const created = await this.appJson("/api/bigscreen/sessions", { method: "POST" });
         if (!created.sessionId) throw new Error("Could not create Bigscreen session.");
 
         const metadata = {
@@ -1878,7 +1901,7 @@ document.addEventListener("alpine:init", () => {
       try {
         for (let attempt = 0; attempt < 900; attempt += 1) {
           if (this.bigscreenSessionId !== sessionId) return;
-          const signal = await fetch(`/api/bigscreen/sessions/${sessionId}`).then((response) => response.json());
+          const signal = await this.appJson(`/api/bigscreen/sessions/${sessionId}`);
           if (signal.answer) {
             await peer.setRemoteDescription(signal.answer);
             transfer.status = "Connected";
@@ -1974,7 +1997,7 @@ document.addEventListener("alpine:init", () => {
       try {
         while (roomId && this.playerRoomId === roomId && this.playerPollToken === token) {
           try {
-            const state = await fetch(`/api/watch/rooms/${roomId}`).then((response) => response.json());
+            const state = await this.appJson(`/api/watch/rooms/${roomId}`);
             for (const participant of state.participants || []) {
               if (participant.kicked) {
                 const kicked = this.playerPeers[participant.id];
@@ -2113,7 +2136,7 @@ document.addEventListener("alpine:init", () => {
         await waitForIceGatheringComplete(peer);
         const response = await fetch(`/api/watch/rooms/${this.playerRoomId}/participants/${participant.id}/offer`, {
           method: "PUT",
-          headers: { "Content-Type": "application/json" },
+          headers: { Accept: "application/json", "Content-Type": "application/json" },
           body: JSON.stringify({ offer: peer.localDescription }),
         });
         if (!response.ok) {
@@ -2133,6 +2156,9 @@ document.addEventListener("alpine:init", () => {
       record.videoComplete = false;
       const streamMd5 = new SparkMD5.ArrayBuffer();
       try {
+        if (!this.isWatchRoomKeyReady()) {
+          throw new Error("Watch room encryption key is no longer available. Create a new watch link.");
+        }
         if (!sendChannelJson(channel, { type: "video-start", metadata: this.playerRoomMetadata })) {
           throw dataChannelDisconnectedError();
         }
@@ -2200,6 +2226,15 @@ document.addEventListener("alpine:init", () => {
     async streamWatchRange(message, record) {
       const channel = record.channel;
       if (!channel || channel.readyState !== "open") return;
+      if (!this.isWatchRoomKeyReady()) {
+        sendChannelJson(channel, {
+          type: "range-error",
+          requestId: message.requestId,
+          sourceVersion: Number(this.playerRoomMetadata?.sourceVersion || 0),
+          error: "Watch room encryption key is no longer available. Create a new watch link.",
+        });
+        return;
+      }
       const sourceVersion = Number(this.playerRoomMetadata?.sourceVersion || 0);
       if (message.sourceVersion && Number(message.sourceVersion) !== sourceVersion) {
         sendChannelJson(channel, {
@@ -2300,6 +2335,10 @@ document.addEventListener("alpine:init", () => {
       const availableBytes = Number(this.playerSource?.transcodedAvailableBytes || this.playerRoomMetadata?.progressiveTranscode?.availableBytes || 0);
       if (availableBytes > 0) return availableBytes > offset;
       return Number(this.playerTranscodeAvailablePercent || 0) + 0.25 >= requiredPercent;
+    },
+
+    isWatchRoomKeyReady() {
+      return Boolean(this.playerRoomKey && this.playerRoomKey.type === "secret");
     },
 
     toggleParticipantControl(record) {
