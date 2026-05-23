@@ -2230,6 +2230,15 @@ document.addEventListener("alpine:init", () => {
             return;
           }
           if (message.type === "range-request") {
+            if (this.playerRoomMetadata?.streamMode === "hls") {
+              sendChannelJson(record.channel, {
+                type: "range-error",
+                requestId: message.requestId,
+                sourceVersion: Number(this.playerRoomMetadata?.sourceVersion || 0),
+                error: "This watch room is using live HLS segments. Reload the watch page to use the latest stream player.",
+              });
+              return;
+            }
             record.status = "Range streaming";
             await this.streamWatchRange(message, record);
             return;
@@ -2490,6 +2499,9 @@ document.addEventListener("alpine:init", () => {
       const rangeMd5 = new SparkMD5.ArrayBuffer();
       let sentBytes = 0;
       try {
+        if (!source?.readRange) {
+          throw new Error("The current watch room source does not support byte-range playback. Use the Live stream watch link or create a new Stable MP4 watch link.");
+        }
         record.cancelledRanges?.delete(requestId);
         if (source?.progressiveTranscode) {
           const ready = await this.waitForProgressiveTranscodeOffset(start, record, requestId);

@@ -602,16 +602,9 @@ document.addEventListener("alpine:init", () => {
       this.inspectViewerVideoAudio();
     },
 
-    attachViewerHlsPlayer() {
-      const video = document.getElementById("viewer-video-player");
+    attachViewerHlsPlayer(video = document.getElementById("viewer-video-player")) {
       if (!video || !this.videoUrl) return false;
       this.teardownViewerHlsPlayer();
-      if (video.canPlayType("application/vnd.apple.mpegurl")) {
-        video.src = this.videoUrl;
-        video.load();
-        this.prepareViewerVideoMedia();
-        return true;
-      }
       if (window.Hls?.isSupported?.()) {
         this.viewerHls = new Hls({
           enableWorker: true,
@@ -629,6 +622,12 @@ document.addEventListener("alpine:init", () => {
           this.prepareViewerVideoMedia();
           this.updateViewerPlaybackBuffer();
         });
+        return true;
+      }
+      if (video.canPlayType("application/vnd.apple.mpegurl")) {
+        video.src = this.videoUrl;
+        video.load();
+        this.prepareViewerVideoMedia();
         return true;
       }
       this.error = "This browser cannot play HLS live streams.";
@@ -660,6 +659,16 @@ document.addEventListener("alpine:init", () => {
       return this.metadata?.streamMode === "hls"
         || this.metadata?.playbackProfile?.sourceKind === "hls-live"
         || String(this.metadata?.type || "").includes("mpegurl");
+    },
+
+    async waitForViewerVideoElement(timeoutMs = 2000) {
+      const started = Date.now();
+      while (Date.now() - started < timeoutMs) {
+        const video = document.getElementById("viewer-video-player");
+        if (video) return video;
+        await sleep(25);
+      }
+      return null;
     },
 
     inspectViewerVideoAudio() {
@@ -740,14 +749,14 @@ document.addEventListener("alpine:init", () => {
         const fileName = hlsStream ? "playlist.m3u8" : encodeURIComponent(this.metadata.name || "video");
         this.videoUrl = `/watch-media/${this.roomId}/${fileName}`;
         this.streamingReady = true;
-        await sleep(0);
-        const video = document.getElementById("viewer-video-player");
+        const video = await this.waitForViewerVideoElement();
+        if (!video) throw new Error("The video player did not initialize. Reload the watch page and try again.");
         if (hlsStream) {
-          if (!this.attachViewerHlsPlayer()) {
+          if (!this.attachViewerHlsPlayer(video)) {
             this.receiving = false;
             return;
           }
-        } else if (video) {
+        } else {
           video.src = this.videoUrl;
           video.load();
         }
@@ -764,7 +773,7 @@ document.addEventListener("alpine:init", () => {
     },
 
     async registerServiceWorker() {
-      const registration = await navigator.serviceWorker.register("/bigscreen-sw.js?v=4", { scope: "/" });
+      const registration = await navigator.serviceWorker.register("/bigscreen-sw.js?v=5", { scope: "/" });
       await navigator.serviceWorker.ready;
       if (!navigator.serviceWorker.controller) {
         await new Promise((resolve) => {

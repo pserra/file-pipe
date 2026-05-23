@@ -56,7 +56,7 @@ async function handleBigscreenMedia(event, url) {
     return new Response("Player page is not available.", { status: 409 });
   }
 
-  if (kind === "watch" && metadata.streamMode === "hls") {
+  if (kind === "watch" && isHlsMetadata(metadata)) {
     return handleWatchHlsMedia(event, url, client, sessionId, metadata);
   }
 
@@ -180,6 +180,12 @@ function buildHlsPlaylist(metadata) {
 function hlsSegmentIndex(pathname) {
   const match = pathname.match(/\/segments\/(\d+)\.ts$/);
   return match ? Number(match[1]) : -1;
+}
+
+function isHlsMetadata(metadata) {
+  return metadata?.streamMode === "hls"
+    || metadata?.playbackProfile?.sourceKind === "hls-live"
+    || String(metadata?.type || "").toLowerCase().includes("mpegurl");
 }
 
 function parseRange(rangeHeader, totalSize, metadata = {}) {
