@@ -1522,14 +1522,18 @@ def serve_growing_file_with_range(path: Path, content_type: str, resource_id: st
 
     if not wait_for_size(start + 1):
         current_size = path.stat().st_size if path.exists() else 0
+        status = 503 if transcode_running(resource_id) else 416
+        headers = {
+            "Accept-Ranges": "bytes",
+            "Content-Range": f"bytes */{current_size}",
+            "Cache-Control": "no-store",
+        }
+        if status == 503:
+            headers["Retry-After"] = "1"
         return Response(
-            "",
-            status=416,
-            headers={
-                "Accept-Ranges": "bytes",
-                "Content-Range": f"bytes */{current_size}",
-                "Cache-Control": "no-store",
-            },
+            "Requested transcode range is not ready yet." if status == 503 else "",
+            status=status,
+            headers=headers,
             content_type=content_type,
         )
 

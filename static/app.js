@@ -566,8 +566,8 @@ document.addEventListener("alpine:init", () => {
               if (target === "player") {
                 this.playerStatus = `${status} ${title}... ${percent}%`;
                 this.playerTranscodeAvailablePercent = percent;
-                if (this.playerSource && progress.size) this.playerSource.size = Number(progress.size);
-                this.broadcastTranscodeProgress(percent);
+                if (this.playerSource && progress.size) this.playerSource.transcodedAvailableBytes = Number(progress.size);
+                this.broadcastTranscodeProgress(percent, Number(progress.size || 0));
                 if (progress.cached || progress.complete || percent >= 100) {
                   this.playerStatus = `${title} is fully transcoded.`;
                   this.playerTranscodeAvailablePercent = 100;
@@ -575,8 +575,10 @@ document.addEventListener("alpine:init", () => {
                   if (this.playerSource?.progressiveTranscode) {
                     this.playerSource.progressiveTranscode = false;
                     this.playerSource.shareDisabledReason = "";
+                    this.playerSource.size = Number(progress.size || this.playerSource.size || 0);
+                    this.playerSource.transcodedAvailableBytes = this.playerSource.size;
                   }
-                  this.broadcastTranscodeProgress(100);
+                  this.broadcastTranscodeProgress(100, Number(progress.size || this.playerSource?.size || 0));
                   setTimeout(() => {
                     if (this.playerStatus === `${title} is fully transcoded.`) this.playerStatus = "";
                   }, 10000);
@@ -935,6 +937,7 @@ document.addEventListener("alpine:init", () => {
         playbackProfile: stableMp4PlaybackProfile(mediaInfo),
         progressiveTranscode: !transcodeInfo.complete,
         progressiveTranscodePercent: this.playerTranscodeAvailablePercent,
+        transcodedAvailableBytes: transcodeSize,
         estimatedFinalSize: Number(mediaInfo?.size || resource.size || transcodeSize || 0),
         shareDisabledReason: "",
         checksumPath: `${transcodePath}/checksum`,
@@ -1649,6 +1652,7 @@ document.addEventListener("alpine:init", () => {
         sourceVersion: this.playerSourceVersion,
         progressiveTranscode: this.playerSource.progressiveTranscode ? {
           percent: Number(this.playerTranscodeAvailablePercent || 0),
+          availableBytes: Number(this.playerSource.transcodedAvailableBytes || this.playerSource.size || 0),
           complete: false,
         } : null,
       };
@@ -1800,6 +1804,7 @@ document.addEventListener("alpine:init", () => {
           mediaInfo: mediaInfoSummary(this.playerSource.mediaInfo),
           progressiveTranscode: this.playerSource.progressiveTranscode ? {
             percent: Number(this.playerTranscodeAvailablePercent || 0),
+            availableBytes: Number(this.playerSource.transcodedAvailableBytes || this.playerSource.size || 0),
             complete: false,
           } : null,
         };
@@ -1952,17 +1957,20 @@ document.addEventListener("alpine:init", () => {
       }
     },
 
-    broadcastTranscodeProgress(percent) {
+    broadcastTranscodeProgress(percent, availableBytes = 0) {
       if (!this.playerRoomId || !this.playerRoomMetadata?.progressiveTranscode) return;
       const normalizedPercent = Math.max(0, Math.min(100, Number(percent || 0)));
+      const normalizedBytes = Math.max(0, Number(availableBytes || this.playerSource?.transcodedAvailableBytes || 0));
       this.playerRoomMetadata.progressiveTranscode = {
         percent: normalizedPercent,
+        availableBytes: normalizedBytes,
         complete: normalizedPercent >= 100,
       };
       for (const record of this.connectedWatchPeers()) {
         sendChannelJson(record.channel, {
           type: "transcode-progress",
           percent: normalizedPercent,
+          availableBytes: normalizedBytes,
           complete: normalizedPercent >= 100,
         });
       }
@@ -2223,9 +2231,17 @@ document.addEventListener("alpine:init", () => {
       let sentBytes = 0;
       try {
         record.cancelledRanges?.delete(requestId);
+        if (source?.progressiveTranscode) {
+          const ready = await this.waitForProgressiveTranscodeOffset(start, record, requestId);
+          if (!ready) return;
+        }
         for (let offset = start; offset <= end; offset += chunkSize) {
           if (record.cancelledRanges?.has(requestId)) break;
           const nextEnd = Math.min(offset + chunkSize - 1, end);
+          if (source?.progressiveTranscode) {
+            const ready = await this.waitForProgressiveTranscodeOffset(nextEnd, record, requestId);
+            if (!ready) break;
+          }
           const plainChunk = exactArrayBuffer(await source.readRange(offset, nextEnd + 1));
           rangeMd5.append(plainChunk);
           const iv = crypto.getRandomValues(new Uint8Array(12));
@@ -2276,6 +2292,25 @@ document.addEventListener("alpine:init", () => {
       } finally {
         record.cancelledRanges?.delete(requestId);
       }
+    },
+
+    async waitForProgressiveTranscodeOffset(offset, record, requestId) {
+      const totalSize = Number(this.playerRoomMetadata?.size || this.playerSource?.estimatedFinalSize || this.playerSource?.size || 0);
+      if (!totalSize || offset <= 0) return true;
+      const requiredPercent = Math.min(100, ((offset + 1) / totalSize) * 100);
+      while (this.playerSource?.progressiveTranscode && !this.progressiveTranscodeOffsetReady(offset, requiredPercent)) {
+        if (record.cancelledRanges?.has(requestId)) return false;
+        if (!isDataChannelOpen(record.channel)) return false;
+        record.status = `Waiting for transcode ${Math.ceil(requiredPercent)}%`;
+        await sleep(500);
+      }
+      return true;
+    },
+
+    progressiveTranscodeOffsetReady(offset, requiredPercent) {
+      const availableBytes = Number(this.playerSource?.transcodedAvailableBytes || this.playerRoomMetadata?.progressiveTranscode?.availableBytes || 0);
+      if (availableBytes > 0) return availableBytes > offset;
+      return Number(this.playerTranscodeAvailablePercent || 0) + 0.25 >= requiredPercent;
     },
 
     toggleParticipantControl(record) {

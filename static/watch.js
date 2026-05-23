@@ -1012,6 +1012,7 @@ document.addEventListener("alpine:init", () => {
       const percent = Math.max(0, Math.min(100, Number(message.percent || 0)));
       this.metadata.progressiveTranscode = {
         percent,
+        availableBytes: Math.max(0, Number(message.availableBytes || 0)),
         complete: Boolean(message.complete) || percent >= 100,
       };
       this.clampViewerProgressiveSeek();
