@@ -94,7 +94,7 @@ FILE_PIPE_LOGIN_RATE_LIMIT=5
 FILE_PIPE_LOGIN_RATE_WINDOW_SECONDS=300
 ```
 
-Watch room entry does not require login. Anonymous access to `/join/<alias>`, `/watch/<room_id>`, and viewer-side watch-room APIs is rate limited by client IP:
+Watch room entry does not require login. Anonymous access to `/watch/<room_id>` and viewer-side watch-room APIs is rate limited by client IP:
 
 ```text
 FILE_PIPE_PUBLIC_ACCESS_RATE_LIMIT=120
@@ -198,7 +198,7 @@ python local_connector.py
 File Pipe has three sharing modes:
 
 - File share: creates a `/share/<id>#key=...` link for a DLNA file or manually selected local file.
-- Watch room: creates a `/watch/<id>#key=...` link for synchronized video watching. Hosts can also set a short alias, which creates a `/join/<alias>#key=...` shortcut and browser-generated QR code for easier headset entry.
+- Watch room: creates a `/watch/<id>#key=...` link and browser-generated QR code for synchronized video watching.
 - Bigscreen link: creates a `/bigscreen/<id>#key=...` link for Bigscreen's web browser.
 
 For file shares and watch rooms:
@@ -213,8 +213,6 @@ For file shares and watch rooms:
 8. The recipient browser verifies the MD5 after decryption.
 
 The sender tab must stay open until transfers complete.
-
-Room aliases are in-memory pointers to the latest room created with that alias. Existing `/watch/<id>#key=...` links continue to work even if the alias is later reused for a new room.
 
 When a DLNA video's default audio track is not browser-playable, the local connector can transcode it once to a cached MP4/AAC file under `instance/transcodes/`. The player, watch rooms, and Bigscreen links then use that stable cached file for checksum and range-based streaming.
 

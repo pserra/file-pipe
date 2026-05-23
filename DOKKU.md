@@ -90,4 +90,4 @@ curl -I https://pipe.milkyway.place/health
 - Do not commit `.env`; production configuration belongs in Dokku config.
 - The Flask app intentionally fails closed if auth credentials are missing.
 - `/health` is public so Dokku can perform startup checks and external monitors can verify the app is alive.
-- Watch-room state, aliases, and WebRTC signaling are in memory. They reset when the web process restarts.
+- Watch-room state and WebRTC signaling are in memory. They reset when the web process restarts.

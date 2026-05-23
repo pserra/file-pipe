@@ -59,6 +59,7 @@ TRANSCODE_CACHE_VERSION = "v3"
 TRANSCODE_CACHE_DIR = Path(os.environ.get("FILE_PIPE_TRANSCODE_CACHE_DIR", "instance/transcodes"))
 HLS_SEGMENT_SECONDS = int(os.environ.get("FILE_PIPE_HLS_SEGMENT_SECONDS", "6"))
 TRANSCODE_LOCKS: Dict[str, threading.Lock] = {}
+TRANSCODE_PROGRESS: Dict[str, Dict[str, object]] = {}
 MEDIA_TOOL_DIRS = [
     "/opt/homebrew/bin",
     "/usr/local/bin",
@@ -1039,6 +1040,11 @@ def transcode_cache_path(resource_id: str, url: str) -> Path:
     return TRANSCODE_CACHE_DIR / f"{resource_id}-{url_hash}.mp4"
 
 
+def transcoded_file_cached(resource_id: str, url: str) -> bool:
+    path = transcode_cache_path(resource_id, url)
+    return path.exists() and path.stat().st_size > 0
+
+
 def hls_cache_dir(resource_id: str, url: str) -> Path:
     url_hash = hashlib.sha256(f"{TRANSCODE_CACHE_VERSION}:hls:{HLS_SEGMENT_SECONDS}:{url}".encode("utf-8")).hexdigest()[:16]
     return TRANSCODE_CACHE_DIR / f"{resource_id}-{url_hash}-hls"
@@ -1134,6 +1140,56 @@ def lock_for_transcode(path: Path) -> threading.Lock:
     return TRANSCODE_LOCKS[key]
 
 
+def update_transcode_progress(resource_id: str, **values) -> None:
+    current = TRANSCODE_PROGRESS.get(resource_id, {})
+    current.update(values)
+    current["updatedAt"] = int(time.time())
+    TRANSCODE_PROGRESS[resource_id] = current
+
+
+def run_transcode_command(command: List[str], temp_path: Path, resource_id: str, duration: Optional[float]) -> None:
+    progress_command = [*command[:-1], "-progress", "pipe:1", "-nostats", command[-1]]
+    process = subprocess.Popen(
+        progress_command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    stderr_lines = []
+    try:
+        assert process.stdout is not None
+        for raw_line in process.stdout:
+            line = raw_line.strip()
+            if not line or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            if key == "out_time_ms":
+                try:
+                    seconds = int(value) / 1_000_000
+                except ValueError:
+                    continue
+                percent = 0
+                if duration and duration > 0:
+                    percent = max(0, min(99, int((seconds / duration) * 100)))
+                update_transcode_progress(resource_id, status="running", seconds=seconds, percent=percent)
+            elif key == "progress" and value == "end":
+                update_transcode_progress(resource_id, status="finalizing", percent=99)
+        assert process.stderr is not None
+        stderr_text = process.stderr.read()
+        if stderr_text:
+            stderr_lines.append(stderr_text.strip())
+        return_code = process.wait()
+    except Exception:
+        process.kill()
+        raise
+    if return_code != 0:
+        detail = "\n".join(stderr_lines).strip() or f"ffmpeg exited with {return_code}"
+        update_transcode_progress(resource_id, status="error", error=detail)
+        if temp_path.exists():
+            temp_path.unlink()
+        raise RuntimeError(f"ffmpeg could not transcode this resource: {detail}")
+
+
 def ensure_transcoded_file(resource_id: str, url: str, media_info: Dict[str, object]) -> Dict[str, object]:
     ffmpeg_path = find_media_tool("ffmpeg")
     if not ffmpeg_path:
@@ -1141,32 +1197,48 @@ def ensure_transcoded_file(resource_id: str, url: str, media_info: Dict[str, obj
     path = transcode_cache_path(resource_id, url)
     lock = lock_for_transcode(path)
     with lock:
+        if path.exists() and path.stat().st_size > 0:
+            stat = path.stat()
+            update_transcode_progress(resource_id, status="cached", percent=100, size=stat.st_size)
+            return {
+                "path": str(path),
+                "size": stat.st_size,
+                "contentType": "video/mp4",
+                "cached": True,
+            }
+
         if not path.exists() or path.stat().st_size == 0:
             TRANSCODE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
             temp_path = path.with_suffix(f".{os.getpid()}.part")
             if temp_path.exists():
                 temp_path.unlink()
             command = build_transcode_command(url, media_info, str(temp_path), ffmpeg_path)
+            update_transcode_progress(
+                resource_id,
+                status="running",
+                percent=0,
+                seconds=0,
+                duration=parse_float(media_info.get("duration")),
+                size=0,
+                error="",
+            )
             try:
-                subprocess.run(command, capture_output=True, text=True, check=True)
+                run_transcode_command(command, temp_path, resource_id, parse_float(media_info.get("duration")))
                 temp_path.replace(path)
-            except subprocess.CalledProcessError as exc:
-                if temp_path.exists():
-                    temp_path.unlink()
-                detail = (exc.stderr or exc.stdout or str(exc)).strip()
-                raise RuntimeError(f"ffmpeg could not transcode this resource: {detail}") from exc
             except Exception:
                 if temp_path.exists():
                     temp_path.unlink()
                 raise
 
     stat = path.stat()
-    return {
+    result = {
         "path": str(path),
         "size": stat.st_size,
         "contentType": "video/mp4",
         "cached": True,
     }
+    update_transcode_progress(resource_id, status="complete", percent=100, size=stat.st_size)
+    return result
 
 
 def checksum_cache_key(kind: str, value: str) -> str:
@@ -1528,7 +1600,25 @@ def create_connector_app(security: Optional[ConnectorSecurity] = None):
             return jsonify({"error": f"Could not probe media tracks: {exc}"}), 502
 
         media_info["resource"] = RESOURCE_METADATA_CACHE.get(resource_id, {})
+        media_info["transcodedCached"] = transcoded_file_cached(resource_id, url)
+        media_info["transcodeStatus"] = TRANSCODE_PROGRESS.get(resource_id, {})
         return jsonify(media_info)
+
+    @app.get("/resources/<resource_id>/transcode-status")
+    def resource_transcode_status(resource_id: str):
+        auth_error = require_auth(security)
+        if auth_error:
+            return auth_error
+        url = resource_probe_target(resource_id)
+        if not url:
+            return jsonify({"error": "Unknown resource. Browse the file again."}), 404
+        cached = transcoded_file_cached(resource_id, url)
+        status = TRANSCODE_PROGRESS.get(resource_id, {})
+        if cached:
+            path = transcode_cache_path(resource_id, url)
+            stat = path.stat()
+            return jsonify({"ok": True, "status": "cached", "cached": True, "percent": 100, "size": stat.st_size})
+        return jsonify({"ok": True, "status": status.get("status", "idle"), "cached": False, **status})
 
     @app.get("/resources/<resource_id>/checksum")
     def resource_checksum(resource_id: str):

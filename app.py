@@ -1,7 +1,6 @@
 import argparse
 import hmac
 import os
-import re
 import secrets
 import time
 from dataclasses import dataclass
@@ -17,14 +16,11 @@ from local_tls import ensure_local_certificate
 SHARE_ID_BYTES = 18
 P2P_SHARES: Dict[str, dict] = {}
 WATCH_ROOMS: Dict[str, dict] = {}
-WATCH_ROOM_ALIASES: Dict[str, str] = {}
 BIGSCREEN_SESSIONS: Dict[str, dict] = {}
 LOGIN_ATTEMPTS: Dict[str, list] = {}
 PUBLIC_ACCESS_ATTEMPTS: Dict[str, list] = {}
-ROOM_ALIAS_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{1,62}[a-z0-9]$")
 PUBLIC_WATCH_ENDPOINTS = {
     "watch",
-    "join_alias",
     "bigscreen_service_worker",
     "watch_media_fallback",
     "get_watch_room_state",
@@ -108,31 +104,6 @@ def get_watch_room(room_id: str) -> dict:
     if room is None:
         abort(404)
     return room
-
-
-def normalize_room_alias(value: str) -> str:
-    alias = re.sub(r"\s+", "-", (value or "").strip().lower())
-    return alias
-
-
-def validate_room_alias(value: str) -> str:
-    alias = normalize_room_alias(value)
-    if not alias:
-        return ""
-    if not ROOM_ALIAS_PATTERN.fullmatch(alias):
-        raise ValueError("Room alias must be 3-64 characters using letters, numbers, hyphens, or underscores.")
-    return alias
-
-
-def room_id_for_alias(alias: str) -> str:
-    try:
-        normalized = validate_room_alias(alias)
-    except ValueError:
-        abort(404)
-    room_id = WATCH_ROOM_ALIASES.get(normalized)
-    if not room_id or room_id not in WATCH_ROOMS:
-        abort(404)
-    return room_id
 
 
 def get_bigscreen_session(session_id: str) -> dict:
@@ -346,11 +317,6 @@ def create_app():
     def watch(room_id: str):
         return render_template("watch.html", room_id=room_id)
 
-    @app.get("/join/<alias>")
-    def join_alias(alias: str):
-        room_id = room_id_for_alias(alias)
-        return render_template("join.html", alias=normalize_room_alias(alias), watch_path=url_for("watch", room_id=room_id))
-
     @app.get("/bigscreen/<session_id>")
     def bigscreen(session_id: str):
         return render_template("bigscreen.html", session_id=session_id)
@@ -494,25 +460,14 @@ def create_app():
 
     @app.post("/api/watch/rooms")
     def create_watch_room():
-        payload = request.get_json(force=True, silent=True) or {}
-        try:
-            alias = validate_room_alias(payload.get("alias", ""))
-        except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
         room_id = secrets.token_urlsafe(SHARE_ID_BYTES)
         WATCH_ROOMS[room_id] = {
             "id": room_id,
-            "alias": alias,
             "createdAt": int(time.time()),
             "metadata": None,
             "participants": {},
         }
-        if alias:
-            previous_room_id = WATCH_ROOM_ALIASES.get(alias)
-            if previous_room_id in WATCH_ROOMS:
-                WATCH_ROOMS[previous_room_id]["alias"] = ""
-            WATCH_ROOM_ALIASES[alias] = room_id
-        return jsonify({"roomId": room_id, "alias": alias, "joinPath": url_for("join_alias", alias=alias) if alias else ""})
+        return jsonify({"roomId": room_id})
 
     @app.put("/api/watch/rooms/<room_id>/metadata")
     def put_watch_metadata(room_id: str):
@@ -543,7 +498,6 @@ def create_app():
         return jsonify(
             {
                 "id": room["id"],
-                "alias": room.get("alias", ""),
                 "createdAt": room["createdAt"],
                 "metadata": room["metadata"],
                 "participants": participants,

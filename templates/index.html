@@ -6,18 +6,18 @@
     <title>File Pipe</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
-    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css', v='17') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css', v='19') }}">
     <script defer src="https://cdn.jsdelivr.net/npm/spark-md5@3.0.2/spark-md5.min.js"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
     <script defer src="{{ url_for('static', filename='xr-player.js', v='2') }}"></script>
-    <script defer src="{{ url_for('static', filename='app.js', v='43') }}"></script>
+    <script defer src="{{ url_for('static', filename='app.js', v='44') }}"></script>
     <script defer src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
   </head>
   <body class="app-body" x-data="filePipe" x-init="initApp()">
     <header class="app-header">
-      <div class="container-fluid py-3">
+      <div class="container-fluid app-header-inner">
         <div class="d-flex flex-column flex-lg-row gap-3 align-items-lg-center justify-content-between">
           <div class="brand-lockup">
             <div class="brand-mark"><i class="bi bi-bezier2"></i></div>
@@ -47,8 +47,8 @@
               </button>
             </div>
 
-            <form method="post" action="{{ url_for('logout') }}">
-              <button class="btn btn-outline-secondary" type="submit">
+            <form class="header-action-form" method="post" action="{{ url_for('logout') }}">
+              <button class="btn btn-outline-secondary header-action-button" type="submit">
                 <i class="bi bi-box-arrow-right"></i>
                 Sign out
               </button>
@@ -115,7 +115,7 @@
       </ul>
 
       <div class="tab-content app-surface">
-        <section class="tab-pane fade show active p-3 p-lg-4" id="explorer-pane" role="tabpanel" aria-labelledby="explorer-tab" tabindex="0">
+        <section class="tab-pane fade show active pane-section" id="explorer-pane" role="tabpanel" aria-labelledby="explorer-tab" tabindex="0">
           <div class="row g-4">
             <div class="col-12 col-xl-8">
               <div class="d-flex flex-column flex-md-row gap-2 align-items-md-center justify-content-between mb-3">
@@ -152,11 +152,19 @@
 	              </template>
 
 	              <template x-if="transcodeStatus">
-	                <div class="alert alert-info py-2" x-text="transcodeStatus"></div>
+	                <div class="alert alert-info py-2">
+	                  <div class="d-flex justify-content-between gap-3">
+	                    <span x-text="transcodeStatus"></span>
+	                    <span x-show="transcodeProgress" x-text="`${transcodeProgress}%`"></span>
+	                  </div>
+	                  <div class="progress mt-2" x-show="transcodeProgress">
+	                    <div class="progress-bar" :style="`width: ${transcodeProgress}%`"></div>
+	                  </div>
+	                </div>
 	              </template>
 
               <template x-if="!selectedServer">
-                <div class="empty-state border rounded p-5 text-center text-secondary">
+                <div class="empty-state border rounded text-center text-secondary">
                   <i class="bi bi-hdd-network display-5 d-block mb-3"></i>
                   <strong class="d-block text-body mb-1">Choose a media source</strong>
                   <span>Unlock the connector, refresh sources, then select a DLNA server or served folder.</span>
@@ -173,7 +181,7 @@
               </template>
 
               <template x-if="selectedServer && !loadingItems && items.length === 0">
-                <div class="empty-state border rounded p-5 text-center text-secondary">
+                <div class="empty-state border rounded text-center text-secondary">
                   <i class="bi bi-folder2-open display-6 d-block mb-3"></i>
                   <strong class="d-block text-body mb-1">No items here</strong>
                   <span>This folder did not return any browsable media.</span>
@@ -196,6 +204,12 @@
                         <span class="min-w-0">
                           <strong class="d-block text-body text-truncate" x-text="item.title"></strong>
                           <small class="text-secondary text-truncate d-block" x-text="item.class || item.resources?.[0]?.protocolInfo || ''"></small>
+                          <template x-if="mediaStatusForItem(item)">
+                            <span class="media-status-pill" :title="mediaStatusForItem(item).label">
+                              <i class="bi" :class="[mediaStatusForItem(item).icon, mediaStatusForItem(item).className]"></i>
+                              <span x-text="mediaStatusForItem(item).label"></span>
+                            </span>
+                          </template>
                         </span>
                       </button>
 
@@ -289,7 +303,7 @@
           </div>
         </section>
 
-        <section class="tab-pane fade p-3 p-lg-4" id="sharing-pane" role="tabpanel" aria-labelledby="sharing-tab" tabindex="0">
+        <section class="tab-pane fade pane-section" id="sharing-pane" role="tabpanel" aria-labelledby="sharing-tab" tabindex="0">
           <div class="d-flex flex-column flex-lg-row gap-3 align-items-lg-center justify-content-between mb-3">
             <div>
               <h2 class="h5 mb-1">Sharing options</h2>
@@ -311,7 +325,15 @@
 	          </template>
 
 	          <template x-if="transcodeStatus">
-	            <div class="alert alert-info py-2" x-text="transcodeStatus"></div>
+	            <div class="alert alert-info py-2">
+	              <div class="d-flex justify-content-between gap-3">
+	                <span x-text="transcodeStatus"></span>
+	                <span x-show="transcodeProgress" x-text="`${transcodeProgress}%`"></span>
+	              </div>
+	              <div class="progress mt-2" x-show="transcodeProgress">
+	                <div class="progress-bar" :style="`width: ${transcodeProgress}%`"></div>
+	              </div>
+	            </div>
 	          </template>
 
           <ul class="nav nav-pills mb-3" id="shareOptionTabs" role="tablist">
@@ -355,6 +377,12 @@
                               <span class="min-w-0">
                                 <strong class="d-block text-body text-truncate" x-text="item.title"></strong>
                                 <small class="text-secondary text-truncate d-block" x-text="item.type === 'container' ? 'Folder' : formatBytes(Number(item.resources?.[0]?.size || 0))"></small>
+                                <template x-if="mediaStatusForItem(item)">
+                                  <span class="media-status-pill" :title="mediaStatusForItem(item).label">
+                                    <i class="bi" :class="[mediaStatusForItem(item).icon, mediaStatusForItem(item).className]"></i>
+                                    <span x-text="mediaStatusForItem(item).label"></span>
+                                  </span>
+                                </template>
                               </span>
                             </button>
 	                            <template x-if="item.type === 'item' && item.resources && item.resources.length">
@@ -479,7 +507,7 @@
           </div>
         </section>
 
-        <section class="tab-pane fade p-3 p-lg-4" id="player-pane" role="tabpanel" aria-labelledby="player-tab" tabindex="0">
+        <section class="tab-pane fade pane-section" id="player-pane" role="tabpanel" aria-labelledby="player-tab" tabindex="0">
           <div class="row g-4 xr-theater-layout">
             <div class="col-12 col-xl-8 xr-video-column">
               <div class="card xr-video-card">
@@ -507,14 +535,14 @@
                 </div>
                 <div class="card-body">
                   <template x-if="playerLoading">
-                    <div class="empty-state border rounded p-5 text-center text-secondary">
+                    <div class="empty-state border rounded text-center text-secondary">
                       <span class="spinner-border text-primary mb-3" aria-hidden="true"></span>
                       <strong class="d-block text-body mb-1">Loading video</strong>
                       <span x-text="playerTitle ? `Preparing ${playerTitle}` : 'Preparing the player.'"></span>
                     </div>
                   </template>
                   <template x-if="!playerUrl && !playerLoading">
-                    <div class="empty-state border rounded p-5 text-center text-secondary">
+                    <div class="empty-state border rounded text-center text-secondary">
                       <i class="bi bi-play-btn display-5 d-block mb-3"></i>
                       <strong class="d-block text-body mb-1">Player is ready</strong>
                       <span>Launch a video from Explorer or Sharing to start a watch room.</span>
@@ -540,15 +568,7 @@
                 <div class="card-header fw-semibold">Watch room</div>
                 <div class="card-body">
                   <template x-if="!playerRoomLink">
-                    <div>
-                      <label class="form-label">Room alias</label>
-                      <div class="input-group">
-                        <span class="input-group-text">/join/</span>
-                        <input class="form-control" type="text" x-model="playerRoomAlias" maxlength="64" placeholder="movie-night" autocomplete="off" autocapitalize="none" spellcheck="false">
-                      </div>
-                      <div class="form-text">Optional. Use letters, numbers, hyphens, or underscores.</div>
-                      <p class="text-secondary mb-0 mt-3">Create a room to generate an encrypted watch link. Keep this page open while others watch.</p>
-                    </div>
+                    <p class="text-secondary mb-0">Create a room to generate an encrypted watch link and QR code. Keep this page open while others watch.</p>
                   </template>
                   <template x-if="playerRoomLink">
                     <div>
@@ -560,21 +580,10 @@
                         </button>
                       </div>
                       <div class="form-text">The key after # is required to decrypt the video stream and metadata.</div>
-                      <template x-if="playerRoomAliasLink">
-                        <div class="mt-3">
-                          <label class="form-label">Alias link</label>
-                          <div class="input-group">
-                            <input class="form-control" type="text" readonly :value="playerRoomAliasLink" @focus="$event.target.select()">
-                            <button class="btn btn-success" type="button" @click="copyToClipboard(playerRoomAliasLink)">
-                              <i class="bi bi-clipboard"></i> Copy
-                            </button>
-                          </div>
-                          <div class="form-text">Shortcut to the same room for devices where typing a long URL is awkward.</div>
-                        </div>
-                      </template>
                       <template x-if="playerRoomQrDataUrl">
                         <div class="room-qr-panel mt-3">
                           <img class="room-qr-code" :src="playerRoomQrDataUrl" alt="Watch room QR code">
+                          <div class="form-text mt-2">Scan to open the same encrypted watch link.</div>
                         </div>
                       </template>
                     </div>
@@ -719,7 +728,7 @@
           </div>
         </section>
 
-        <section class="tab-pane fade p-3 p-lg-4" id="activity-pane" role="tabpanel" aria-labelledby="activity-tab" tabindex="0">
+        <section class="tab-pane fade pane-section" id="activity-pane" role="tabpanel" aria-labelledby="activity-tab" tabindex="0">
           <div class="row g-4">
             <div class="col-12 col-lg-5">
               <div class="card h-100">
@@ -788,7 +797,7 @@
           </div>
         </section>
 
-        <section class="tab-pane fade p-3 p-lg-4" id="connector-pane" role="tabpanel" aria-labelledby="connector-tab" tabindex="0">
+        <section class="tab-pane fade pane-section" id="connector-pane" role="tabpanel" aria-labelledby="connector-tab" tabindex="0">
           <div class="row g-4">
             <div class="col-12 col-lg-5">
               <div class="card">

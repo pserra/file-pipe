@@ -21,7 +21,9 @@ document.addEventListener("alpine:init", () => {
     loadingItems: false,
     sharingItemId: null,
     transcodeItemId: null,
+    transcodeProgress: 0,
     transcodeStatus: "",
+    fileMediaStatus: {},
     transcodePlaybackMode: localStorage.getItem("filePipeTranscodePlaybackMode") || "full",
     shareProgress: 0,
     shareStatus: "",
@@ -43,8 +45,6 @@ document.addEventListener("alpine:init", () => {
     hostHls: null,
     hostXrPlayer: null,
     playerRoomLink: "",
-    playerRoomAlias: localStorage.getItem("filePipePlayerRoomAlias") || "",
-    playerRoomAliasLink: "",
     playerRoomQrDataUrl: "",
     playerRoomId: "",
     playerStatus: "",
@@ -322,6 +322,7 @@ document.addEventListener("alpine:init", () => {
         this.currentPathLabel = payload.pathLabel || "";
         this.items = payload.items || [];
         this.saveLastBrowseSelection();
+        this.refreshVisibleMediaStatus();
       } catch (error) {
         this.error = error.message;
       } finally {
@@ -333,6 +334,47 @@ document.addEventListener("alpine:init", () => {
       if (item.type !== "container") return;
       this.history.push(this.currentObjectId);
       await this.browse(item.id);
+    },
+
+    async refreshVisibleMediaStatus() {
+      const videos = this.items.filter((item) => item.type === "item" && this.isVideoItem(item) && item.resources?.[0]?.proxyPath);
+      await Promise.all(
+        videos.slice(0, 40).map(async (item) => {
+          const resource = item.resources[0];
+          const key = this.mediaStatusKey(item);
+          this.fileMediaStatus = { ...this.fileMediaStatus, [key]: { status: "loading", label: "Checking media status", icon: "bi-hourglass-split", className: "text-secondary" } };
+          try {
+            const mediaInfo = await this.request(`${resource.proxyPath}/media-info`);
+            this.fileMediaStatus = { ...this.fileMediaStatus, [key]: this.mediaStatusFromInfo(mediaInfo) };
+          } catch (error) {
+            this.fileMediaStatus = { ...this.fileMediaStatus, [key]: { status: "unknown", label: "Media status unavailable", icon: "bi-question-circle", className: "text-secondary" } };
+          }
+        }),
+      );
+    },
+
+    mediaStatusKey(item) {
+      return item.resources?.[0]?.id || item.id;
+    },
+
+    mediaStatusFromInfo(mediaInfo) {
+      if (mediaInfo.transcodedCached) {
+        return { status: "cached", label: "Browser-safe transcode cached", icon: "bi-cpu-fill", className: "text-success" };
+      }
+      if (mediaInfo.ok && !mediaInfo.shouldTranscode) {
+        return { status: "playable", label: "Browser-playable original", icon: "bi-play-circle-fill", className: "text-success" };
+      }
+      if (mediaInfo.ok && mediaInfo.shouldTranscode && mediaInfo.ffmpegAvailable) {
+        return { status: "needsTranscode", label: "Needs browser-safe transcode", icon: "bi-cpu", className: "text-warning" };
+      }
+      if (mediaInfo.ok && mediaInfo.shouldTranscode) {
+        return { status: "notPlayable", label: "Needs transcode, but ffmpeg is unavailable", icon: "bi-exclamation-triangle-fill", className: "text-danger" };
+      }
+      return { status: "unknown", label: mediaInfo.error || "Media status unavailable", icon: "bi-question-circle", className: "text-secondary" };
+    },
+
+    mediaStatusForItem(item) {
+      return this.fileMediaStatus[this.mediaStatusKey(item)] || null;
     },
 
     savedBrowseSelection() {
@@ -428,19 +470,53 @@ document.addEventListener("alpine:init", () => {
       }
 
       this.transcodeItemId = item.id;
+      this.transcodeProgress = 0;
       this.transcodeStatus = `Preparing browser-safe transcode for ${item.title}...`;
       this.error = "";
+      const poller = this.pollTranscodeProgress(resource, item.title, "list");
       try {
         const payload = await this.request(`${resource.proxyPath}/transcode`, {
           method: "POST",
         });
+        this.transcodeProgress = 100;
         this.transcodeStatus = `${item.title} is transcoded and cached (${this.formatBytes(payload.size || 0)}).`;
+        this.fileMediaStatus = {
+          ...this.fileMediaStatus,
+          [this.mediaStatusKey(item)]: { status: "cached", label: "Browser-safe transcode cached", icon: "bi-cpu-fill", className: "text-success" },
+        };
       } catch (error) {
         this.error = error.message;
         this.transcodeStatus = "";
       } finally {
+        poller.stop();
         this.transcodeItemId = null;
       }
+    },
+
+    pollTranscodeProgress(resource, title, target = "list") {
+      let stopped = false;
+      const run = async () => {
+        while (!stopped) {
+          try {
+            const progress = await this.request(`${resource.proxyPath}/transcode-status`);
+            const percent = Number(progress.percent || 0);
+            if (percent > 0) {
+              const status = progress.status === "finalizing" ? "Finalizing" : "Transcoding";
+              if (target === "player") {
+                this.playerStatus = `${status} ${title}... ${percent}%`;
+              } else {
+                this.transcodeProgress = percent;
+                this.transcodeStatus = `${status} ${title}... ${percent}%`;
+              }
+            }
+          } catch (error) {
+            // Progress is best-effort; the main transcode request reports final errors.
+          }
+          await sleep(1000);
+        }
+      };
+      run();
+      return { stop: () => { stopped = true; } };
     },
 
     async setTranscodePlaybackMode(mode) {
@@ -756,7 +832,13 @@ document.addEventListener("alpine:init", () => {
     async launchFullTranscodedConnectorVideo(item, resource, mediaInfo, transcodeParts) {
       const transcodePath = `${resource.proxyPath}/transcoded`;
       this.playerStatus = `Transcoding ${transcodeParts.join(" and ")}...`;
-      const transcodeInfo = await this.request(`${resource.proxyPath}/transcoded-info`);
+      const poller = this.pollTranscodeProgress(resource, item.title, "player");
+      let transcodeInfo;
+      try {
+        transcodeInfo = await this.request(`${resource.proxyPath}/transcoded-info`);
+      } finally {
+        poller.stop();
+      }
       const transcodeSize = Number(transcodeInfo.size || 0);
       this.teardownHostHlsPlayer();
       this.playerUrl = this.connectorDirectUrl(transcodePath);
@@ -999,7 +1081,6 @@ document.addEventListener("alpine:init", () => {
         this.removeHostVoiceElement(peer.id);
       }
       this.playerRoomLink = "";
-      this.playerRoomAliasLink = "";
       this.playerRoomQrDataUrl = "";
       this.playerRoomId = "";
       this.playerStatus = "";
@@ -1431,16 +1512,12 @@ document.addEventListener("alpine:init", () => {
         const rawKey = await crypto.subtle.exportKey("raw", this.playerRoomKey);
         this.playerRoomKeyText = base64UrlEncode(new Uint8Array(rawKey));
 
-        const roomAlias = this.normalizedRoomAlias();
         const createdResponse = await fetch("/api/watch/rooms", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ alias: roomAlias }),
         });
         const created = await createdResponse.json().catch(() => ({}));
         if (!createdResponse.ok) throw new Error(created.error || `Could not create watch room: ${createdResponse.status}`);
         if (!created.roomId) throw new Error("Could not create watch room.");
-        if (roomAlias) localStorage.setItem("filePipePlayerRoomAlias", roomAlias);
 
         this.playerRoomMetadata = {
           name: this.playerSource.title,
@@ -1475,9 +1552,6 @@ document.addEventListener("alpine:init", () => {
         this.playerRoomId = created.roomId;
         this.playerMd5 = this.playerRoomMetadata.md5;
         this.playerRoomLink = `${window.location.origin}/watch/${created.roomId}#key=${this.playerRoomKeyText}`;
-        this.playerRoomAliasLink = created.alias
-          ? `${window.location.origin}/join/${created.alias}#key=${this.playerRoomKeyText}`
-          : "";
         await this.renderPlayerRoomQr();
         this.playerStatus = "Watch room ready. Keep this tab open while viewers watch.";
         this.pollWatchRoomParticipants();
@@ -1489,16 +1563,9 @@ document.addEventListener("alpine:init", () => {
       }
     },
 
-    normalizedRoomAlias() {
-      return (this.playerRoomAlias || "")
-        .trim()
-        .toLowerCase()
-        .replace(/\s+/g, "-");
-    },
-
     async renderPlayerRoomQr() {
       this.playerRoomQrDataUrl = "";
-      const value = this.playerRoomAliasLink || this.playerRoomLink;
+      const value = this.playerRoomLink;
       if (!value || !window.QRCode?.toDataURL) return;
       this.playerRoomQrDataUrl = await window.QRCode.toDataURL(value, {
         errorCorrectionLevel: "M",
