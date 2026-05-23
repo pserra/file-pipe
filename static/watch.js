@@ -615,7 +615,7 @@ document.addEventListener("alpine:init", () => {
         return;
       }
       if (!this.acknowledgementAccepted) this.acknowledgementAccepted = true;
-      if (!this.metadata?.md5) {
+      if (!this.metadata?.md5 && this.metadata?.checksumKind !== "original-source") {
         this.error = "The host has not published an MD5 for this video yet.";
         this.logWatchEvent("video-request-blocked", "Missing MD5 metadata.");
         return;
@@ -792,7 +792,7 @@ document.addEventListener("alpine:init", () => {
     },
 
     receiveDisabledReason() {
-      if (!this.metadata?.md5) return "Waiting for the host to publish the required MD5 checksum.";
+      if (!this.metadata?.md5 && this.metadata?.checksumKind !== "original-source") return "Waiting for the host to publish the required MD5 checksum.";
       if (!this.acknowledgementAccepted) return "Check the acknowledgement box before starting the video.";
       if (this.pendingVideoRequest) return "Waiting for the host peer connection to open. File Pipe will retry automatically; click Retry to force it now.";
       if (!this.channelReady) return "You can request the video now; File Pipe will start it when the host connection opens.";

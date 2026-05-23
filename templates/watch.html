@@ -10,7 +10,7 @@
     <script defer src="{{ local_static_or_cdn('vendor/spark-md5/spark-md5.min.js', 'https://cdn.jsdelivr.net/npm/spark-md5@3.0.2/spark-md5.min.js') }}"></script>
     <script defer src="{{ local_static_or_cdn('vendor/three/three.min.js', 'https://cdn.jsdelivr.net/npm/three@0.160.1/build/three.min.js') }}"></script>
     <script defer src="{{ url_for('static', filename='xr-player.js', v='3') }}"></script>
-    <script defer src="{{ url_for('static', filename='watch.js', v='31') }}"></script>
+    <script defer src="{{ url_for('static', filename='watch.js', v='32') }}"></script>
     <script defer src="{{ local_static_or_cdn('vendor/alpinejs/cdn.min.js', 'https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js') }}"></script>
   </head>
   <body class="app-body" x-data="watchRoom('{{ room_id }}')" x-init="initWatchRoom()">
@@ -76,7 +76,7 @@
                       <dt class="col-sm-3">Type</dt>
                       <dd class="col-sm-9" x-text="metadata.type || 'video/mp4'"></dd>
                       <dt class="col-sm-3">MD5</dt>
-                      <dd class="col-sm-9 font-monospace text-break" x-text="metadata.md5 || 'Unavailable'"></dd>
+                      <dd class="col-sm-9 font-monospace text-break" x-text="metadata.md5 || (metadata.checksumKind === 'original-source' ? 'Progressive transcode; ranges are verified during playback' : 'Unavailable')"></dd>
                     </dl>
                     <button class="btn btn-primary mt-3" type="button" @click="requestVideo()">
                       <i class="bi bi-broadcast"></i>

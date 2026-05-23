@@ -1583,24 +1583,12 @@ document.addEventListener("alpine:init", () => {
     async getPlayerSourceChecksum(label, onProgress = null) {
       if (this.playerSource?.progressiveTranscode) {
         if (onProgress) onProgress(Math.max(1, Number(this.playerTranscodeAvailablePercent || 0)));
-        let originalMd5 = "";
-        let originalSize = Number(this.playerSource.estimatedFinalSize || this.playerSource.size || 0);
-        const originalResource = this.playerConnectorLaunch?.resource;
-        if (originalResource?.proxyPath) {
-          try {
-            const checksum = await this.request(`${originalResource.proxyPath}/checksum`);
-            originalMd5 = checksum?.md5 || "";
-            originalSize = Number(checksum?.size || originalSize || 0);
-          } catch (error) {
-            this.playerStatus = `Could not get original checksum for ${label}; continuing with provisional transcode metadata.`;
-          }
-        }
         return {
-          md5: originalMd5,
+          md5: "",
           totalBytes: Number(this.playerSource.estimatedFinalSize || this.playerSource.size || 0),
-          originalBytes: originalSize,
+          originalBytes: Number(this.playerSource.estimatedFinalSize || this.playerSource.size || 0),
           provisional: true,
-          source: "original-source",
+          source: "progressive-transcode",
         };
       }
       if (this.playerSource?.checksumPath) {
@@ -1724,9 +1712,10 @@ document.addEventListener("alpine:init", () => {
         if (!created.roomId) throw new Error("Could not create watch room.");
 
         this.playerRoomId = created.roomId;
-        await this.publishCurrentWatchRoomMetadata("viewer acknowledgement");
         this.playerRoomLink = `${window.location.origin}/watch/${created.roomId}#key=${this.playerRoomKeyText}`;
         await this.renderPlayerRoomQr();
+        this.playerStatus = "Watch room link ready. Publishing stream metadata...";
+        await this.publishCurrentWatchRoomMetadata("viewer acknowledgement");
         this.playerStatus = "Watch room ready. Keep this tab open while viewers watch.";
         this.pollWatchRoomParticipants();
       } catch (error) {
