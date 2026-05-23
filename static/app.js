@@ -66,6 +66,7 @@ document.addEventListener("alpine:init", () => {
     playerRoomKey: null,
     playerRoomKeyText: "",
     playerRoomMetadata: null,
+    playerRoomSource: null,
     playerPollActive: false,
     playerPollToken: 0,
     playerRoomCreating: false,
@@ -1002,30 +1003,84 @@ document.addEventListener("alpine:init", () => {
       this.showBootstrapTab("player-tab");
     },
 
+    hlsWatchSourceFromConnector(item, resource, mediaInfo, transcodeParts, hlsInfo) {
+      const playlistPath = hlsInfo.playlistPath || `${resource.proxyPath}/hls/playlist.m3u8`;
+      const segmentPath = (index) => `${resource.proxyPath}/hls/segments/${Number(index || 0)}.ts`;
+      return {
+        title: item.title,
+        type: "application/vnd.apple.mpegurl",
+        size: Number(mediaInfo?.size || hlsInfo?.mediaInfo?.size || resource.size || 0),
+        sourceLabel: `${this.sourceLabel(this.selectedServer)} live segmented transcode`,
+        mediaInfo: hlsInfo.mediaInfo || mediaInfo,
+        playbackProfile: {
+          sourceKind: "hls-live",
+          containerType: "application/vnd.apple.mpegurl",
+          videoCodec: "h264",
+          audioCodec: "aac",
+          universal: false,
+        },
+        hlsLive: true,
+        hlsInfo: {
+          duration: Number(hlsInfo.duration || mediaInfo?.duration || 0),
+          segmentDuration: Number(hlsInfo.segmentDuration || 8),
+          segmentCount: Number(hlsInfo.segmentCount || 0),
+        },
+        readHlsSegment: async (segmentIndex) => {
+          const response = await fetch(`${this.connectorUrl}${segmentPath(segmentIndex)}`, {
+            headers: this.connectorHeaders(),
+          });
+          if (!response.ok) throw new Error(`Connector returned ${response.status} for HLS segment ${Number(segmentIndex) + 1}.`);
+          return {
+            bytes: await response.arrayBuffer(),
+            contentType: response.headers.get("Content-Type") || "video/mp2t",
+          };
+        },
+        playlistPath,
+        playlistUrl: this.connectorDirectUrl(playlistPath),
+        transcodeParts,
+      };
+    },
+
+    async liveWatchSourceForCurrentPlayer() {
+      if (this.playerSource?.readHlsSegment) return this.playerSource;
+      const launch = this.playerConnectorLaunch;
+      if (!launch?.resource?.proxyPath || !launch?.item) {
+        throw new Error("Live stream watch links are available for videos launched from the connector with ffmpeg support.");
+      }
+      if (launch.mediaInfo && launch.mediaInfo.ffmpegAvailable === false) {
+        throw new Error("Live stream watch links require ffmpeg in the local connector.");
+      }
+      const hlsInfo = await this.request(`${launch.resource.proxyPath}/hls-info`);
+      const transcodeParts = launch.transcodeParts?.length ? launch.transcodeParts : ["video to H.264/AAC"];
+      return this.hlsWatchSourceFromConnector(
+        launch.item,
+        launch.resource,
+        hlsInfo.mediaInfo || launch.mediaInfo,
+        transcodeParts,
+        hlsInfo,
+      );
+    },
+
+    canCreateLiveWatchRoom() {
+      return Boolean(
+        this.playerSource?.readHlsSegment
+        || (this.playerConnectorLaunch?.resource?.proxyPath && this.playerConnectorLaunch?.mediaInfo?.ffmpegAvailable !== false),
+      );
+    },
+
     async launchSegmentedConnectorVideo(item, resource, mediaInfo, transcodeParts) {
       const hlsInfo = await this.request(`${resource.proxyPath}/hls-info`);
-      const playlistPath = hlsInfo.playlistPath || `${resource.proxyPath}/hls/playlist.m3u8`;
-      const playlistUrl = this.connectorDirectUrl(playlistPath);
+      const hlsSource = this.hlsWatchSourceFromConnector(item, resource, mediaInfo, transcodeParts, hlsInfo);
+      const playlistUrl = hlsSource.playlistUrl;
       this.teardownHostHlsPlayer();
       this.playerUrl = playlistUrl;
       this.playerType = "application/vnd.apple.mpegurl";
       this.playerTitle = item.title;
       this.playerTranscodeComplete = false;
       this.playerSource = {
-        title: item.title,
-        type: "application/vnd.apple.mpegurl",
-        size: Number(mediaInfo?.size || hlsInfo?.mediaInfo?.size || resource.size || 0),
-        sourceLabel: `${this.sourceLabel(this.selectedServer)} video segmented transcode`,
-        mediaInfo: hlsInfo.mediaInfo || mediaInfo,
-        playbackProfile: {
-          sourceKind: "hls-segmented",
-          containerType: "application/vnd.apple.mpegurl",
-          videoCodec: "h264",
-          audioCodec: "aac",
-          universal: false,
-        },
+        ...hlsSource,
         hls: true,
-        shareDisabledReason: "Segmented playback is a local preview mode. Switch Transcode to Stable MP4 cache before creating watch or Bigscreen links.",
+        shareDisabledReason: "Use Live stream watch link for participants. Bigscreen still requires Stable MP4 or a random-access video source.",
       };
       this.playerStatus = `Segmented player ready with browser-safe ${transcodeParts.join(" and ")}.`;
       setTimeout(() => this.attachHostHlsPlayer(), 0);
@@ -1135,8 +1190,8 @@ document.addEventListener("alpine:init", () => {
             arrayBuffer: () => blob.arrayBuffer(),
           }),
         };
-        this.playerConnectorLaunch = mediaInfo?.shouldTranscode && mediaInfo.ffmpegAvailable
-          ? { item, resource, mediaInfo, transcodeParts: fallbackTranscodeParts.length ? fallbackTranscodeParts : ["video to H.264"] }
+        this.playerConnectorLaunch = mediaInfo?.ffmpegAvailable
+          ? { item, resource, mediaInfo, transcodeParts: fallbackTranscodeParts.length ? fallbackTranscodeParts : ["video to H.264/AAC"] }
           : null;
         if (playbackDecision.shouldTranscode && !mediaInfo.ffmpegAvailable) {
           this.playerStatus = "Video loaded without audio transcoding because ffmpeg is not available to the connector.";
@@ -1242,6 +1297,7 @@ document.addEventListener("alpine:init", () => {
       this.playerRoomKey = null;
       this.playerRoomKeyText = "";
       this.playerRoomMetadata = null;
+      this.playerRoomSource = null;
       if (this.qrModalUrl) this.closeQrModal();
     },
 
@@ -1608,25 +1664,25 @@ document.addEventListener("alpine:init", () => {
       }
     },
 
-    async getPlayerSourceChecksum(label, onProgress = null) {
-      if (this.playerSource?.progressiveTranscode) {
+    async getPlayerSourceChecksum(label, onProgress = null, source = this.playerSource) {
+      if (source?.progressiveTranscode) {
         if (onProgress) onProgress(Math.max(1, Number(this.playerTranscodeAvailablePercent || 0)));
         return {
           md5: "",
-          totalBytes: Number(this.playerSource.estimatedFinalSize || this.playerSource.size || 0),
-          originalBytes: Number(this.playerSource.estimatedFinalSize || this.playerSource.size || 0),
+          totalBytes: Number(source.estimatedFinalSize || source.size || 0),
+          originalBytes: Number(source.estimatedFinalSize || source.size || 0),
           provisional: true,
           source: "progressive-transcode",
         };
       }
-      if (this.playerSource?.checksumPath) {
+      if (source?.checksumPath) {
         try {
-          const checksum = await this.request(this.playerSource.checksumPath);
+          const checksum = await this.request(source.checksumPath);
           if (checksum?.md5) {
             if (onProgress) onProgress(100);
             return {
               md5: checksum.md5,
-              totalBytes: Number(checksum.size || this.playerSource.size || 0),
+              totalBytes: Number(checksum.size || source.size || 0),
               source: "connector",
             };
           }
@@ -1636,39 +1692,54 @@ document.addEventListener("alpine:init", () => {
         }
       }
 
-      const hashSource = await this.playerSource.openStream();
-      return computeSourceMd5(hashSource, this.playerSource.size, (bytesRead, totalBytes) => {
+      const hashSource = await source.openStream();
+      return computeSourceMd5(hashSource, source.size, (bytesRead, totalBytes) => {
         if (onProgress) onProgress(totalBytes ? Math.round((bytesRead / totalBytes) * 100) : 0);
       });
     },
 
-    async publishCurrentWatchRoomMetadata(label = "viewer acknowledgement") {
-      if (!this.playerRoomId || !this.playerRoomKey || !this.playerSource) {
+    async publishCurrentWatchRoomMetadata(label = "viewer acknowledgement", source = this.playerSource) {
+      if (!this.playerRoomId || !this.playerRoomKey || !source) {
         throw new Error("Create a watch room before publishing source metadata.");
       }
-      const hashResult = await this.getPlayerSourceChecksum(label, (progress) => {
-        this.playerShareProgress = progress;
-      });
+      const isHlsLive = Boolean(source.hlsLive && source.readHlsSegment);
+      const hashResult = isHlsLive
+        ? {
+            md5: "",
+            totalBytes: Number(source.size || 0),
+            originalBytes: Number(source.size || 0),
+            source: "hls-live",
+          }
+        : await this.getPlayerSourceChecksum(label, (progress) => {
+            this.playerShareProgress = progress;
+          }, source);
       this.playerSourceVersion += 1;
+      this.playerRoomSource = source;
       this.playerRoomMetadata = {
-        name: this.playerSource.title,
-        type: this.playerSource.type || "video/mp4",
+        name: source.title,
+        type: source.type || "video/mp4",
         size: hashResult.totalBytes,
         md5: hashResult.md5,
         originalMd5: hashResult.provisional ? hashResult.md5 : "",
         originalSize: hashResult.originalBytes || 0,
-        checksumKind: hashResult.provisional ? "original-source" : "stream",
+        checksumKind: isHlsLive ? "hls-segments" : (hashResult.provisional ? "original-source" : "stream"),
         provisional: Boolean(hashResult.provisional),
-        source: this.playerSource.sourceLabel,
-        mode: "Encrypted WebRTC watch room",
+        source: source.sourceLabel,
+        mode: isHlsLive ? "Encrypted WebRTC live stream" : "Encrypted WebRTC watch room",
         sharedAt: new Date().toISOString(),
-        playbackProfile: this.playerSource.playbackProfile || null,
-        mediaInfo: mediaInfoSummary(this.playerSource.mediaInfo),
+        playbackProfile: source.playbackProfile || null,
+        mediaInfo: mediaInfoSummary(source.mediaInfo),
         hostCapabilities: this.hostMediaCapabilities,
         sourceVersion: this.playerSourceVersion,
-        progressiveTranscode: this.playerSource.progressiveTranscode ? {
+        streamMode: isHlsLive ? "hls" : "range",
+        hls: isHlsLive ? {
+          duration: Number(source.hlsInfo?.duration || source.mediaInfo?.duration || 0),
+          segmentDuration: Number(source.hlsInfo?.segmentDuration || 8),
+          segmentCount: Number(source.hlsInfo?.segmentCount || 0),
+        } : null,
+        progressiveTranscode: source.progressiveTranscode ? {
           percent: Number(this.playerTranscodeAvailablePercent || 0),
-          availableBytes: Number(this.playerSource.transcodedAvailableBytes || this.playerSource.size || 0),
+          availableBytes: Number(source.transcodedAvailableBytes || source.size || 0),
           complete: false,
         } : null,
       };
@@ -1741,6 +1812,52 @@ document.addEventListener("alpine:init", () => {
         this.playerStatus = "Watch room link ready. Publishing stream metadata...";
         await this.publishCurrentWatchRoomMetadata("viewer acknowledgement");
         this.playerStatus = "Watch room ready. Keep this tab open while viewers watch.";
+        this.pollWatchRoomParticipants();
+      } catch (error) {
+        this.error = error.message;
+        this.playerStatus = "";
+      } finally {
+        this.playerRoomCreating = false;
+      }
+    },
+
+    async createLiveWatchRoom() {
+      if (!this.playerSource) {
+        this.error = "Load a video in the player first.";
+        return;
+      }
+      if (this.playerRoomCreating) return;
+      if (!hasWebCrypto()) {
+        this.error = webCryptoRequiredMessage("Encrypted live watch rooms");
+        return;
+      }
+
+      this.error = "";
+      if (this.playerRoomId || Object.keys(this.playerPeers).length > 0) {
+        this.resetWatchRoom();
+      }
+      this.playerRoomCreating = true;
+      this.playerStatus = "Preparing live stream watch link...";
+      try {
+        const liveSource = await this.liveWatchSourceForCurrentPlayer();
+        this.playerRoomKey = await crypto.subtle.generateKey(
+          { name: "AES-GCM", length: 256 },
+          true,
+          ["encrypt", "decrypt"],
+        );
+        const rawKey = await crypto.subtle.exportKey("raw", this.playerRoomKey);
+        this.playerRoomKeyText = base64UrlEncode(new Uint8Array(rawKey));
+
+        const created = await this.appJson("/api/watch/rooms", { method: "POST" });
+        if (!created.roomId) throw new Error("Could not create live watch room.");
+
+        this.playerRoomId = created.roomId;
+        this.playerRoomLink = `${window.location.origin}/watch/${created.roomId}#key=${this.playerRoomKeyText}`;
+        await this.renderPlayerRoomQr();
+        this.playerShareProgress = 100;
+        this.playerStatus = "Live stream link ready. Publishing segment metadata...";
+        await this.publishCurrentWatchRoomMetadata("live stream metadata", liveSource);
+        this.playerStatus = "Live stream watch room ready. Keep this tab open while viewers watch.";
         this.pollWatchRoomParticipants();
       } catch (error) {
         this.error = error.message;
@@ -2112,6 +2229,11 @@ document.addEventListener("alpine:init", () => {
             await this.streamWatchRange(message, record);
             return;
           }
+          if (message.type === "hls-segment-request") {
+            record.status = "Live segment streaming";
+            await this.streamWatchHlsSegment(message, record);
+            return;
+          }
           if (message.type === "range-cancel") {
             record.cancelledRanges?.add(message.requestId);
             return;
@@ -2245,6 +2367,93 @@ document.addEventListener("alpine:init", () => {
       }
     },
 
+    async streamWatchHlsSegment(message, record) {
+      const channel = record.channel;
+      if (!channel || channel.readyState !== "open") return;
+      if (!this.isWatchRoomKeyReady()) {
+        sendChannelJson(channel, {
+          type: "hls-error",
+          requestId: message.requestId,
+          sourceVersion: Number(this.playerRoomMetadata?.sourceVersion || 0),
+          error: "Watch room encryption key is no longer available. Create a new live watch link.",
+        });
+        return;
+      }
+      const sourceVersion = Number(this.playerRoomMetadata?.sourceVersion || 0);
+      if (message.sourceVersion && Number(message.sourceVersion) !== sourceVersion) {
+        sendChannelJson(channel, {
+          type: "hls-error",
+          requestId: message.requestId,
+          sourceVersion: message.sourceVersion,
+          error: "The host switched video sources. Reloading the viewer stream.",
+        });
+        return;
+      }
+      const source = this.playerRoomSource || this.playerSource;
+      const requestId = message.requestId;
+      const segmentIndex = Math.max(0, Number(message.segmentIndex || 0));
+      const chunkSize = RANGE_STREAM_CHUNK_SIZE;
+      let sentBytes = 0;
+      try {
+        if (!source?.readHlsSegment) throw new Error("The current watch room source does not support live HLS segments.");
+        record.cancelledRanges?.delete(requestId);
+        const segment = await source.readHlsSegment(segmentIndex);
+        const bytes = exactArrayBuffer(segment.bytes);
+        for (let offset = 0; offset < bytes.byteLength; offset += chunkSize) {
+          if (record.cancelledRanges?.has(requestId)) break;
+          const plainChunk = bytes.slice(offset, Math.min(offset + chunkSize, bytes.byteLength));
+          const iv = crypto.getRandomValues(new Uint8Array(12));
+          const ciphertext = await crypto.subtle.encrypt(
+            { name: "AES-GCM", iv },
+            this.playerRoomKey,
+            plainChunk,
+          );
+          if (!sendChannelBinaryJson(channel, {
+            type: "hls-chunk",
+            requestId,
+            segmentIndex,
+            offset,
+            sourceVersion,
+            iv: base64UrlEncode(iv),
+          }, ciphertext)) throw dataChannelDisconnectedError();
+          if (!(await waitForDataChannelBuffer(channel))) throw dataChannelDisconnectedError();
+          sentBytes += plainChunk.byteLength;
+          record.sentBytes = (record.sentBytes || 0) + plainChunk.byteLength;
+          if (shouldUpdateChannelUi(record)) {
+            record.status = `Live segment ${segmentIndex + 1}`;
+          }
+        }
+        if (!record.cancelledRanges?.has(requestId)) {
+          if (!sendChannelJson(channel, {
+            type: "hls-done",
+            requestId,
+            segmentIndex,
+            sourceVersion,
+            sentBytes,
+            contentType: segment.contentType || "video/mp2t",
+          })) throw dataChannelDisconnectedError();
+        }
+      } catch (error) {
+        if (isDataChannelClosedError(error)) {
+          record.status = "Disconnected";
+        } else {
+          record.status = "Live segment failed";
+          this.error = error.message;
+        }
+        if (!isDataChannelClosedError(error) && isDataChannelOpen(channel)) {
+          sendChannelJson(channel, {
+            type: "hls-error",
+            requestId,
+            segmentIndex,
+            sourceVersion,
+            error: error.message,
+          });
+        }
+      } finally {
+        record.cancelledRanges?.delete(requestId);
+      }
+    },
+
     async streamWatchRange(message, record) {
       const channel = record.channel;
       if (!channel || channel.readyState !== "open") return;
@@ -2267,7 +2476,7 @@ document.addEventListener("alpine:init", () => {
         });
         return;
       }
-      const source = this.playerSource;
+      const source = this.playerRoomSource || this.playerSource;
       const totalSize = Number(this.playerRoomMetadata?.size || source?.size || 0);
       const start = Math.max(0, Number(message.start || 0));
       const end = Math.min(totalSize - 1, Number(message.end ?? totalSize - 1));
@@ -3089,7 +3298,7 @@ function detectMediaPlaybackCapabilities() {
     },
     containers: {
       mp4: canPlay(["video/mp4"]),
-      hls: canPlay(["application/vnd.apple.mpegurl"]),
+      hls: canPlay(["application/vnd.apple.mpegurl"]) || Boolean(window.Hls?.isSupported?.()),
     },
   };
 }
@@ -3169,6 +3378,9 @@ function mediaInfoSummary(mediaInfo) {
 
 function canCapabilitiesPlayProfile(capabilities, profile) {
   if (!profile || profile.universal || profile.sourceKind === "stable-mp4") return true;
+  if (profile.sourceKind === "hls-live" || String(profile.containerType || "").includes("mpegurl")) {
+    return Boolean(capabilities?.containers?.hls);
+  }
   const videoCodec = codecName(profile.videoCodec);
   if (isHevcCodec(videoCodec)) {
     return Boolean(capabilities?.videoCodecs?.hevc) && isMp4LikeContentType(profile.containerType);

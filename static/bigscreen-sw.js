@@ -51,9 +51,13 @@ async function handleBigscreenMedia(event, url) {
     return new Response("Media metadata is not ready.", { status: 503 });
   }
 
-  const client = await getRequestClient(event);
+  const client = await getRequestClient(event, kind, sessionId);
   if (!client) {
     return new Response("Player page is not available.", { status: 409 });
+  }
+
+  if (kind === "watch" && metadata.streamMode === "hls") {
+    return handleWatchHlsMedia(event, url, client, sessionId, metadata);
   }
 
   const totalSize = Number(metadata.size || 0);
@@ -99,6 +103,83 @@ async function handleBigscreenMedia(event, url) {
     status: range.partial ? 206 : 200,
     headers,
   });
+}
+
+function handleWatchHlsMedia(event, url, client, sessionId, metadata) {
+  if (url.pathname.endsWith(".m3u8")) {
+    return new Response(buildHlsPlaylist(metadata), {
+      status: 200,
+      headers: {
+        "Cache-Control": "no-store",
+        "Content-Type": "application/vnd.apple.mpegurl",
+      },
+    });
+  }
+
+  const segmentIndex = hlsSegmentIndex(url.pathname);
+  if (segmentIndex < 0) {
+    return new Response("Unknown HLS stream path.", { status: 404 });
+  }
+  const requestId = createRequestId();
+  const stream = new ReadableStream({
+    start(controller) {
+      pendingRanges.set(requestId, { controller, clientId: client.id });
+      client.postMessage({
+        type: "hls-segment-request",
+        requestId,
+        sessionId,
+        mediaKind: "watch",
+        segmentIndex,
+      });
+    },
+    cancel() {
+      pendingRanges.delete(requestId);
+      client.postMessage({ type: "range-cancel", requestId, sessionId, mediaKind: "watch" });
+    },
+  });
+
+  event.request.signal?.addEventListener("abort", () => {
+    pendingRanges.delete(requestId);
+    client.postMessage({ type: "range-cancel", requestId, sessionId, mediaKind: "watch" });
+  });
+
+  return new Response(stream, {
+    status: 200,
+    headers: {
+      "Cache-Control": "no-store",
+      "Content-Type": "video/mp2t",
+    },
+  });
+}
+
+function buildHlsPlaylist(metadata) {
+  const hls = metadata.hls || {};
+  const duration = Math.max(0, Number(hls.duration || 0));
+  const segmentDuration = Math.max(1, Number(hls.segmentDuration || 8));
+  const segmentCount = Math.max(1, Number(hls.segmentCount || Math.ceil(duration / segmentDuration) || 1));
+  const lines = [
+    "#EXTM3U",
+    "#EXT-X-VERSION:3",
+    `#EXT-X-TARGETDURATION:${Math.ceil(segmentDuration)}`,
+    "#EXT-X-MEDIA-SEQUENCE:0",
+    "#EXT-X-PLAYLIST-TYPE:VOD",
+    "#EXT-X-INDEPENDENT-SEGMENTS",
+  ];
+  for (let index = 0; index < segmentCount; index += 1) {
+    const startTime = index * segmentDuration;
+    const segmentLength = duration > 0
+      ? Math.max(0.1, Math.min(segmentDuration, duration - startTime))
+      : segmentDuration;
+    lines.push(`#EXTINF:${segmentLength.toFixed(3)},`);
+    lines.push(`segments/${index}.ts`);
+  }
+  lines.push("#EXT-X-ENDLIST");
+  return `${lines.join("\n")}\n`;
+}
+
+function hlsSegmentIndex(pathname) {
+  const match = pathname.match(/\/segments\/(\d+)\.ts$/);
+  return match ? Number(match[1]) : -1;
 }
 
 function parseRange(rangeHeader, totalSize, metadata = {}) {
@@ -155,12 +236,17 @@ async function waitForMetadata(kind, sessionId) {
   return null;
 }
 
-async function getRequestClient(event) {
+async function getRequestClient(event, kind = "", sessionId = "") {
   if (event.clientId) {
     const client = await self.clients.get(event.clientId);
     if (client) return client;
   }
   const clients = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+  const expectedPath = kind && sessionId ? `/${kind}/${sessionId}` : "";
+  if (expectedPath) {
+    const matched = clients.find((client) => new URL(client.url).pathname === expectedPath);
+    if (matched) return matched;
+  }
   return clients.find((client) => client.url.includes("/bigscreen/") || client.url.includes("/watch/")) || clients[0] || null;
 }
 

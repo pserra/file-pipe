@@ -8,9 +8,10 @@
     <link href="{{ local_static_or_cdn('vendor/bootstrap-icons/bootstrap-icons.css', 'https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css') }}" rel="stylesheet">
     <link rel="stylesheet" href="{{ url_for('static', filename='styles.css', v='22') }}">
     <script defer src="{{ local_static_or_cdn('vendor/spark-md5/spark-md5.min.js', 'https://cdn.jsdelivr.net/npm/spark-md5@3.0.2/spark-md5.min.js') }}"></script>
+    <script defer src="{{ local_static_or_cdn('vendor/hls.js/hls.min.js', 'https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js') }}"></script>
     <script defer src="{{ local_static_or_cdn('vendor/three/three.min.js', 'https://cdn.jsdelivr.net/npm/three@0.160.1/build/three.min.js') }}"></script>
     <script defer src="{{ url_for('static', filename='xr-player.js', v='3') }}"></script>
-    <script defer src="{{ url_for('static', filename='watch.js', v='35') }}"></script>
+    <script defer src="{{ url_for('static', filename='watch.js', v='36') }}"></script>
     <script defer src="{{ local_static_or_cdn('vendor/alpinejs/cdn.min.js', 'https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js') }}"></script>
   </head>
   <body class="app-body" x-data="watchRoom('{{ room_id }}')" x-init="initWatchRoom()">
@@ -76,11 +77,11 @@
                       <dt class="col-sm-3">Type</dt>
                       <dd class="col-sm-9" x-text="metadata.type || 'video/mp4'"></dd>
                       <dt class="col-sm-3">MD5</dt>
-                      <dd class="col-sm-9 font-monospace text-break" x-text="metadata.md5 || (metadata.checksumKind === 'original-source' ? 'Progressive transcode; ranges are verified during playback' : 'Unavailable')"></dd>
+                      <dd class="col-sm-9 font-monospace text-break" x-text="metadata.md5 || (metadata.checksumKind === 'hls-segments' ? 'Live HLS stream; segments are encrypted in transit' : (metadata.checksumKind === 'original-source' ? 'Progressive transcode; ranges are verified during playback' : 'Unavailable'))"></dd>
                     </dl>
                     <button class="btn btn-primary mt-3" type="button" @click="requestVideo()">
                       <i class="bi bi-broadcast"></i>
-                      <span>Acknowledge and start streaming</span>
+                      <span x-text="receiveButtonLabel()"></span>
                     </button>
                     <template x-if="receiveDisabledReason()">
                       <div class="form-text" x-text="receiveDisabledReason()"></div>
@@ -119,7 +120,7 @@
                       <div class="progress-bar" :style="`width: ${playbackBufferPercent}%`"></div>
                     </div>
                   </div>
-                  <video id="viewer-video-player" class="w-100 rounded border bg-black" :src="videoUrl" crossorigin="anonymous" controls preload="auto" playsinline @loadedmetadata="prepareViewerVideoMedia(); updateViewerPlaybackBuffer()" @progress="updateViewerPlaybackBuffer()" @timeupdate.throttle.500ms="updateViewerPlaybackBuffer()" @waiting="updateViewerPlaybackBuffer()" @canplay="checkPendingSegmentReadiness(); updateViewerPlaybackBuffer()" @playing="setTimeout(() => { inspectViewerVideoAudio(); updateViewerPlaybackBuffer(); }, 1000)" @play="sendViewerControl('play')" @pause="sendViewerControl('pause')" @seeking="clampViewerProgressiveSeek()" @seeked="sendViewerControl('seek'); updateViewerPlaybackBuffer()"></video>
+                  <video id="viewer-video-player" class="w-100 rounded border bg-black" :src="isHlsStream() ? '' : videoUrl" crossorigin="anonymous" controls preload="auto" playsinline @loadedmetadata="prepareViewerVideoMedia(); updateViewerPlaybackBuffer()" @progress="updateViewerPlaybackBuffer()" @timeupdate.throttle.500ms="updateViewerPlaybackBuffer()" @waiting="updateViewerPlaybackBuffer()" @canplay="checkPendingSegmentReadiness(); updateViewerPlaybackBuffer()" @playing="setTimeout(() => { inspectViewerVideoAudio(); updateViewerPlaybackBuffer(); }, 1000)" @play="sendViewerControl('play')" @pause="sendViewerControl('pause')" @seeking="clampViewerProgressiveSeek()" @seeked="sendViewerControl('seek'); updateViewerPlaybackBuffer()"></video>
                   <template x-if="videoAudioStatus">
                     <div class="alert alert-secondary mt-3 mb-0" x-text="videoAudioStatus"></div>
                   </template>

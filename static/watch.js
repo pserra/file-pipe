@@ -19,6 +19,7 @@ document.addEventListener("alpine:init", () => {
     receivedBytes: 0,
     verifiedMd5: "",
     videoUrl: "",
+    viewerHls: null,
     viewerXrPlayer: null,
     streamingReady: false,
     videoAudioStatus: "",
@@ -54,6 +55,7 @@ document.addEventListener("alpine:init", () => {
     controlUnlockTimer: null,
     pendingRangeMd5: {},
     pendingRangeBytes: {},
+    pendingHlsBytes: {},
     pendingSegmentSync: null,
     viewerSeekControlTimer: null,
     error: "",
@@ -600,6 +602,46 @@ document.addEventListener("alpine:init", () => {
       this.inspectViewerVideoAudio();
     },
 
+    attachViewerHlsPlayer() {
+      const video = document.getElementById("viewer-video-player");
+      if (!video || !this.videoUrl) return false;
+      this.teardownViewerHlsPlayer();
+      if (video.canPlayType("application/vnd.apple.mpegurl")) {
+        video.src = this.videoUrl;
+        video.load();
+        this.prepareViewerVideoMedia();
+        return true;
+      }
+      if (window.Hls?.isSupported?.()) {
+        this.viewerHls = new Hls({
+          enableWorker: true,
+          lowLatencyMode: false,
+        });
+        this.viewerHls.on(Hls.Events.ERROR, (_event, data) => {
+          if (data?.fatal) {
+            this.error = data.details || "The live stream player failed.";
+            this.status = "";
+          }
+        });
+        this.viewerHls.loadSource(this.videoUrl);
+        this.viewerHls.attachMedia(video);
+        this.viewerHls.on(Hls.Events.MANIFEST_PARSED, () => {
+          this.prepareViewerVideoMedia();
+          this.updateViewerPlaybackBuffer();
+        });
+        return true;
+      }
+      this.error = "This browser cannot play HLS live streams.";
+      return false;
+    },
+
+    teardownViewerHlsPlayer() {
+      if (this.viewerHls) {
+        this.viewerHls.destroy();
+        this.viewerHls = null;
+      }
+    },
+
     attachViewerXrPlayer(video) {
       if (!window.FilePipeXrPlayer || !video) return;
       this.viewerXrPlayer = window.FilePipeXrPlayer.attach(video, {
@@ -612,6 +654,12 @@ document.addEventListener("alpine:init", () => {
       if (!this.viewerXrPlayer) return;
       this.viewerXrPlayer.dispose();
       this.viewerXrPlayer = null;
+    },
+
+    isHlsStream() {
+      return this.metadata?.streamMode === "hls"
+        || this.metadata?.playbackProfile?.sourceKind === "hls-live"
+        || String(this.metadata?.type || "").includes("mpegurl");
     },
 
     inspectViewerVideoAudio() {
@@ -630,20 +678,21 @@ document.addEventListener("alpine:init", () => {
     async requestVideo() {
       this.logWatchEvent("video-request-clicked", "Receive button clicked.");
       if (this.receiving) {
-        this.status = "Range streaming is already active.";
+        this.status = this.isHlsStream() ? "Live streaming is already active." : "Range streaming is already active.";
         return;
       }
       if (this.videoUrl) {
-        this.status = "Range player is already ready.";
+        this.status = this.isHlsStream() ? "Live stream player is already ready." : "Range player is already ready.";
         return;
       }
       if (!this.acknowledgementAccepted) this.acknowledgementAccepted = true;
-      if (!this.metadata?.md5 && this.metadata?.checksumKind !== "original-source") {
+      const hlsStream = this.isHlsStream();
+      if (!hlsStream && !this.metadata?.md5 && this.metadata?.checksumKind !== "original-source") {
         this.error = "The host has not published an MD5 for this video yet.";
         this.logWatchEvent("video-request-blocked", "Missing MD5 metadata.");
         return;
       }
-      if (this.metadata?.progressiveTranscode && !this.metadata.progressiveTranscode.complete) {
+      if (!hlsStream && this.metadata?.progressiveTranscode && !this.metadata.progressiveTranscode.complete) {
         this.pendingVideoRequest = true;
         this.error = "";
         const percent = Math.round(Number(this.metadata.progressiveTranscode.percent || 0));
@@ -679,25 +728,33 @@ document.addEventListener("alpine:init", () => {
         this.videoAudioStatus = "";
         this.pendingRangeMd5 = {};
         this.pendingRangeBytes = {};
+        this.pendingHlsBytes = {};
         this.progress = 0;
-        this.status = "Preparing encrypted range player...";
+        this.status = hlsStream ? "Preparing encrypted live stream player..." : "Preparing encrypted range player...";
         await this.registerServiceWorker();
         navigator.serviceWorker.controller.postMessage({
           type: "watch-metadata",
           sessionId: this.roomId,
           metadata: plainData(this.metadata),
         });
-        const fileName = encodeURIComponent(this.metadata.name || "video");
+        const fileName = hlsStream ? "playlist.m3u8" : encodeURIComponent(this.metadata.name || "video");
         this.videoUrl = `/watch-media/${this.roomId}/${fileName}`;
         this.streamingReady = true;
         await sleep(0);
         const video = document.getElementById("viewer-video-player");
-        if (video) {
+        if (hlsStream) {
+          if (!this.attachViewerHlsPlayer()) {
+            this.receiving = false;
+            return;
+          }
+        } else if (video) {
           video.src = this.videoUrl;
           video.load();
         }
-        this.status = "Range player ready. Playback will stay synced with the host.";
-        this.logWatchEvent("range-player-ready", "Service worker range player is ready.");
+        this.status = hlsStream
+          ? "Live stream player ready. Segments will transcode on demand."
+          : "Range player ready. Playback will stay synced with the host.";
+        this.logWatchEvent(hlsStream ? "hls-player-ready" : "range-player-ready", "Service worker player is ready.");
         if (this.pendingSync) setTimeout(() => this.applySync(this.pendingSync), 250);
       } catch (error) {
         this.error = serviceWorkerSetupMessage(error);
@@ -707,7 +764,7 @@ document.addEventListener("alpine:init", () => {
     },
 
     async registerServiceWorker() {
-      const registration = await navigator.serviceWorker.register("/bigscreen-sw.js?v=3", { scope: "/" });
+      const registration = await navigator.serviceWorker.register("/bigscreen-sw.js?v=4", { scope: "/" });
       await navigator.serviceWorker.ready;
       if (!navigator.serviceWorker.controller) {
         await new Promise((resolve) => {
@@ -727,10 +784,36 @@ document.addEventListener("alpine:init", () => {
       if (message.mediaKind && message.mediaKind !== "watch") return;
       if (message.type === "range-request") {
         this.sendRangeRequest(message);
+      } else if (message.type === "hls-segment-request") {
+        this.sendHlsSegmentRequest(message);
       } else if (message.type === "range-cancel" && this.channel?.readyState === "open") {
         sendChannelJson(this.channel, {
           type: "range-cancel",
           requestId: message.requestId,
+        });
+      }
+    },
+
+    sendHlsSegmentRequest(message) {
+      if (!this.channel || this.channel.readyState !== "open") {
+        this.postWorkerMessage({
+          type: "range-error",
+          requestId: message.requestId,
+          error: "Host data channel is not connected.",
+        });
+        return;
+      }
+      this.pendingHlsBytes[message.requestId] = 0;
+      if (!sendChannelJson(this.channel, {
+        type: "hls-segment-request",
+        requestId: message.requestId,
+        segmentIndex: message.segmentIndex,
+        sourceVersion: this.sourceVersion,
+      })) {
+        this.postWorkerMessage({
+          type: "range-error",
+          requestId: message.requestId,
+          error: "Host data channel is not connected.",
         });
       }
     },
@@ -816,17 +899,18 @@ document.addEventListener("alpine:init", () => {
     },
 
     receiveButtonLabel() {
-      if (this.receiving) return "Range player ready";
+      if (this.receiving) return this.isHlsStream() ? "Live stream ready" : "Range player ready";
       if (this.metadata?.progressiveTranscode && !this.metadata.progressiveTranscode.complete) return "Waiting for Stable MP4";
       if (this.pendingVideoRequest) return "Retry host connection";
       if (this.videoUrl) return "Video ready";
       if (!this.acknowledgementAccepted) return "Confirm acknowledgement";
-      return "Acknowledge and start streaming";
+      return this.isHlsStream() ? "Acknowledge and start live stream" : "Acknowledge and start streaming";
     },
 
     receiveDisabledReason() {
-      if (!this.metadata?.md5 && this.metadata?.checksumKind !== "original-source") return "Waiting for the host to publish the required MD5 checksum.";
-      if (this.metadata?.progressiveTranscode && !this.metadata.progressiveTranscode.complete) return "The host is still preparing the Stable MP4 stream. Playback will start automatically when it is ready.";
+      if (!this.isHlsStream() && !this.metadata?.md5 && this.metadata?.checksumKind !== "original-source") return "Waiting for the host to publish the required MD5 checksum.";
+      if (!this.isHlsStream() && this.metadata?.progressiveTranscode && !this.metadata.progressiveTranscode.complete) return "The host is still preparing the Stable MP4 stream. Playback will start automatically when it is ready.";
+      if (this.isHlsStream()) return "Live stream segments transcode on demand, so the first play or a scrub may take a moment.";
       if (!this.acknowledgementAccepted) return "Check the acknowledgement box before starting the video.";
       if (this.pendingVideoRequest) return "Waiting for the host peer connection to open. File Pipe will retry automatically; click Retry to force it now.";
       if (!this.channelReady) return "You can request the video now; File Pipe will start it when the host connection opens.";
@@ -836,6 +920,51 @@ document.addEventListener("alpine:init", () => {
     async handleChannelMessage(event) {
       try {
         const message = await readChannelMessage(event.data);
+        if (message.type === "hls-chunk") {
+          if (message.sourceVersion && Number(message.sourceVersion) !== this.sourceVersion) return;
+          const ciphertext = message.binary || base64UrlDecode(message.data || "");
+          const plaintext = exactArrayBuffer(await this.decryptPayload(message.iv, ciphertext));
+          const workerBytes = plaintext.slice(0);
+          this.pendingHlsBytes[message.requestId] = (this.pendingHlsBytes[message.requestId] || 0) + plaintext.byteLength;
+          this.receivedBytes += plaintext.byteLength;
+          if (shouldUpdateChannelUi(this)) {
+            this.status = `Buffered live segment ${Number(message.segmentIndex || 0) + 1}.`;
+            this.updateViewerPlaybackBuffer();
+          }
+          this.postWorkerMessage(
+            {
+              type: "range-chunk",
+              requestId: message.requestId,
+              bytes: workerBytes,
+            },
+            [workerBytes],
+          );
+          return;
+        }
+        if (message.type === "hls-done") {
+          if (message.sourceVersion && Number(message.sourceVersion) !== this.sourceVersion) return;
+          const hlsBytes = this.pendingHlsBytes[message.requestId] || 0;
+          delete this.pendingHlsBytes[message.requestId];
+          if (message.sentBytes && message.sentBytes !== hlsBytes) {
+            throw new Error(`Live segment ${Number(message.segmentIndex || 0) + 1} received ${hlsBytes} bytes, but host reported ${message.sentBytes} bytes.`);
+          }
+          this.postWorkerMessage({
+            type: "range-done",
+            requestId: message.requestId,
+          });
+          if (this.pendingSegmentSync) this.checkPendingSegmentReadiness();
+          return;
+        }
+        if (message.type === "hls-error") {
+          if (message.sourceVersion && Number(message.sourceVersion) !== this.sourceVersion) return;
+          delete this.pendingHlsBytes[message.requestId];
+          this.postWorkerMessage({
+            type: "range-error",
+            requestId: message.requestId,
+            error: message.error || "Host live segment request failed.",
+          });
+          return;
+        }
         if (message.type === "range-chunk") {
           if (message.sourceVersion && Number(message.sourceVersion) !== this.sourceVersion) return;
           const ciphertext = message.binary || base64UrlDecode(message.data);
@@ -934,6 +1063,7 @@ document.addEventListener("alpine:init", () => {
           return;
         }
         if (message.type === "video-start") {
+          this.teardownViewerHlsPlayer();
           this.detachViewerXrPlayer();
           this.receivedParts = [];
           this.receivedBytes = 0;
@@ -1013,6 +1143,7 @@ document.addEventListener("alpine:init", () => {
     applySourceUpdate(message) {
       this.metadata = message.metadata || this.metadata;
       this.sourceVersion = Number(this.metadata?.sourceVersion || this.sourceVersion || 0);
+      this.teardownViewerHlsPlayer();
       this.detachViewerXrPlayer();
       const video = document.getElementById("viewer-video-player");
       if (video) {
@@ -1032,6 +1163,7 @@ document.addEventListener("alpine:init", () => {
       this.playbackBufferPercent = 0;
       this.pendingRangeMd5 = {};
       this.pendingRangeBytes = {};
+      this.pendingHlsBytes = {};
       this.pendingSegmentSync = null;
       this.pendingSync = null;
       this.status = message.reason || "Host switched video source for compatibility.";
@@ -1416,7 +1548,7 @@ function detectMediaPlaybackCapabilities() {
     },
     containers: {
       mp4: canPlay(["video/mp4"]),
-      hls: canPlay(["application/vnd.apple.mpegurl"]),
+      hls: canPlay(["application/vnd.apple.mpegurl"]) || Boolean(window.Hls?.isSupported?.()),
     },
   };
 }
