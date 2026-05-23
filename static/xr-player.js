@@ -4,6 +4,9 @@
     layout: "mono",
     desktop2d: false,
     eye: "left",
+    windowScale: 100,
+    xrDistance: 2,
+    roomDim: 85,
   };
   const LAYOUT_LABELS = {
     mono: "Full frame",
@@ -51,6 +54,9 @@
           layout: isKnownLayout(stored.layout) ? stored.layout : DEFAULT_SETTINGS.layout,
           desktop2d: Boolean(stored.desktop2d),
           eye: stored.eye === "right" ? "right" : DEFAULT_SETTINGS.eye,
+          windowScale: clampNumber(Number(stored.windowScale), 60, 120, DEFAULT_SETTINGS.windowScale),
+          xrDistance: clampNumber(Number(stored.xrDistance), 1.2, 4, DEFAULT_SETTINGS.xrDistance),
+          roomDim: clampNumber(Number(stored.roomDim), 0, 100, DEFAULT_SETTINGS.roomDim),
         };
       } catch (error) {
         return { ...DEFAULT_SETTINGS };
@@ -126,6 +132,20 @@
             <span data-role="vr-label">View in VR</span>
           </button>
         </div>
+        <div class="fp-xr-tuning-row">
+          <label class="fp-xr-range">
+            <span>Window <output data-role="window-size-label">100%</output></span>
+            <input class="form-range" type="range" min="60" max="120" step="5" data-role="window-size">
+          </label>
+          <label class="fp-xr-range">
+            <span>Distance <output data-role="distance-label">2.0m</output></span>
+            <input class="form-range" type="range" min="1.2" max="4" step="0.1" data-role="distance">
+          </label>
+          <label class="fp-xr-range">
+            <span>Room dim <output data-role="dim-label">85%</output></span>
+            <input class="form-range" type="range" min="0" max="100" step="5" data-role="dim">
+          </label>
+        </div>
         <div class="fp-xr-status" data-role="status"></div>
       `;
       this.stage.insertAdjacentElement("afterend", this.panel);
@@ -138,6 +158,12 @@
       this.vrButton = this.panel.querySelector("[data-action='enter-vr']");
       this.vrLabel = this.panel.querySelector("[data-role='vr-label']");
       this.statusElement = this.panel.querySelector("[data-role='status']");
+      this.windowSizeInput = this.panel.querySelector("[data-role='window-size']");
+      this.windowSizeLabel = this.panel.querySelector("[data-role='window-size-label']");
+      this.distanceInput = this.panel.querySelector("[data-role='distance']");
+      this.distanceLabel = this.panel.querySelector("[data-role='distance-label']");
+      this.dimInput = this.panel.querySelector("[data-role='dim']");
+      this.dimLabel = this.panel.querySelector("[data-role='dim-label']");
       this.playButton = this.playbackControls.querySelector("[data-action='play-toggle']");
       this.playIcon = this.playButton.querySelector(".bi");
       this.seekInput = this.playbackControls.querySelector("[data-role='seek']");
@@ -167,6 +193,18 @@
           return;
         }
         this.enterVr();
+      });
+      this.listen(this.windowSizeInput, "input", () => {
+        this.settings.windowScale = clampNumber(Number(this.windowSizeInput.value), 60, 120, DEFAULT_SETTINGS.windowScale);
+        this.applySettings();
+      });
+      this.listen(this.distanceInput, "input", () => {
+        this.settings.xrDistance = clampNumber(Number(this.distanceInput.value), 1.2, 4, DEFAULT_SETTINGS.xrDistance);
+        this.applySettings();
+      });
+      this.listen(this.dimInput, "input", () => {
+        this.settings.roomDim = clampNumber(Number(this.dimInput.value), 0, 100, DEFAULT_SETTINGS.roomDim);
+        this.applySettings();
       });
       this.listen(this.desktopCanvas, "click", () => this.togglePlayback());
       this.listen(this.playButton, "click", () => this.togglePlayback());
@@ -232,6 +270,15 @@
       this.toggle2dButton.classList.toggle("btn-outline-primary", !desktopActive);
       this.toggle2dLabel.textContent = desktopActive ? "Showing 2D" : "Show 2D";
       this.eyeField.hidden = !desktopActive;
+      this.windowSizeInput.value = String(this.settings.windowScale);
+      this.windowSizeLabel.textContent = `${Math.round(this.settings.windowScale)}%`;
+      this.distanceInput.value = String(this.settings.xrDistance);
+      this.distanceLabel.textContent = `${this.settings.xrDistance.toFixed(1)}m`;
+      this.dimInput.value = String(this.settings.roomDim);
+      this.dimLabel.textContent = `${Math.round(this.settings.roomDim)}%`;
+      const desktopWidth = this.options.fill ? "100%" : `${this.settings.windowScale}%`;
+      this.stage.style.setProperty("--fp-xr-desktop-width", desktopWidth);
+      this.panel.style.setProperty("--fp-xr-desktop-width", desktopWidth);
       this.updateAspect();
       this.updateXrButton();
       this.updateStatus();
@@ -262,20 +309,20 @@
       }
       if (!this.isStereoLayout()) {
         this.statusElement.textContent = this.xrSupported
-          ? "Full frame selected. VR mirrors the same frame to both eyes."
+          ? `Full frame selected. VR opens a ${Math.round(this.settings.windowScale)}% video window.`
           : "Full frame selected.";
         return;
       }
       const layout = LAYOUT_LABELS[this.settings.layout];
       if (this.isDesktop2dActive()) {
-        this.statusElement.textContent = `${layout}: showing the ${this.settings.eye} half as 2D.`;
+        this.statusElement.textContent = `${layout}: showing the ${this.settings.eye} half as 2D in a resizable window.`;
         return;
       }
       if (!this.xrSupported && this.xrSupportChecked) {
         this.statusElement.textContent = `${layout} selected. WebXR VR is unavailable in this browser.`;
         return;
       }
-      this.statusElement.textContent = `${layout} selected. Use Show 2D on desktop or View in VR for stereo.`;
+      this.statusElement.textContent = `${layout} selected. VR renders it as a ${Math.round(this.settings.windowScale)}% stereo screen.`;
     }
 
     async togglePlayback() {
@@ -371,7 +418,8 @@
       try {
         await this.video.play().catch(() => {});
         const session = await navigator.xr.requestSession("immersive-vr", {
-          optionalFeatures: ["local-floor", "bounded-floor"],
+          optionalFeatures: ["local-floor", "bounded-floor", "dom-overlay"],
+          domOverlay: { root: document.body },
         });
         this.xrSession = session;
         this.updateXrButton();
@@ -417,7 +465,8 @@
       const layer = session.renderState.baseLayer;
       gl.bindFramebuffer(gl.FRAMEBUFFER, layer.framebuffer);
       gl.enable(gl.SCISSOR_TEST);
-      gl.clearColor(0, 0, 0, 1);
+      const backdrop = this.backdropLevel();
+      gl.clearColor(backdrop, backdrop, backdrop, 1);
       this.updateVideoTexture();
 
       for (const view of pose.views) {
@@ -524,6 +573,11 @@
       } else {
         scaleX = targetAspect / viewportAspect;
       }
+      const windowScale = clampNumber(this.settings.windowScale / 100, 0.6, 1.2, 1);
+      const distanceScale = clampNumber(2 / this.settings.xrDistance, 0.5, 1.35, 1);
+      scaleX *= windowScale * distanceScale;
+      scaleY *= windowScale * distanceScale;
+      this.drawXrWindowFrame(viewport, scaleX, scaleY);
 
       gl.useProgram(resources.program);
       gl.bindBuffer(gl.ARRAY_BUFFER, resources.positionBuffer);
@@ -538,6 +592,23 @@
       gl.bindTexture(gl.TEXTURE_2D, resources.texture);
       gl.uniform1i(resources.textureLocation, 0);
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    }
+
+    drawXrWindowFrame(viewport, scaleX, scaleY) {
+      const gl = this.gl;
+      const width = Math.min(viewport.width, Math.max(1, viewport.width * scaleX));
+      const height = Math.min(viewport.height, Math.max(1, viewport.height * scaleY));
+      const border = Math.max(8, Math.round(Math.min(viewport.width, viewport.height) * 0.012));
+      const frameWidth = Math.min(viewport.width, width + border * 2);
+      const frameHeight = Math.min(viewport.height, height + border * 2);
+      const x = Math.round(viewport.x + (viewport.width - frameWidth) / 2);
+      const y = Math.round(viewport.y + (viewport.height - frameHeight) / 2);
+      gl.scissor(x, y, Math.round(frameWidth), Math.round(frameHeight));
+      gl.clearColor(0.006, 0.008, 0.012, 1);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      const backdrop = this.backdropLevel();
+      gl.clearColor(backdrop, backdrop, backdrop, 1);
+      gl.scissor(viewport.x, viewport.y, viewport.width, viewport.height);
     }
 
     sourceRect(eye) {
@@ -576,6 +647,10 @@
       return width / height;
     }
 
+    backdropLevel() {
+      return ((100 - this.settings.roomDim) / 100) * 0.08;
+    }
+
     dispose() {
       this.stopDesktopLoop();
       if (this.xrSession) this.xrSession.end().catch(() => {});
@@ -592,6 +667,11 @@
 
   function isKnownLayout(layout) {
     return layout === "mono" || layout === "half-sbs" || layout === "full-sbs";
+  }
+
+  function clampNumber(value, min, max, fallback) {
+    if (!Number.isFinite(value)) return fallback;
+    return Math.min(max, Math.max(min, value));
   }
 
   function fitRect(width, height, aspect) {

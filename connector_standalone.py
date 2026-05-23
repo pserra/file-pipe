@@ -2,6 +2,7 @@ import argparse
 import os
 import secrets
 import signal
+import socket
 import sys
 import threading
 import time
@@ -87,6 +88,9 @@ def build_server(host: str, port: int, app, ssl_context) -> Tuple[int, object]:
     attempts.extend(candidate for candidate in range(8765, 8786) if candidate != port)
     last_error: Optional[OSError] = None
     for candidate in attempts:
+        if not can_bind(host, candidate):
+            last_error = OSError(f"{host}:{candidate} is already in use")
+            continue
         try:
             server = make_server(
                 host,
@@ -101,6 +105,16 @@ def build_server(host: str, port: int, app, ssl_context) -> Tuple[int, object]:
     if last_error:
         raise last_error
     raise OSError("Could not start the local connector.")
+
+
+def can_bind(host: str, port: int) -> bool:
+    try:
+        with socket.socket(socket.AF_INET6 if ":" in host else socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind((host, port))
+    except OSError:
+        return False
+    return True
 
 
 def install_signal_handlers(runtime: StandaloneRuntime) -> None:

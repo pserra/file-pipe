@@ -28,6 +28,9 @@ ssh dokku@milkyway.place config:set file-pipe \
   FILE_PIPE_SECRET_KEY='replace-with-a-generated-secret' \
   FILE_PIPE_AUTH_DISABLED='false' \
   FILE_PIPE_LOGIN_RATE_LIMIT_DISABLED='false' \
+  FILE_PIPE_PUBLIC_ACCESS_RATE_LIMIT='120' \
+  FILE_PIPE_PUBLIC_ACCESS_RATE_WINDOW_SECONDS='60' \
+  FILE_PIPE_PUBLIC_ACCESS_RATE_LIMIT_DISABLED='false' \
   FILE_PIPE_SESSION_COOKIE_SECURE='true'
 ```
 

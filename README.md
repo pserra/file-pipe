@@ -92,11 +92,19 @@ FILE_PIPE_LOGIN_RATE_LIMIT=5
 FILE_PIPE_LOGIN_RATE_WINDOW_SECONDS=300
 ```
 
+Watch room entry does not require login. Anonymous access to `/join/<alias>`, `/watch/<room_id>`, and viewer-side watch-room APIs is rate limited by client IP:
+
+```text
+FILE_PIPE_PUBLIC_ACCESS_RATE_LIMIT=120
+FILE_PIPE_PUBLIC_ACCESS_RATE_WINDOW_SECONDS=60
+```
+
 For local testing only, authentication or login rate limiting can be disabled:
 
 ```text
 FILE_PIPE_AUTH_DISABLED=true
 FILE_PIPE_LOGIN_RATE_LIMIT_DISABLED=true
+FILE_PIPE_PUBLIC_ACCESS_RATE_LIMIT_DISABLED=true
 ```
 
 Do not use those bypasses on a LAN or internet-facing deployment.

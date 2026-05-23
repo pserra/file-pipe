@@ -20,7 +20,20 @@ WATCH_ROOMS: Dict[str, dict] = {}
 WATCH_ROOM_ALIASES: Dict[str, str] = {}
 BIGSCREEN_SESSIONS: Dict[str, dict] = {}
 LOGIN_ATTEMPTS: Dict[str, list] = {}
+PUBLIC_ACCESS_ATTEMPTS: Dict[str, list] = {}
 ROOM_ALIAS_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{1,62}[a-z0-9]$")
+PUBLIC_WATCH_ENDPOINTS = {
+    "watch",
+    "join_alias",
+    "bigscreen_service_worker",
+    "watch_media_fallback",
+    "get_watch_room_state",
+    "join_watch_room",
+    "reconnect_watch_participant",
+    "put_watch_answer",
+    "add_watch_participant_event",
+    "get_watch_participant",
+}
 
 
 def load_dotenv(path: str = ".env") -> None:
@@ -63,6 +76,9 @@ class AuthConfig:
     rate_limit_disabled: bool
     rate_limit_attempts: int
     rate_limit_window_seconds: int
+    public_rate_limit_disabled: bool
+    public_rate_limit_attempts: int
+    public_rate_limit_window_seconds: int
 
     @property
     def configured(self) -> bool:
@@ -136,6 +152,9 @@ def auth_config_from_env() -> AuthConfig:
         rate_limit_disabled=env_bool("FILE_PIPE_LOGIN_RATE_LIMIT_DISABLED"),
         rate_limit_attempts=max(1, env_int("FILE_PIPE_LOGIN_RATE_LIMIT", 5)),
         rate_limit_window_seconds=max(1, env_int("FILE_PIPE_LOGIN_RATE_WINDOW_SECONDS", 300)),
+        public_rate_limit_disabled=env_bool("FILE_PIPE_PUBLIC_ACCESS_RATE_LIMIT_DISABLED"),
+        public_rate_limit_attempts=max(1, env_int("FILE_PIPE_PUBLIC_ACCESS_RATE_LIMIT", 120)),
+        public_rate_limit_window_seconds=max(1, env_int("FILE_PIPE_PUBLIC_ACCESS_RATE_WINDOW_SECONDS", 60)),
     )
 
 
@@ -186,6 +205,31 @@ def clear_login_failures() -> None:
     LOGIN_ATTEMPTS.pop(login_rate_key(), None)
 
 
+def public_access_rate_limited(auth_config: AuthConfig) -> int:
+    if auth_config.public_rate_limit_disabled:
+        return 0
+    now = time.time()
+    key = login_rate_key()
+    window_start = now - auth_config.public_rate_limit_window_seconds
+    attempts = [timestamp for timestamp in PUBLIC_ACCESS_ATTEMPTS.get(key, []) if timestamp >= window_start]
+    attempts.append(now)
+    PUBLIC_ACCESS_ATTEMPTS[key] = attempts
+    if len(attempts) > auth_config.public_rate_limit_attempts:
+        oldest = min(attempts)
+        return max(1, int(auth_config.public_rate_limit_window_seconds - (now - oldest)))
+    return 0
+
+
+def rate_limit_public_access(auth_config: AuthConfig):
+    retry_after = public_access_rate_limited(auth_config)
+    if not retry_after:
+        return None
+    payload = {"error": f"Too many requests. Try again in {retry_after} seconds."}
+    if wants_json_response():
+        return jsonify(payload), 429, {"Retry-After": str(retry_after)}
+    return render_template("rate_limited.html", retry_after=retry_after), 429, {"Retry-After": str(retry_after)}
+
+
 def create_app():
     app = Flask(__name__)
     app.config["TEMPLATES_AUTO_RELOAD"] = True
@@ -204,6 +248,10 @@ def create_app():
             return None
         if request.endpoint in {"health", "login", "login_post", "static"}:
             return None
+        if is_authenticated(auth_config):
+            return None
+        if request.endpoint in PUBLIC_WATCH_ENDPOINTS:
+            return rate_limit_public_access(auth_config)
         if not auth_config.configured:
             if wants_json_response():
                 return jsonify({"error": "File Pipe authentication is not configured."}), 503
@@ -216,8 +264,6 @@ def create_app():
                 ),
                 503,
             )
-        if is_authenticated(auth_config):
-            return None
         if wants_json_response():
             return jsonify({"error": "Authentication required."}), 401
         return (

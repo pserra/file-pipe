@@ -591,6 +591,40 @@ progress {
   margin: 1rem 0;
 }
 
+.xr-theater-layout {
+  align-items: flex-start;
+}
+
+.xr-video-column,
+.xr-video-window {
+  min-width: 0;
+}
+
+.xr-video-card .card-body {
+  background: #fbfcff;
+}
+
+.xr-side-panel {
+  align-self: flex-start;
+}
+
+.voice-chat-card {
+  border-color: #cfe0ff;
+}
+
+.voice-chat-card .card-header {
+  background: #eef4ff;
+}
+
+@media (min-width: 1200px) {
+  .xr-side-panel {
+    max-height: calc(100vh - 5.25rem);
+    overflow: auto;
+    position: sticky;
+    top: 5rem;
+  }
+}
+
 .bigscreen-shell {
   min-height: 100vh;
 }
@@ -622,13 +656,16 @@ progress {
 
 .fp-xr-stage {
   --fp-xr-aspect: 1.7777778;
+  --fp-xr-desktop-width: 100%;
   aspect-ratio: var(--fp-xr-aspect);
   background: #000000;
   border: 1px solid var(--fp-border);
   border-radius: 8px;
+  margin-inline: auto;
   overflow: hidden;
   position: relative;
-  width: 100%;
+  transition: width 160ms ease;
+  width: var(--fp-xr-desktop-width);
 }
 
 .fp-xr-stage > video {
@@ -646,6 +683,7 @@ progress {
   border: 0;
   border-radius: 0;
   height: 100%;
+  margin-inline: 0;
   width: 100%;
 }
 
@@ -670,11 +708,14 @@ progress {
 }
 
 .fp-xr-panel {
+  --fp-xr-desktop-width: 100%;
   background: var(--fp-surface-muted);
   border: 1px solid var(--fp-border-soft);
   border-radius: 8px;
-  margin-top: 0.75rem;
+  margin: 0.75rem auto 0;
   padding: 0.75rem;
+  transition: width 160ms ease;
+  width: var(--fp-xr-desktop-width);
 }
 
 .fp-xr-panel-overlay {
@@ -686,6 +727,7 @@ progress {
   position: absolute;
   right: 1rem;
   top: 1rem;
+  width: auto;
   z-index: 3;
 }
 
@@ -696,7 +738,15 @@ progress {
   gap: 0.5rem;
 }
 
-.fp-xr-field {
+.fp-xr-tuning-row {
+  display: grid;
+  gap: 0.65rem;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-top: 0.65rem;
+}
+
+.fp-xr-field,
+.fp-xr-range {
   display: grid;
   flex: 1 1 9rem;
   gap: 0.25rem;
@@ -704,6 +754,7 @@ progress {
 }
 
 .fp-xr-field span,
+.fp-xr-range span,
 .fp-xr-status {
   color: var(--fp-muted);
   font-size: 0.78rem;
@@ -711,8 +762,16 @@ progress {
 }
 
 .fp-xr-panel-overlay .fp-xr-field span,
+.fp-xr-panel-overlay .fp-xr-range span,
 .fp-xr-panel-overlay .fp-xr-status {
   color: rgba(255, 255, 255, 0.72);
+}
+
+.fp-xr-range output {
+  color: inherit;
+  float: right;
+  font-variant-numeric: tabular-nums;
+  font-weight: 800;
 }
 
 .fp-xr-status {
@@ -808,6 +867,10 @@ progress {
     max-width: none;
     right: 0.75rem;
     top: 0.75rem;
+  }
+
+  .fp-xr-tuning-row {
+    grid-template-columns: 1fr;
   }
 
   .fp-xr-playback-controls {
