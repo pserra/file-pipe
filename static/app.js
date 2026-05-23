@@ -971,15 +971,20 @@ document.addEventListener("alpine:init", () => {
         shareDisabledReason: "",
         checksumPath: `${transcodePath}/checksum`,
         readRange: async (start, endExclusive) => {
+          const expectedBytes = Math.max(0, Number(endExclusive || 0) - Number(start || 0));
           const response = await fetch(`${this.connectorUrl}${transcodePath}${this.playerSource?.progressiveTranscode ? "?progressive=1" : ""}`, {
             headers: this.connectorHeaders({
               Range: `bytes=${start}-${Math.max(start, endExclusive - 1)}`,
             }),
           });
-          if (!response.ok && response.status !== 206) {
-            throw new Error(`Connector returned ${response.status} for transcoded range.`);
+          if (response.status !== 206) {
+            throw new Error(`Connector returned ${response.status} for transcoded range; expected 206 Partial Content.`);
           }
-          return response.arrayBuffer();
+          const buffer = await response.arrayBuffer();
+          if (expectedBytes && buffer.byteLength !== expectedBytes) {
+            throw new Error(`Connector returned ${buffer.byteLength} bytes for a ${expectedBytes}-byte transcoded range.`);
+          }
+          return buffer;
         },
         openStream: async () => {
           const response = await fetch(`${this.connectorUrl}${transcodePath}${this.playerSource?.progressiveTranscode ? "?progressive=1" : ""}`, {

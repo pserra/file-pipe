@@ -55,7 +55,7 @@ MEDIA_INFO_CACHE: Dict[str, Dict[str, object]] = {}
 LOCAL_DIRECTORY_FILE = Path(os.environ.get("FILE_PIPE_DIRECTORIES_FILE", "instance/served_directories.json"))
 PLAYABLE_BROWSER_AUDIO_CODECS = {"aac", "mp3", "opus", "vorbis", "flac", "alac"}
 PLAYABLE_BROWSER_VIDEO_CODECS = {"h264"}
-TRANSCODE_CACHE_VERSION = "v4"
+TRANSCODE_CACHE_VERSION = "v5"
 TRANSCODE_CACHE_DIR = Path(os.environ.get("FILE_PIPE_TRANSCODE_CACHE_DIR", "instance/transcodes"))
 HLS_SEGMENT_SECONDS = int(os.environ.get("FILE_PIPE_HLS_SEGMENT_SECONDS", "6"))
 PROGRESSIVE_TRANSCODE_START_PERCENT = int(os.environ.get("FILE_PIPE_PROGRESSIVE_TRANSCODE_START_PERCENT", "3"))
@@ -914,6 +914,7 @@ def build_transcode_command(
     output_path: str,
     ffmpeg_path: str = "ffmpeg",
     force_video_transcode: bool = True,
+    fragmented: bool = False,
 ) -> List[str]:
     default_audio = probe.get("defaultAudio") or {}
     default_video = probe.get("defaultVideo") or {}
@@ -956,15 +957,8 @@ def build_transcode_command(
             )
     if audio_index is not None:
         command.extend(["-c:a", "aac", "-ac", "2", "-b:a", "192k"])
-    command.extend(
-        [
-            "-movflags",
-            "+frag_keyframe+empty_moov+default_base_moof",
-            "-f",
-            "mp4",
-            output_path,
-        ]
-    )
+    movflags = "+frag_keyframe+empty_moov+default_base_moof" if fragmented else "+faststart"
+    command.extend(["-movflags", movflags, "-f", "mp4", output_path])
     return command
 
 
@@ -1221,6 +1215,38 @@ def run_transcode_command(command: List[str], temp_path: Path, resource_id: str,
         raise RuntimeError(f"ffmpeg could not transcode this resource: {detail}")
 
 
+def remux_fragmented_mp4_to_faststart(source_path: Path, output_path: Path, ffmpeg_path: str = "ffmpeg") -> None:
+    temp_path = output_path.with_suffix(f".{os.getpid()}.final.mp4")
+    if temp_path.exists():
+        temp_path.unlink()
+    command = [
+        ffmpeg_path,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        str(source_path),
+        "-map",
+        "0",
+        "-c",
+        "copy",
+        "-movflags",
+        "+faststart",
+        "-f",
+        "mp4",
+        str(temp_path),
+    ]
+    try:
+        subprocess.run(command, capture_output=True, text=True, check=True)
+        temp_path.replace(output_path)
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or str(exc)).strip()
+        raise RuntimeError(f"ffmpeg could not finalize Stable MP4: {detail}") from exc
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
+
+
 def start_transcoded_file(resource_id: str, url: str, media_info: Dict[str, object]) -> Dict[str, object]:
     ffmpeg_path = find_media_tool("ffmpeg")
     if not ffmpeg_path:
@@ -1247,7 +1273,7 @@ def start_transcoded_file(resource_id: str, url: str, media_info: Dict[str, obje
     TRANSCODE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     if part_path.exists():
         part_path.unlink()
-    command = build_transcode_command(url, media_info, str(part_path), ffmpeg_path)
+    command = build_transcode_command(url, media_info, str(part_path), ffmpeg_path, fragmented=True)
     update_transcode_progress(
         resource_id,
         status="running",
@@ -1264,7 +1290,10 @@ def start_transcoded_file(resource_id: str, url: str, media_info: Dict[str, obje
         with lock:
             try:
                 run_transcode_command(command, part_path, resource_id, parse_float(media_info.get("duration")))
-                part_path.replace(path)
+                update_transcode_progress(resource_id, status="finalizing", percent=99, size=part_path.stat().st_size)
+                remux_fragmented_mp4_to_faststart(part_path, path, ffmpeg_path)
+                if part_path.exists():
+                    part_path.unlink()
                 stat = path.stat()
                 update_transcode_progress(resource_id, status="complete", percent=100, size=stat.st_size, progressive=False)
             except Exception:
@@ -1320,7 +1349,7 @@ def ensure_transcoded_file(resource_id: str, url: str, media_info: Dict[str, obj
             temp_path = transcode_part_path(resource_id, url)
             if temp_path.exists():
                 temp_path.unlink()
-            command = build_transcode_command(url, media_info, str(temp_path), ffmpeg_path)
+            command = build_transcode_command(url, media_info, str(temp_path), ffmpeg_path, fragmented=False)
             update_transcode_progress(
                 resource_id,
                 status="running",
