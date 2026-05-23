@@ -57,7 +57,7 @@ async function handleBigscreenMedia(event, url) {
   }
 
   const totalSize = Number(metadata.size || 0);
-  const range = parseRange(event.request.headers.get("Range"), totalSize);
+  const range = parseRange(event.request.headers.get("Range"), totalSize, metadata);
   const requestId = createRequestId();
   const headers = {
     "Accept-Ranges": "bytes",
@@ -101,8 +101,19 @@ async function handleBigscreenMedia(event, url) {
   });
 }
 
-function parseRange(rangeHeader, totalSize) {
+function parseRange(rangeHeader, totalSize, metadata = {}) {
   if (!rangeHeader || !totalSize) {
+    if (metadata.progressiveTranscode && totalSize) {
+      const availableBytes = Number(metadata.progressiveTranscode.availableBytes || 0);
+      const bootstrapBytes = availableBytes > 0
+        ? Math.min(Math.max(availableBytes, 256 * 1024), 2 * 1024 * 1024)
+        : 512 * 1024;
+      return {
+        start: 0,
+        end: Math.min(totalSize - 1, bootstrapBytes - 1),
+        partial: true,
+      };
+    }
     return {
       start: 0,
       end: totalSize ? totalSize - 1 : 0,
