@@ -56,7 +56,7 @@ git push -u origin main
 Deploy to Dokku from GitHub:
 
 ```bash
-ssh dokku@milkyway.place git:sync file-pipe https://github.com/pserra/file-pipe.git main
+ssh dokku@milkyway.place git:sync --build file-pipe https://github.com/pserra/file-pipe.git main
 ```
 
 Or deploy directly from this checkout:
