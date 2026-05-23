@@ -1,5 +1,8 @@
 import datetime as dt
 import json
+import shutil
+import subprocess
+import sys
 from ipaddress import ip_address
 from pathlib import Path
 from typing import Dict, List
@@ -76,6 +79,78 @@ def safe_cache_path(name: str) -> Path:
     if path.suffix not in {".mp4", ".part"}:
         raise ValueError("Invalid cache file.")
     return path
+
+
+def applescript_quote(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def choose_directory(current_path: str = ""):
+    initial = Path(current_path or str(cache_dir())).expanduser()
+    if not initial.exists():
+        initial = initial.parent if initial.parent.exists() else Path.home()
+
+    if sys.platform == "darwin":
+        script = (
+            'POSIX path of (choose folder with prompt "Choose File Pipe transcode cache folder" '
+            f'default location POSIX file "{applescript_quote(str(initial))}")'
+        )
+        completed = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        if completed.returncode == 0:
+            return completed.stdout.strip().rstrip("/")
+        if "User canceled" in completed.stderr:
+            return None
+        raise RuntimeError((completed.stderr or completed.stdout or "Folder picker failed.").strip())
+
+    if sys.platform == "win32":
+        powershell = shutil.which("powershell.exe") or shutil.which("pwsh")
+        if not powershell:
+            raise RuntimeError("PowerShell is required to open the Windows folder picker.")
+        selected_path = str(initial).replace("'", "''")
+        script = f"""
+Add-Type -AssemblyName System.Windows.Forms
+$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+$dialog.Description = 'Choose File Pipe transcode cache folder'
+$dialog.SelectedPath = '{selected_path}'
+if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{
+  [Console]::Write($dialog.SelectedPath)
+}} else {{
+  exit 2
+}}
+"""
+        completed = subprocess.run(
+            [powershell, "-NoProfile", "-STA", "-Command", script],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        if completed.returncode == 0:
+            return completed.stdout.strip()
+        if completed.returncode == 2:
+            return None
+        raise RuntimeError((completed.stderr or completed.stdout or "Folder picker failed.").strip())
+
+    for command in ("zenity", "kdialog"):
+        executable = shutil.which(command)
+        if not executable:
+            continue
+        if command == "zenity":
+            args = [executable, "--file-selection", "--directory", "--filename", f"{initial}/"]
+        else:
+            args = [executable, "--getexistingdirectory", str(initial)]
+        completed = subprocess.run(args, capture_output=True, text=True, timeout=300)
+        if completed.returncode == 0:
+            return completed.stdout.strip()
+        if completed.returncode == 1:
+            return None
+        raise RuntimeError((completed.stderr or completed.stdout or "Folder picker failed.").strip())
+
+    raise RuntimeError("No supported folder picker is available on this system.")
 
 
 def create_admin_blueprint(security, runtime):
@@ -174,6 +249,17 @@ def create_admin_blueprint(security, runtime):
     def admin_get_config():
         return jsonify({"config": public_config(runtime.config), "configPath": str(runtime.config_path)})
 
+    @blueprint.post("/admin/api/pick-directory")
+    def admin_pick_directory():
+        payload = request.get_json(silent=True) or {}
+        try:
+            selected = choose_directory(str(payload.get("currentPath") or ""))
+        except RuntimeError as exc:
+            return jsonify({"error": str(exc)}), 500
+        if not selected:
+            return jsonify({"ok": True, "cancelled": True})
+        return jsonify({"ok": True, "path": selected})
+
     @blueprint.put("/admin/api/config")
     def admin_put_config():
         payload = request.get_json(silent=True) or {}
@@ -230,15 +316,20 @@ ADMIN_HTML = r"""<!doctype html>
     <style>
       :root {
         color-scheme: light;
-        --bg: #f4f6f8;
+        --bg: #f3f5f7;
         --panel: #ffffff;
+        --panel-soft: #f8fafc;
         --muted: #667085;
         --text: #172033;
+        --text-strong: #0f172a;
         --border: #d8e0ea;
         --soft: #eef2f6;
         --primary: #2563eb;
+        --primary-dark: #1d4ed8;
         --danger: #c0392b;
         --success: #16845b;
+        --warning: #b7791f;
+        --shadow: 0 16px 38px rgba(15, 23, 42, 0.08);
       }
 
       * {
@@ -246,21 +337,22 @@ ADMIN_HTML = r"""<!doctype html>
       }
 
       body {
-        background: var(--bg);
+        background: linear-gradient(180deg, #fbfcfe 0, var(--bg) 18rem);
         color: var(--text);
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         margin: 0;
+        min-height: 100vh;
       }
 
       header {
         align-items: center;
-        background: var(--panel);
-        border-bottom: 1px solid var(--border);
+        background: rgba(255, 255, 255, 0.94);
+        border-bottom: 1px solid #e5ebf2;
         display: flex;
         flex-wrap: wrap;
-        gap: 1rem;
+        gap: 1.2rem;
         justify-content: space-between;
-        padding: 1rem clamp(1rem, 3vw, 2rem);
+        padding: 1rem clamp(1rem, 3vw, 2.2rem);
         position: sticky;
         top: 0;
         z-index: 2;
@@ -271,13 +363,21 @@ ADMIN_HTML = r"""<!doctype html>
       }
 
       h1 {
-        font-size: 1.35rem;
+        color: var(--text-strong);
+        font-size: 1.4rem;
+        line-height: 1.15;
         margin-bottom: 0.15rem;
       }
 
       h2 {
+        color: var(--text-strong);
         font-size: 1rem;
-        margin-bottom: 0.8rem;
+        line-height: 1.2;
+        margin-bottom: 0.25rem;
+      }
+
+      p {
+        margin-bottom: 0;
       }
 
       button, input {
@@ -293,9 +393,16 @@ ADMIN_HTML = r"""<!doctype html>
         cursor: pointer;
         display: inline-flex;
         font-weight: 700;
+        gap: 0.35rem;
         justify-content: center;
         min-height: 2.4rem;
-        padding: 0.5rem 0.85rem;
+        padding: 0.5rem 0.9rem;
+      }
+
+      button:hover {
+        background: var(--primary-dark);
+        border-color: var(--primary-dark);
+        box-shadow: 0 8px 18px rgba(37, 99, 235, 0.18);
       }
 
       button.secondary {
@@ -304,10 +411,22 @@ ADMIN_HTML = r"""<!doctype html>
         color: var(--text);
       }
 
+      button.secondary:hover {
+        background: #f8fafc;
+        border-color: #b8c4d4;
+        box-shadow: 0 8px 18px rgba(15, 23, 42, 0.08);
+      }
+
       button.danger {
         background: #ffffff;
         border-color: #f0b7ae;
         color: var(--danger);
+      }
+
+      button.danger:hover {
+        background: #fff1f0;
+        border-color: #ec9285;
+        box-shadow: 0 8px 18px rgba(192, 57, 43, 0.12);
       }
 
       button:disabled {
@@ -323,7 +442,14 @@ ADMIN_HTML = r"""<!doctype html>
         width: 100%;
       }
 
+      input:focus {
+        border-color: #86a8ff;
+        box-shadow: 0 0 0 0.22rem rgba(37, 99, 235, 0.14);
+        outline: 0;
+      }
+
       input[type="checkbox"] {
+        accent-color: var(--primary);
         min-height: 0;
         width: auto;
       }
@@ -338,14 +464,42 @@ ADMIN_HTML = r"""<!doctype html>
 
       main {
         display: grid;
-        gap: 1rem;
+        gap: 1.1rem;
         margin: 0 auto;
         max-width: 1180px;
-        padding: 1rem clamp(1rem, 3vw, 2rem) 2rem;
+        padding: 1.15rem clamp(1rem, 3vw, 2.2rem) 2.2rem;
       }
 
       .muted {
         color: var(--muted);
+      }
+
+      .brand {
+        align-items: center;
+        display: grid;
+        gap: 0.85rem;
+        grid-template-columns: 2.75rem minmax(0, 1fr);
+        min-width: 0;
+      }
+
+      .brand-mark {
+        align-items: center;
+        background: #eaf2ff;
+        border: 1px solid #cfe0ff;
+        border-radius: 8px;
+        color: var(--primary);
+        display: grid;
+        font-weight: 900;
+        height: 2.75rem;
+        place-items: center;
+        width: 2.75rem;
+      }
+
+      .header-actions {
+        align-items: center;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.65rem;
       }
 
       .topline {
@@ -357,14 +511,24 @@ ADMIN_HTML = r"""<!doctype html>
       }
 
       .pill {
+        align-items: center;
         border: 1px solid var(--border);
         border-radius: 999px;
         display: inline-flex;
         font-size: 0.85rem;
         font-weight: 800;
+        gap: 0.45rem;
         min-height: 2.2rem;
         padding: 0.45rem 0.8rem;
         white-space: nowrap;
+      }
+
+      .pill::before {
+        background: currentColor;
+        border-radius: 999px;
+        content: "";
+        height: 0.55rem;
+        width: 0.55rem;
       }
 
       .pill.ready {
@@ -377,6 +541,35 @@ ADMIN_HTML = r"""<!doctype html>
         background: #fff7ed;
         border-color: #fed7aa;
         color: #9a3412;
+      }
+
+      .hero {
+        align-items: stretch;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        box-shadow: var(--shadow);
+        display: grid;
+        gap: 1rem;
+        grid-template-columns: minmax(0, 1fr) auto;
+        padding: 1rem;
+      }
+
+      .hero-main {
+        min-width: 0;
+      }
+
+      .hero-url {
+        background: #f8fafc;
+        border: 1px solid #e6edf5;
+        border-radius: 8px;
+        color: #344054;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 0.85rem;
+        margin-top: 0.65rem;
+        max-width: 100%;
+        overflow-wrap: anywhere;
+        padding: 0.65rem 0.75rem;
       }
 
       .grid {
@@ -395,20 +588,58 @@ ADMIN_HTML = r"""<!doctype html>
         background: var(--panel);
         border: 1px solid var(--border);
         border-radius: 8px;
+        box-shadow: 0 8px 26px rgba(15, 23, 42, 0.045);
         padding: 1rem;
+      }
+
+      .panel-head {
+        align-items: flex-start;
+        display: flex;
+        gap: 1rem;
+        justify-content: space-between;
+        margin-bottom: 0.95rem;
+      }
+
+      .panel-subtitle {
+        color: var(--muted);
+        font-size: 0.86rem;
+        margin-top: 0.25rem;
       }
 
       .stat {
         background: var(--panel);
         border: 1px solid var(--border);
         border-radius: 8px;
+        box-shadow: 0 8px 24px rgba(15, 23, 42, 0.045);
         min-width: 0;
         padding: 1rem;
+        position: relative;
+      }
+
+      .stat::before {
+        background: var(--primary);
+        border-radius: 999px;
+        content: "";
+        height: 0.35rem;
+        left: 1rem;
+        position: absolute;
+        right: 1rem;
+        top: 0.65rem;
+      }
+
+      .stat.stat-success::before {
+        background: var(--success);
+      }
+
+      .stat.stat-warning::before {
+        background: var(--warning);
       }
 
       .stat strong {
+        color: var(--text-strong);
         display: block;
-        font-size: 1.25rem;
+        font-size: 1.35rem;
+        margin-top: 0.45rem;
         overflow-wrap: anywhere;
       }
 
@@ -418,11 +649,21 @@ ADMIN_HTML = r"""<!doctype html>
         grid-template-columns: repeat(2, minmax(0, 1fr));
       }
 
+      .path-picker {
+        display: grid;
+        gap: 0.55rem;
+        grid-template-columns: minmax(0, 1fr) auto;
+      }
+
       .check-row {
         align-items: center;
+        background: var(--panel-soft);
+        border: 1px solid #e6edf5;
+        border-radius: 8px;
         display: flex;
         gap: 0.55rem;
         min-height: 2.4rem;
+        padding: 0.55rem 0.65rem;
       }
 
       .actions {
@@ -433,6 +674,7 @@ ADMIN_HTML = r"""<!doctype html>
       }
 
       table {
+        background: #ffffff;
         border-collapse: collapse;
         width: 100%;
       }
@@ -440,15 +682,21 @@ ADMIN_HTML = r"""<!doctype html>
       th, td {
         border-bottom: 1px solid var(--soft);
         font-size: 0.9rem;
-        padding: 0.7rem 0.55rem;
+        padding: 0.78rem 0.65rem;
         text-align: left;
         vertical-align: middle;
       }
 
       th {
+        background: var(--panel-soft);
         color: #475467;
         font-size: 0.75rem;
+        letter-spacing: 0;
         text-transform: uppercase;
+      }
+
+      tr:hover td {
+        background: #fbfdff;
       }
 
       td:last-child, th:last-child {
@@ -456,6 +704,8 @@ ADMIN_HTML = r"""<!doctype html>
       }
 
       .scroll-table {
+        border: 1px solid var(--soft);
+        border-radius: 8px;
         overflow-x: auto;
       }
 
@@ -467,12 +717,11 @@ ADMIN_HTML = r"""<!doctype html>
       }
 
       .notice {
-        background: #eef4ff;
-        border: 1px solid #cfe0ff;
+        background: #fff7ed;
+        border: 1px solid #fed7aa;
         border-radius: 8px;
-        color: #1d4ed8;
+        color: #9a3412;
         display: none;
-        margin-bottom: 1rem;
         padding: 0.75rem;
       }
 
@@ -491,29 +740,72 @@ ADMIN_HTML = r"""<!doctype html>
         padding: 0.8rem;
       }
 
+      .empty-row {
+        color: var(--muted);
+        padding: 1.15rem 0.65rem;
+        text-align: center !important;
+      }
+
+      .cache-file {
+        color: var(--text-strong);
+        font-weight: 700;
+      }
+
       @media (max-width: 920px) {
-        .grid, .columns, .form-grid {
+        .grid, .columns, .form-grid, .hero {
+          grid-template-columns: 1fr;
+        }
+
+        .path-picker {
           grid-template-columns: 1fr;
         }
 
         header {
           align-items: stretch;
         }
+
+        .header-actions {
+          align-items: stretch;
+          flex-direction: column;
+          width: 100%;
+        }
+
+        .header-actions button,
+        .header-actions .pill {
+          width: 100%;
+        }
       }
     </style>
   </head>
   <body>
     <header>
-      <div>
-        <div class="topline">Local connector</div>
-        <h1>File Pipe Connector</h1>
-        <div class="muted" id="connector-url">Starting...</div>
+      <div class="brand">
+        <div class="brand-mark">FP</div>
+        <div>
+          <div class="topline">Local connector</div>
+          <h1>File Pipe Connector</h1>
+        </div>
       </div>
-      <span class="pill" id="status-pill">Checking</span>
+      <div class="header-actions">
+        <button class="secondary" id="copy-url" type="button">Copy URL</button>
+        <span class="pill" id="status-pill">Checking</span>
+      </div>
     </header>
 
     <main>
       <div class="notice" id="restart-notice">Restart the connector to apply host, port, or TLS changes.</div>
+
+      <section class="hero" aria-label="Connector overview">
+        <div class="hero-main">
+          <div class="topline">Service endpoint</div>
+          <h2>Connector is available to this computer and the File Pipe web app.</h2>
+          <div class="hero-url" id="connector-url">Starting...</div>
+        </div>
+        <div class="actions" style="margin-top:0;">
+          <button id="refresh" type="button">Refresh</button>
+          <button class="danger" id="quit-app" type="button">Exit service</button>
+        </div>
+      </section>
 
       <section class="grid" aria-label="Connector status">
         <div class="stat">
@@ -521,7 +813,7 @@ ADMIN_HTML = r"""<!doctype html>
           <strong id="cache-count">0</strong>
           <span id="cache-size" class="muted">0 B</span>
         </div>
-        <div class="stat">
+        <div class="stat stat-success">
           <span class="muted">DLNA servers</span>
           <strong id="server-count">0</strong>
           <span id="resource-count" class="muted">0 resources</span>
@@ -531,7 +823,7 @@ ADMIN_HTML = r"""<!doctype html>
           <strong id="auth-state">Off</strong>
           <span id="session-count" class="muted">0 sessions</span>
         </div>
-        <div class="stat">
+        <div class="stat stat-warning">
           <span class="muted">Transcoding</span>
           <strong id="ffmpeg-state">Unknown</strong>
           <span id="ffprobe-state" class="muted">Checking tools</span>
@@ -540,7 +832,12 @@ ADMIN_HTML = r"""<!doctype html>
 
       <section class="columns">
         <div class="panel">
-          <h2>Settings</h2>
+          <div class="panel-head">
+            <div>
+              <h2>Settings</h2>
+              <p class="panel-subtitle">Network, cache, and authentication options for this connector.</p>
+            </div>
+          </div>
           <div class="form-grid">
             <label>Host
               <input id="host" autocomplete="off">
@@ -549,7 +846,10 @@ ADMIN_HTML = r"""<!doctype html>
               <input id="port" type="number" min="1" max="65535">
             </label>
             <label>Cache folder
-              <input id="cache-dir" autocomplete="off">
+              <div class="path-picker">
+                <input id="cache-dir" autocomplete="off">
+                <button class="secondary" id="choose-cache-dir" type="button">Choose</button>
+              </div>
             </label>
             <label>New password
               <input id="password" type="password" autocomplete="new-password">
@@ -575,18 +875,20 @@ ADMIN_HTML = r"""<!doctype html>
           </div>
           <div class="actions">
             <button id="save-config" type="button">Save settings</button>
-            <button class="secondary" id="copy-url" type="button">Copy connector URL</button>
-            <button class="danger" id="quit-app" type="button">Quit connector</button>
           </div>
           <p class="path" id="config-path"></p>
         </div>
 
         <div class="panel">
-          <h2>Connections</h2>
-          <div class="actions" style="margin-top: 0;">
-            <button id="scan" type="button">Scan DLNA</button>
-            <button class="secondary" id="refresh" type="button">Refresh</button>
-            <button class="danger" id="clear-connections" type="button">Clear remembered</button>
+          <div class="panel-head">
+            <div>
+              <h2>Connections</h2>
+              <p class="panel-subtitle">Discovered DLNA servers and browsed resource mappings.</p>
+            </div>
+            <div class="actions" style="margin-top: 0;">
+              <button id="scan" type="button">Scan DLNA</button>
+              <button class="danger" id="clear-connections" type="button">Clear</button>
+            </div>
           </div>
           <div class="scroll-table">
             <table>
@@ -598,7 +900,7 @@ ADMIN_HTML = r"""<!doctype html>
                 </tr>
               </thead>
               <tbody id="server-rows">
-                <tr><td colspan="3" class="muted">No servers scanned yet.</td></tr>
+                <tr><td colspan="3" class="empty-row">No servers scanned yet.</td></tr>
               </tbody>
             </table>
           </div>
@@ -606,8 +908,11 @@ ADMIN_HTML = r"""<!doctype html>
       </section>
 
       <section class="panel">
-        <div style="display:flex; flex-wrap:wrap; gap:0.75rem; justify-content:space-between; align-items:center;">
-          <h2 style="margin-bottom:0;">Transcode Cache</h2>
+        <div class="panel-head">
+          <div>
+            <h2>Transcode Cache</h2>
+            <p class="panel-subtitle">Browser-safe media files generated by ffmpeg for playback and sharing.</p>
+          </div>
           <div class="actions" style="margin-top:0;">
             <button class="secondary" id="refresh-cache" type="button">Refresh cache</button>
             <button class="danger" id="clear-cache" type="button">Clear all</button>
@@ -625,14 +930,19 @@ ADMIN_HTML = r"""<!doctype html>
               </tr>
             </thead>
             <tbody id="cache-rows">
-              <tr><td colspan="4" class="muted">No cached transcodes.</td></tr>
+              <tr><td colspan="4" class="empty-row">No cached transcodes.</td></tr>
             </tbody>
           </table>
         </div>
       </section>
 
       <section class="panel">
-        <h2>Activity</h2>
+        <div class="panel-head">
+          <div>
+            <h2>Activity</h2>
+            <p class="panel-subtitle">Recent admin actions from this control panel.</p>
+          </div>
+        </div>
         <div class="log" id="log">Ready.</div>
       </section>
     </main>
@@ -694,12 +1004,12 @@ ADMIN_HTML = r"""<!doctype html>
       function renderServers(servers) {
         const body = document.getElementById("server-rows");
         if (!servers.length) {
-          body.innerHTML = '<tr><td colspan="3" class="muted">No servers scanned yet.</td></tr>';
+          body.innerHTML = '<tr><td colspan="3" class="empty-row">No servers scanned yet.</td></tr>';
           return;
         }
         body.innerHTML = servers.map((server) => `
           <tr>
-            <td>${escapeHtml(server.friendlyName || "")}</td>
+            <td><strong>${escapeHtml(server.friendlyName || "")}</strong></td>
             <td>${escapeHtml([server.manufacturer, server.modelName].filter(Boolean).join(" "))}</td>
             <td class="path">${escapeHtml(server.location || "")}</td>
           </tr>
@@ -712,12 +1022,12 @@ ADMIN_HTML = r"""<!doctype html>
         document.getElementById("cache-path").textContent = `Cache: ${cache.cacheDir}`;
         const body = document.getElementById("cache-rows");
         if (!cache.files.length) {
-          body.innerHTML = '<tr><td colspan="4" class="muted">No cached transcodes.</td></tr>';
+          body.innerHTML = '<tr><td colspan="4" class="empty-row">No cached transcodes.</td></tr>';
           return;
         }
         body.innerHTML = cache.files.map((file) => `
           <tr>
-            <td class="path">${escapeHtml(file.name)}</td>
+            <td><span class="cache-file">${escapeHtml(file.name)}</span></td>
             <td>${formatBytes(file.size)}</td>
             <td>${escapeHtml(file.modifiedAt)}</td>
             <td><button class="danger" type="button" data-delete-cache="${encodeURIComponent(file.name)}">Delete</button></td>
@@ -776,6 +1086,21 @@ ADMIN_HTML = r"""<!doctype html>
         log("Settings saved.");
       }
 
+      async function chooseCacheDir() {
+        log("Opening folder picker...");
+        const payload = await api("/admin/api/pick-directory", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ currentPath: document.getElementById("cache-dir").value }),
+        });
+        if (payload.cancelled) {
+          log("Folder selection cancelled.");
+          return;
+        }
+        document.getElementById("cache-dir").value = payload.path || "";
+        log("Cache folder selected. Save settings to apply it.");
+      }
+
       async function scanServers() {
         log("Scanning for DLNA servers...");
         const payload = await api("/admin/api/discover", { method: "POST" });
@@ -823,6 +1148,7 @@ ADMIN_HTML = r"""<!doctype html>
       }
 
       wire("save-config", saveConfig);
+      wire("choose-cache-dir", chooseCacheDir);
       wire("scan", scanServers);
       wire("refresh", async () => {
         await refresh();

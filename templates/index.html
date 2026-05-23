@@ -4,16 +4,17 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>File Pipe</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
-    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css', v='19') }}">
-    <script defer src="https://cdn.jsdelivr.net/npm/spark-md5@3.0.2/spark-md5.min.js"></script>
-    <script defer src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
-    <script defer src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
-    <script defer src="{{ url_for('static', filename='xr-player.js', v='2') }}"></script>
-    <script defer src="{{ url_for('static', filename='app.js', v='44') }}"></script>
-    <script defer src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js"></script>
-    <script defer src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <link href="{{ local_static_or_cdn('vendor/bootstrap/bootstrap.min.css', 'https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css') }}" rel="stylesheet">
+    <link href="{{ local_static_or_cdn('vendor/bootstrap-icons/bootstrap-icons.css', 'https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css') }}" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css', v='22') }}">
+    <script defer src="{{ local_static_or_cdn('vendor/spark-md5/spark-md5.min.js', 'https://cdn.jsdelivr.net/npm/spark-md5@3.0.2/spark-md5.min.js') }}"></script>
+    <script defer src="{{ local_static_or_cdn('vendor/hls.js/hls.min.js', 'https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js') }}"></script>
+    <script defer src="{{ local_static_or_cdn('vendor/qrcode-generator/qrcode.min.js', 'https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js') }}"></script>
+    <script defer src="{{ local_static_or_cdn('vendor/three/three.min.js', 'https://cdn.jsdelivr.net/npm/three@0.160.1/build/three.min.js') }}"></script>
+    <script defer src="{{ url_for('static', filename='xr-player.js', v='3') }}"></script>
+    <script defer src="{{ url_for('static', filename='app.js', v='51') }}"></script>
+    <script defer src="{{ local_static_or_cdn('vendor/alpinejs/cdn.min.js', 'https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js') }}"></script>
+    <script defer src="{{ local_static_or_cdn('vendor/bootstrap/bootstrap.bundle.min.js', 'https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js') }}"></script>
   </head>
   <body class="app-body" x-data="filePipe" x-init="initApp()">
     <header class="app-header">
@@ -203,13 +204,15 @@
                         </span>
                         <span class="min-w-0">
                           <strong class="d-block text-body text-truncate" x-text="item.title"></strong>
-                          <small class="text-secondary text-truncate d-block" x-text="item.class || item.resources?.[0]?.protocolInfo || ''"></small>
-                          <template x-if="mediaStatusForItem(item)">
-                            <span class="media-status-pill" :title="mediaStatusForItem(item).label">
-                              <i class="bi" :class="[mediaStatusForItem(item).icon, mediaStatusForItem(item).className]"></i>
-                              <span x-text="mediaStatusForItem(item).label"></span>
-                            </span>
-                          </template>
+                          <small class="file-meta-line text-secondary">
+                            <template x-if="mediaStatusForItem(item)">
+                              <span class="media-status-pill" :title="mediaStatusForItem(item).label">
+                                <i class="bi" :class="[mediaStatusForItem(item).icon, mediaStatusForItem(item).className]"></i>
+                                <span x-text="mediaStatusForItem(item).label"></span>
+                              </span>
+                            </template>
+                            <span class="text-truncate" x-text="item.class || item.resources?.[0]?.protocolInfo || ''"></span>
+                          </small>
                         </span>
                       </button>
 
@@ -376,13 +379,15 @@
                               </span>
                               <span class="min-w-0">
                                 <strong class="d-block text-body text-truncate" x-text="item.title"></strong>
-                                <small class="text-secondary text-truncate d-block" x-text="item.type === 'container' ? 'Folder' : formatBytes(Number(item.resources?.[0]?.size || 0))"></small>
-                                <template x-if="mediaStatusForItem(item)">
-                                  <span class="media-status-pill" :title="mediaStatusForItem(item).label">
-                                    <i class="bi" :class="[mediaStatusForItem(item).icon, mediaStatusForItem(item).className]"></i>
-                                    <span x-text="mediaStatusForItem(item).label"></span>
-                                  </span>
-                                </template>
+                                <small class="file-meta-line text-secondary">
+                                  <template x-if="mediaStatusForItem(item)">
+                                    <span class="media-status-pill" :title="mediaStatusForItem(item).label">
+                                      <i class="bi" :class="[mediaStatusForItem(item).icon, mediaStatusForItem(item).className]"></i>
+                                      <span x-text="mediaStatusForItem(item).label"></span>
+                                    </span>
+                                  </template>
+                                  <span class="text-truncate" x-text="item.type === 'container' ? 'Folder' : formatBytes(Number(item.resources?.[0]?.size || 0))"></span>
+                                </small>
                               </span>
                             </button>
 	                            <template x-if="item.type === 'item' && item.resources && item.resources.length">
@@ -514,7 +519,10 @@
                 <div class="card-header d-flex flex-column flex-md-row gap-2 align-items-md-center justify-content-between">
                   <div>
                     <div class="fw-semibold" x-text="playerTitle || 'No video loaded'"></div>
-                    <small class="text-secondary" x-text="playerType || 'Open a video file in the player from Explorer or Sharing.'"></small>
+                    <small class="text-secondary">
+                      <span x-text="playerType || 'Open a video file in the player from Explorer or Sharing.'"></span>
+                      <i class="bi bi-check-circle-fill text-success ms-1" x-show="playerTranscodeComplete" title="Stable MP4 is fully available"></i>
+                    </small>
                   </div>
                   <div class="d-flex gap-2">
                     <div class="input-group input-group-sm transcode-mode-picker">
@@ -524,13 +532,24 @@
                         <option value="segmented">Fast segments</option>
                       </select>
                     </div>
-                    <button class="btn btn-outline-primary" type="button" @click="createBigscreenLink()" :disabled="!playerSource || playerLoading">
-                      <i class="bi bi-badge-vr"></i> Bigscreen link
-                    </button>
-                    <button class="btn btn-primary" type="button" @click="createWatchRoom()" :disabled="!playerSource || playerLoading || playerRoomCreating">
-                      <i class="bi bi-people"></i> Share player
-                      <span x-show="playerRoomId && !playerRoomCreating">(new link)</span>
-                    </button>
+                    <div class="dropdown">
+                      <button class="btn btn-primary dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" :disabled="!playerSource || playerLoading || playerRoomCreating">
+                        <i class="bi bi-people"></i> Share player
+                      </button>
+                      <ul class="dropdown-menu dropdown-menu-end">
+                        <li>
+                          <button class="dropdown-item" type="button" @click="createWatchRoom()">
+                            <i class="bi bi-people me-2"></i>
+                            <span x-text="playerRoomId && !playerRoomCreating ? 'New watch link' : 'Watch room link'"></span>
+                          </button>
+                        </li>
+                        <li>
+                          <button class="dropdown-item" type="button" @click="createBigscreenLink()">
+                            <i class="bi bi-badge-vr me-2"></i>Bigscreen VR link
+                          </button>
+                        </li>
+                      </ul>
+                    </div>
                   </div>
                 </div>
                 <div class="card-body">
@@ -550,7 +569,7 @@
                   </template>
                   <template x-if="playerUrl">
                     <div class="xr-video-window">
-                      <video id="host-video-player" class="w-100 rounded border bg-black" :src="playerType === 'application/vnd.apple.mpegurl' ? '' : playerUrl" crossorigin="anonymous" controls preload="auto" playsinline @loadedmetadata="prepareHostPlayerMedia()" @playing="setTimeout(() => inspectHostPlayerAudio(), 1000)" @play="handleHostPlayerPlay()" @pause="handleHostPlayerPause()" @seeked="handleHostPlayerSeeked()" @timeupdate.throttle.2000ms="broadcastPlayerState('time')"></video>
+                      <video id="host-video-player" class="w-100 rounded border bg-black" :src="playerType === 'application/vnd.apple.mpegurl' ? '' : playerUrl" crossorigin="anonymous" controls preload="auto" playsinline @loadedmetadata="prepareHostPlayerMedia()" @playing="setTimeout(() => inspectHostPlayerAudio(), 1000)" @play="handleHostPlayerPlay()" @pause="handleHostPlayerPause()" @seeking="handleHostPlayerSeeking()" @seeked="handleHostPlayerSeeked()" @timeupdate.throttle.2000ms="broadcastPlayerState('time')"></video>
 	                      <template x-if="playerAudioStatus">
 	                        <div class="alert alert-secondary mt-3 mb-0" x-text="playerAudioStatus"></div>
 	                      </template>
@@ -575,17 +594,14 @@
                       <label class="form-label">Watch link</label>
                       <div class="input-group">
                         <input class="form-control" type="text" readonly :value="playerRoomLink" @focus="$event.target.select()">
+                        <button class="btn btn-outline-primary" type="button" @click="openQrModal('Watch room QR code', playerRoomLink)" aria-label="Show watch room QR code">
+                          <i class="bi bi-qr-code"></i> QR
+                        </button>
                         <button class="btn btn-success" type="button" @click="copyToClipboard(playerRoomLink)">
                           <i class="bi bi-clipboard"></i> Copy
                         </button>
                       </div>
                       <div class="form-text">The key after # is required to decrypt the video stream and metadata.</div>
-                      <template x-if="playerRoomQrDataUrl">
-                        <div class="room-qr-panel mt-3">
-                          <img class="room-qr-code" :src="playerRoomQrDataUrl" alt="Watch room QR code">
-                          <div class="form-text mt-2">Scan to open the same encrypted watch link.</div>
-                        </div>
-                      </template>
                     </div>
                   </template>
                   <template x-if="playerStatus">
@@ -594,34 +610,36 @@
                 </div>
               </div>
 
-              <div class="card mb-3">
-                <div class="card-header fw-semibold">Bigscreen</div>
-                <div class="card-body">
-                  <template x-if="!bigscreenLink">
-                    <p class="text-secondary mb-0">Create a public player link for Bigscreen's browser. The file ranges stream peer-to-peer from this launcher tab.</p>
-                  </template>
-                  <template x-if="bigscreenLink">
-                    <div>
-                      <label class="form-label">Bigscreen player link</label>
-                      <div class="input-group">
-                        <input class="form-control" type="text" readonly :value="bigscreenLink" @focus="$event.target.select()">
-                        <button class="btn btn-success" type="button" @click="copyToClipboard(bigscreenLink)">
-                          <i class="bi bi-clipboard"></i> Copy
-                        </button>
+              <template x-if="bigscreenLink || bigscreenStatus">
+                <div class="card mb-3">
+                  <div class="card-header fw-semibold">Bigscreen</div>
+                  <div class="card-body">
+                    <template x-if="bigscreenLink">
+                      <div>
+                        <label class="form-label">Bigscreen player link</label>
+                        <div class="input-group">
+                          <input class="form-control" type="text" readonly :value="bigscreenLink" @focus="$event.target.select()">
+                          <button class="btn btn-outline-primary" type="button" @click="openQrModal('Bigscreen player QR code', bigscreenLink)" aria-label="Show Bigscreen player QR code">
+                            <i class="bi bi-qr-code"></i> QR
+                          </button>
+                          <button class="btn btn-success" type="button" @click="copyToClipboard(bigscreenLink)">
+                            <i class="bi bi-clipboard"></i> Copy
+                          </button>
+                        </div>
+                        <div class="form-text">Open this in Bigscreen. Keep this launcher tab open while the room watches.</div>
                       </div>
-                      <div class="form-text">Open this in Bigscreen. Keep this launcher tab open while the room watches.</div>
-                    </div>
-                  </template>
-                  <template x-if="bigscreenStatus">
-                    <div class="alert alert-info mt-3 mb-0">
-                      <div class="d-flex justify-content-between gap-3">
-                        <span x-text="bigscreenStatus"></span>
-                        <span x-show="bigscreenProgress" x-text="`${bigscreenProgress}%`"></span>
+                    </template>
+                    <template x-if="bigscreenStatus">
+                      <div class="alert alert-info mt-3 mb-0">
+                        <div class="d-flex justify-content-between gap-3">
+                          <span x-text="bigscreenStatus"></span>
+                          <span x-show="bigscreenProgress" x-text="`${bigscreenProgress}%`"></span>
+                        </div>
                       </div>
-                    </div>
-                  </template>
+                    </template>
+                  </div>
                 </div>
-              </div>
+              </template>
 
               <div class="card">
                 <div class="card-header fw-semibold">Viewers</div>
@@ -897,5 +915,29 @@
         </section>
       </div>
     </main>
+    <div class="qr-modal-layer" x-cloak x-show="qrModalOpen" x-transition.opacity @keydown.escape.window="closeQrModal()" role="presentation">
+      <div class="qr-modal-backdrop" @click="closeQrModal()"></div>
+      <section class="qr-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="qr-modal-title">
+        <div class="qr-modal-header">
+          <h2 class="h5 mb-0" id="qr-modal-title" x-text="qrModalTitle"></h2>
+          <button class="btn-close" type="button" @click="closeQrModal()" aria-label="Close QR code modal"></button>
+        </div>
+        <div class="qr-modal-body">
+          <template x-if="qrModalDataUrl">
+            <img class="room-qr-code qr-modal-code" :src="qrModalDataUrl" alt="Share link QR code">
+          </template>
+          <template x-if="qrModalStatus">
+            <div class="alert alert-info mb-0" x-text="qrModalStatus"></div>
+          </template>
+          <div class="form-text text-center">Scan with Quest or a phone to open this player link quickly.</div>
+        </div>
+        <div class="qr-modal-footer">
+          <button class="btn btn-outline-secondary" type="button" @click="closeQrModal()">Close</button>
+          <button class="btn btn-success" type="button" @click="copyToClipboard(qrModalUrl)">
+            <i class="bi bi-clipboard"></i> Copy link
+          </button>
+        </div>
+      </section>
+    </div>
   </body>
 </html>

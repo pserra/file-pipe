@@ -7,6 +7,8 @@ from PyInstaller.utils.hooks import collect_submodules
 
 block_cipher = None
 hiddenimports = collect_submodules("cryptography") + [
+    *collect_submodules("PIL"),
+    *collect_submodules("pystray"),
     "standalone_admin",
     "standalone_config",
     "local_connector",

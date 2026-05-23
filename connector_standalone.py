@@ -25,6 +25,7 @@ class StandaloneRuntime:
         self.config_path = config_path()
         self.restart_required = False
         self.server = None
+        self.shutdown_requested = threading.Event()
 
     @property
     def browser_host(self) -> str:
@@ -43,6 +44,7 @@ class StandaloneRuntime:
         self.restart_required = True
 
     def request_shutdown(self) -> None:
+        self.shutdown_requested.set()
         if not self.server:
             return
 
@@ -61,6 +63,7 @@ def parse_args():
     parser.add_argument("--tls", action="store_true", help="Force HTTPS for this run.")
     parser.add_argument("--no-tls", action="store_true", help="Force HTTP for this run.")
     parser.add_argument("--no-browser", action="store_true", help="Do not open the management UI automatically.")
+    parser.add_argument("--no-tray", action="store_true", help="Run in the foreground without a tray/menu-bar icon.")
     return parser.parse_args()
 
 
@@ -126,6 +129,76 @@ def install_signal_handlers(runtime: StandaloneRuntime) -> None:
         signal.signal(signal.SIGTERM, stop)
 
 
+def open_admin_ui(runtime: StandaloneRuntime) -> None:
+    webbrowser.open(f"{runtime.connector_url}/admin")
+
+
+def create_tray_image():
+    from PIL import Image, ImageDraw
+
+    size = 64
+    image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    draw.rounded_rectangle((8, 8, 56, 56), radius=12, fill=(37, 99, 235, 255))
+    draw.line((22, 22, 42, 22, 42, 42, 22, 42, 22, 22), fill=(255, 255, 255, 255), width=5)
+    draw.line((28, 32, 50, 32), fill=(255, 255, 255, 255), width=5)
+    return image
+
+
+def run_with_tray(runtime: StandaloneRuntime) -> int:
+    try:
+        import pystray
+    except Exception as exc:
+        print(f"Tray icon is unavailable; running in foreground instead: {exc}", flush=True)
+        return run_foreground(runtime)
+
+    server_thread = threading.Thread(target=runtime.server.serve_forever, name="file-pipe-connector", daemon=True)
+    server_thread.start()
+
+    def open_item(_icon=None, _item=None):
+        open_admin_ui(runtime)
+
+    def exit_item(icon, _item=None):
+        runtime.request_shutdown()
+        icon.stop()
+
+    def stop_icon_after_shutdown():
+        runtime.shutdown_requested.wait()
+        time.sleep(runtime.shutdown_delay + 0.1)
+        icon.stop()
+
+    menu = pystray.Menu(
+        pystray.MenuItem("Open File Pipe Connector", open_item, default=True),
+        pystray.MenuItem(f"Service: {runtime.connector_url}", open_item, enabled=False),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem("Exit", exit_item),
+    )
+    icon = pystray.Icon(
+        "file-pipe-connector",
+        create_tray_image(),
+        "File Pipe Connector",
+        menu,
+    )
+
+    threading.Thread(target=stop_icon_after_shutdown, name="file-pipe-tray-shutdown", daemon=True).start()
+
+    try:
+        icon.run()
+    finally:
+        runtime.request_shutdown()
+        server_thread.join(timeout=3)
+        runtime.server.server_close()
+    return 0
+
+
+def run_foreground(runtime: StandaloneRuntime) -> int:
+    try:
+        runtime.server.serve_forever()
+    finally:
+        runtime.server.server_close()
+    return 0
+
+
 def main() -> int:
     args = parse_args()
     config = apply_cli_overrides(load_config(), args)
@@ -175,13 +248,11 @@ def main() -> int:
     print(f"Config: {runtime.config_path}", flush=True)
 
     if config["openBrowser"]:
-        threading.Timer(0.6, lambda: webbrowser.open(admin_url)).start()
+        threading.Timer(0.6, lambda: open_admin_ui(runtime)).start()
 
-    try:
-        server.serve_forever()
-    finally:
-        server.server_close()
-    return 0
+    if args.no_tray:
+        return run_foreground(runtime)
+    return run_with_tray(runtime)
 
 
 if __name__ == "__main__":

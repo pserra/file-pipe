@@ -213,6 +213,13 @@ def create_app():
     )
     auth_config = auth_config_from_env()
 
+    @app.template_global()
+    def local_static_or_cdn(filename: str, cdn_url: str) -> str:
+        static_root = Path(app.static_folder or "static")
+        if (static_root / filename).is_file():
+            return url_for("static", filename=filename)
+        return cdn_url
+
     @app.before_request
     def require_site_auth():
         if auth_config.disabled:

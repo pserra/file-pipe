@@ -42,14 +42,24 @@ document.addEventListener("alpine:init", () => {
     playerTitle: "",
     playerSource: null,
     playerConnectorLaunch: null,
+    playerSourceVersion: 0,
+    hostMediaCapabilities: detectMediaPlaybackCapabilities(),
+    playerCompatibilitySwitching: false,
     hostHls: null,
     hostXrPlayer: null,
     playerRoomLink: "",
     playerRoomQrDataUrl: "",
     playerRoomId: "",
+    qrModalOpen: false,
+    qrModalTitle: "",
+    qrModalUrl: "",
+    qrModalDataUrl: "",
+    qrModalStatus: "",
     playerStatus: "",
     playerAudioStatus: "",
     playerLoading: false,
+    playerTranscodeAvailablePercent: 0,
+    playerTranscodeComplete: false,
     playerPeers: {},
     playerShareProgress: 0,
     playerMd5: "",
@@ -135,6 +145,49 @@ document.addEventListener("alpine:init", () => {
       } catch (error) {
         this.error = "Could not copy the link. Select it and copy manually.";
       }
+    },
+
+    async openQrModal(title, url) {
+      if (!url) return;
+      this.qrModalTitle = title;
+      this.qrModalUrl = url;
+      this.qrModalDataUrl = "";
+      this.qrModalStatus = this.hasQrGenerator() ? "Generating QR code..." : "QR code generation is unavailable.";
+      this.qrModalOpen = true;
+      if (!this.hasQrGenerator()) return;
+      try {
+        this.qrModalDataUrl = await this.renderQrCode(url, 340);
+        this.qrModalStatus = "";
+      } catch (error) {
+        this.qrModalStatus = "Could not generate the QR code.";
+      }
+    },
+
+    closeQrModal() {
+      this.qrModalOpen = false;
+    },
+
+    hasQrGenerator() {
+      return Boolean(window.QRCode?.toDataURL || window.qrcode);
+    },
+
+    async renderQrCode(value, width = 280) {
+      if (!value) return "";
+      if (window.QRCode?.toDataURL) {
+        return window.QRCode.toDataURL(value, {
+          errorCorrectionLevel: "M",
+          margin: 1,
+          width,
+        });
+      }
+      if (window.qrcode) {
+        const qr = window.qrcode(0, "M");
+        qr.addData(value);
+        qr.make();
+        const cellSize = Math.max(2, Math.floor(width / qr.getModuleCount()));
+        return qr.createDataURL(cellSize, 1);
+      }
+      return "";
     },
 
     saveConnectorUrl() {
@@ -358,19 +411,27 @@ document.addEventListener("alpine:init", () => {
     },
 
     mediaStatusFromInfo(mediaInfo) {
+      const playbackDecision = this.mediaPlaybackDecision(
+        mediaInfo,
+        contentTypeFromProtocol(mediaInfo?.resource?.protocolInfo || ""),
+      );
       if (mediaInfo.transcodedCached) {
         return { status: "cached", label: "Browser-safe transcode cached", icon: "bi-cpu-fill", className: "text-success" };
       }
-      if (mediaInfo.ok && !mediaInfo.shouldTranscode) {
+      if (mediaInfo.ok && !playbackDecision.shouldTranscode) {
         return { status: "playable", label: "Browser-playable original", icon: "bi-play-circle-fill", className: "text-success" };
       }
-      if (mediaInfo.ok && mediaInfo.shouldTranscode && mediaInfo.ffmpegAvailable) {
+      if (mediaInfo.ok && playbackDecision.shouldTranscode && mediaInfo.ffmpegAvailable) {
         return { status: "needsTranscode", label: "Needs browser-safe transcode", icon: "bi-cpu", className: "text-warning" };
       }
-      if (mediaInfo.ok && mediaInfo.shouldTranscode) {
+      if (mediaInfo.ok && playbackDecision.shouldTranscode) {
         return { status: "notPlayable", label: "Needs transcode, but ffmpeg is unavailable", icon: "bi-exclamation-triangle-fill", className: "text-danger" };
       }
       return { status: "unknown", label: mediaInfo.error || "Media status unavailable", icon: "bi-question-circle", className: "text-secondary" };
+    },
+
+    mediaPlaybackDecision(mediaInfo, contentType = "") {
+      return mediaPlaybackDecisionForCapabilities(mediaInfo, contentType, this.hostMediaCapabilities);
     },
 
     mediaStatusForItem(item) {
@@ -504,6 +565,23 @@ document.addEventListener("alpine:init", () => {
               const status = progress.status === "finalizing" ? "Finalizing" : "Transcoding";
               if (target === "player") {
                 this.playerStatus = `${status} ${title}... ${percent}%`;
+                this.playerTranscodeAvailablePercent = percent;
+                if (this.playerSource && progress.size) this.playerSource.size = Number(progress.size);
+                this.broadcastTranscodeProgress(percent);
+                if (progress.cached || progress.complete || percent >= 100) {
+                  this.playerStatus = `${title} is fully transcoded.`;
+                  this.playerTranscodeAvailablePercent = 100;
+                  this.playerTranscodeComplete = true;
+                  if (this.playerSource?.progressiveTranscode) {
+                    this.playerSource.progressiveTranscode = false;
+                    this.playerSource.shareDisabledReason = "";
+                  }
+                  this.broadcastTranscodeProgress(100);
+                  setTimeout(() => {
+                    if (this.playerStatus === `${title} is fully transcoded.`) this.playerStatus = "";
+                  }, 10000);
+                  stopped = true;
+                }
               } else {
                 this.transcodeProgress = percent;
                 this.transcodeStatus = `${status} ${title}... ${percent}%`;
@@ -831,28 +909,37 @@ document.addEventListener("alpine:init", () => {
 
     async launchFullTranscodedConnectorVideo(item, resource, mediaInfo, transcodeParts) {
       const transcodePath = `${resource.proxyPath}/transcoded`;
-      this.playerStatus = `Transcoding ${transcodeParts.join(" and ")}...`;
+      this.playerStatus = `Transcoding ${transcodeParts.join(" and ")} until enough video is ready...`;
+      this.playerTranscodeAvailablePercent = 0;
       const poller = this.pollTranscodeProgress(resource, item.title, "player");
       let transcodeInfo;
       try {
-        transcodeInfo = await this.request(`${resource.proxyPath}/transcoded-info`);
+        transcodeInfo = await this.request(`${resource.proxyPath}/transcoded-info?progressive=1`);
       } finally {
-        poller.stop();
+        if (!transcodeInfo || transcodeInfo.complete) poller.stop();
       }
+      const progress = transcodeInfo.progress || {};
+      this.playerTranscodeAvailablePercent = transcodeInfo.complete ? 100 : Number(progress.percent || 0);
       const transcodeSize = Number(transcodeInfo.size || 0);
       this.teardownHostHlsPlayer();
-      this.playerUrl = this.connectorDirectUrl(transcodePath);
+      this.playerUrl = this.connectorDirectUrl(`${transcodePath}?progressive=1`);
       this.playerType = "video/mp4";
       this.playerTitle = item.title;
+      this.playerTranscodeComplete = Boolean(transcodeInfo.complete);
       this.playerSource = {
         title: item.title,
         type: "video/mp4",
         size: transcodeSize,
         sourceLabel: `${this.sourceLabel(this.selectedServer)} video transcoded to MP4/AAC`,
         mediaInfo,
+        playbackProfile: stableMp4PlaybackProfile(mediaInfo),
+        progressiveTranscode: !transcodeInfo.complete,
+        progressiveTranscodePercent: this.playerTranscodeAvailablePercent,
+        estimatedFinalSize: Number(mediaInfo?.size || resource.size || transcodeSize || 0),
+        shareDisabledReason: "",
         checksumPath: `${transcodePath}/checksum`,
         readRange: async (start, endExclusive) => {
-          const response = await fetch(`${this.connectorUrl}${transcodePath}`, {
+          const response = await fetch(`${this.connectorUrl}${transcodePath}${this.playerSource?.progressiveTranscode ? "?progressive=1" : ""}`, {
             headers: this.connectorHeaders({
               Range: `bytes=${start}-${Math.max(start, endExclusive - 1)}`,
             }),
@@ -863,7 +950,7 @@ document.addEventListener("alpine:init", () => {
           return response.arrayBuffer();
         },
         openStream: async () => {
-          const response = await fetch(`${this.connectorUrl}${transcodePath}`, {
+          const response = await fetch(`${this.connectorUrl}${transcodePath}${this.playerSource?.progressiveTranscode ? "?progressive=1" : ""}`, {
             headers: this.connectorHeaders(),
           });
           if (!response.ok) throw new Error(`Connector returned ${response.status} for transcoded video.`);
@@ -875,7 +962,9 @@ document.addEventListener("alpine:init", () => {
           };
         },
       };
-      this.playerStatus = `Video ready with browser-safe ${transcodeParts.join(" and ")}.`;
+      this.playerStatus = transcodeInfo.complete
+        ? `Video ready with browser-safe ${transcodeParts.join(" and ")}.`
+        : "Playing while transcoding continues. Scrubbing is limited to the transcoded portion.";
       setTimeout(() => {
         this.prepareHostPlayerMedia();
       }, 0);
@@ -890,12 +979,20 @@ document.addEventListener("alpine:init", () => {
       this.playerUrl = playlistUrl;
       this.playerType = "application/vnd.apple.mpegurl";
       this.playerTitle = item.title;
+      this.playerTranscodeComplete = false;
       this.playerSource = {
         title: item.title,
         type: "application/vnd.apple.mpegurl",
         size: Number(mediaInfo?.size || hlsInfo?.mediaInfo?.size || resource.size || 0),
         sourceLabel: `${this.sourceLabel(this.selectedServer)} video segmented transcode`,
         mediaInfo: hlsInfo.mediaInfo || mediaInfo,
+        playbackProfile: {
+          sourceKind: "hls-segmented",
+          containerType: "application/vnd.apple.mpegurl",
+          videoCodec: "h264",
+          audioCodec: "aac",
+          universal: false,
+        },
         hls: true,
         shareDisabledReason: "Segmented playback is a local preview mode. Switch Transcode to Stable MP4 cache before creating watch or Bigscreen links.",
       };
@@ -961,11 +1058,16 @@ document.addEventListener("alpine:init", () => {
             ? "The running local connector does not support audio probing yet. Restart local_connector.py to enable automatic audio codec detection and transcoding; playing the original file for now."
             : `Could not inspect audio tracks with ffprobe: ${error.message}`,
         }));
+        const sourceType = contentTypeFromProtocol(resource.protocolInfo);
+        const playbackDecision = this.mediaPlaybackDecision(mediaInfo, sourceType);
         const audioCodec = mediaInfo?.audioCodec || "";
-        if (mediaInfo?.shouldTranscode && mediaInfo.ffmpegAvailable) {
-          const transcodeParts = [];
-          if (!mediaInfo.audioPlayable) transcodeParts.push(`${audioCodec ? audioCodec.toUpperCase() : "audio"} to AAC`);
-          if (!mediaInfo.videoPlayable) transcodeParts.push(`${mediaInfo.videoCodec ? mediaInfo.videoCodec.toUpperCase() : "video"} to H.264`);
+        const fallbackTranscodeParts = [];
+        if (mediaInfo?.shouldTranscode) {
+          if (!mediaInfo.audioPlayable) fallbackTranscodeParts.push(`${audioCodec ? audioCodec.toUpperCase() : "audio"} to AAC`);
+          if (!mediaInfo.videoPlayable) fallbackTranscodeParts.push(`${mediaInfo.videoCodec ? mediaInfo.videoCodec.toUpperCase() : "video"} to H.264`);
+        }
+        if (playbackDecision.shouldTranscode && mediaInfo.ffmpegAvailable) {
+          const transcodeParts = fallbackTranscodeParts.length ? fallbackTranscodeParts : ["video to H.264"];
           this.playerConnectorLaunch = { item, resource, mediaInfo, transcodeParts };
           if (this.transcodePlaybackMode === "segmented") {
             await this.launchSegmentedConnectorVideo(item, resource, mediaInfo, transcodeParts);
@@ -983,15 +1085,17 @@ document.addEventListener("alpine:init", () => {
         const type = response.headers.get("Content-Type") || contentTypeFromProtocol(resource.protocolInfo);
         const blob = await response.blob();
         this.teardownHostHlsPlayer();
-        this.playerUrl = URL.createObjectURL(blob);
-        this.playerType = type || "video/mp4";
-        this.playerTitle = item.title;
+      this.playerUrl = URL.createObjectURL(blob);
+      this.playerType = type || "video/mp4";
+      this.playerTitle = item.title;
+      this.playerTranscodeComplete = false;
         this.playerSource = {
           title: item.title,
           type: this.playerType,
           size: blob.size || Number(resource.size || 0),
           sourceLabel: `${this.sourceLabel(this.selectedServer)} video`,
           mediaInfo,
+          playbackProfile: playbackProfileFromMediaInfo(mediaInfo, this.playerType, "original"),
           checksumPath: `${resource.proxyPath}/checksum`,
           readRange: async (start, endExclusive) => blob.slice(start, endExclusive).arrayBuffer(),
           openStream: async () => ({
@@ -1000,11 +1104,15 @@ document.addEventListener("alpine:init", () => {
             arrayBuffer: () => blob.arrayBuffer(),
           }),
         };
-        this.playerConnectorLaunch = null;
-        if (mediaInfo?.shouldTranscode && !mediaInfo.ffmpegAvailable) {
+        this.playerConnectorLaunch = mediaInfo?.shouldTranscode && mediaInfo.ffmpegAvailable
+          ? { item, resource, mediaInfo, transcodeParts: fallbackTranscodeParts.length ? fallbackTranscodeParts : ["video to H.264"] }
+          : null;
+        if (playbackDecision.shouldTranscode && !mediaInfo.ffmpegAvailable) {
           this.playerStatus = "Video loaded without audio transcoding because ffmpeg is not available to the connector.";
         } else {
-          this.playerStatus = "Video loaded.";
+          this.playerStatus = playbackDecision.reason === "hevc-supported"
+            ? "Video loaded. This browser reports HEVC support for the original file."
+            : "Video loaded.";
         }
         setTimeout(() => {
           this.prepareHostPlayerMedia();
@@ -1028,11 +1136,19 @@ document.addEventListener("alpine:init", () => {
       this.playerUrl = URL.createObjectURL(this.localFile);
       this.playerType = this.localFile.type || "video/mp4";
       this.playerTitle = this.localFile.name;
+      this.playerTranscodeComplete = false;
       this.playerSource = {
         title: this.localFile.name,
         type: this.playerType,
         size: this.localFile.size,
         sourceLabel: "Local video",
+        playbackProfile: {
+          sourceKind: "local",
+          containerType: this.playerType,
+          videoCodec: "",
+          audioCodec: "",
+          universal: false,
+        },
         readRange: async (start, endExclusive) => this.localFile.slice(start, endExclusive).arrayBuffer(),
         openStream: async () => ({
           totalBytes: this.localFile.size,
@@ -1063,13 +1179,18 @@ document.addEventListener("alpine:init", () => {
       this.playerTitle = "";
       this.playerSource = null;
       this.playerConnectorLaunch = null;
+      this.playerSourceVersion = 0;
+      this.playerCompatibilitySwitching = false;
       this.playerAudioStatus = "";
       this.playerLoading = false;
+      this.playerTranscodeAvailablePercent = 0;
+      this.playerTranscodeComplete = false;
       this.bigscreenLink = "";
       this.bigscreenSessionId = "";
       this.bigscreenStatus = "";
       this.bigscreenProgress = 0;
       this.bigscreenTransfer = null;
+      this.closeQrModal();
     },
 
     resetWatchRoom() {
@@ -1090,6 +1211,7 @@ document.addEventListener("alpine:init", () => {
       this.playerRoomKey = null;
       this.playerRoomKeyText = "";
       this.playerRoomMetadata = null;
+      if (this.qrModalUrl) this.closeQrModal();
     },
 
     async refreshAudioDevices() {
@@ -1403,6 +1525,7 @@ document.addEventListener("alpine:init", () => {
     attachHostXrPlayer(video) {
       if (!window.FilePipeXrPlayer || !video) return;
       this.hostXrPlayer = window.FilePipeXrPlayer.attach(video, {
+        panelSelector: ".xr-side-panel",
         storageKey: "filePipeHostXrPlayer",
       });
     },
@@ -1415,7 +1538,12 @@ document.addEventListener("alpine:init", () => {
         this.playerAudioStatus = mediaInfo.error || "Could not inspect audio tracks with ffprobe.";
         return;
       }
-      if (mediaInfo?.shouldTranscode && mediaInfo.ffmpegAvailable) {
+      const profile = this.playerSource?.playbackProfile;
+      if (profile?.sourceKind === "original" && isHevcCodec(profile.videoCodec)) {
+        this.playerAudioStatus = "Direct-playing the original HEVC stream because this browser reports HEVC support.";
+        return;
+      }
+      if (profile?.sourceKind !== "original" && mediaInfo?.shouldTranscode && mediaInfo.ffmpegAvailable) {
         const audioCodec = mediaInfo.audioCodec ? mediaInfo.audioCodec.toUpperCase() : "the original audio codec";
         const videoCodec = mediaInfo.videoCodec ? mediaInfo.videoCodec.toUpperCase() : "the original video codec";
         const reasons = [];
@@ -1450,6 +1578,28 @@ document.addEventListener("alpine:init", () => {
     },
 
     async getPlayerSourceChecksum(label, onProgress = null) {
+      if (this.playerSource?.progressiveTranscode) {
+        if (onProgress) onProgress(Math.max(1, Number(this.playerTranscodeAvailablePercent || 0)));
+        let originalMd5 = "";
+        let originalSize = Number(this.playerSource.estimatedFinalSize || this.playerSource.size || 0);
+        const originalResource = this.playerConnectorLaunch?.resource;
+        if (originalResource?.proxyPath) {
+          try {
+            const checksum = await this.request(`${originalResource.proxyPath}/checksum`);
+            originalMd5 = checksum?.md5 || "";
+            originalSize = Number(checksum?.size || originalSize || 0);
+          } catch (error) {
+            this.playerStatus = `Could not get original checksum for ${label}; continuing with provisional transcode metadata.`;
+          }
+        }
+        return {
+          md5: originalMd5,
+          totalBytes: Number(this.playerSource.estimatedFinalSize || this.playerSource.size || 0),
+          originalBytes: originalSize,
+          provisional: true,
+          source: "original-source",
+        };
+      }
       if (this.playerSource?.checksumPath) {
         try {
           const checksum = await this.request(this.playerSource.checksumPath);
@@ -1471,6 +1621,59 @@ document.addEventListener("alpine:init", () => {
       return computeSourceMd5(hashSource, this.playerSource.size, (bytesRead, totalBytes) => {
         if (onProgress) onProgress(totalBytes ? Math.round((bytesRead / totalBytes) * 100) : 0);
       });
+    },
+
+    async publishCurrentWatchRoomMetadata(label = "viewer acknowledgement") {
+      if (!this.playerRoomId || !this.playerRoomKey || !this.playerSource) {
+        throw new Error("Create a watch room before publishing source metadata.");
+      }
+      const hashResult = await this.getPlayerSourceChecksum(label, (progress) => {
+        this.playerShareProgress = progress;
+      });
+      this.playerSourceVersion += 1;
+      this.playerRoomMetadata = {
+        name: this.playerSource.title,
+        type: this.playerSource.type || "video/mp4",
+        size: hashResult.totalBytes,
+        md5: hashResult.md5,
+        originalMd5: hashResult.provisional ? hashResult.md5 : "",
+        originalSize: hashResult.originalBytes || 0,
+        checksumKind: hashResult.provisional ? "original-source" : "stream",
+        provisional: Boolean(hashResult.provisional),
+        source: this.playerSource.sourceLabel,
+        mode: "Encrypted WebRTC watch room",
+        sharedAt: new Date().toISOString(),
+        playbackProfile: this.playerSource.playbackProfile || null,
+        mediaInfo: mediaInfoSummary(this.playerSource.mediaInfo),
+        hostCapabilities: this.hostMediaCapabilities,
+        sourceVersion: this.playerSourceVersion,
+        progressiveTranscode: this.playerSource.progressiveTranscode ? {
+          percent: Number(this.playerTranscodeAvailablePercent || 0),
+          complete: false,
+        } : null,
+      };
+      const metadataIv = crypto.getRandomValues(new Uint8Array(12));
+      const encryptedMetadata = await crypto.subtle.encrypt(
+        { name: "AES-GCM", iv: metadataIv },
+        this.playerRoomKey,
+        new TextEncoder().encode(JSON.stringify(this.playerRoomMetadata)),
+      );
+      const response = await fetch(`/api/watch/rooms/${this.playerRoomId}/metadata`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          metadata: {
+            iv: base64UrlEncode(metadataIv),
+            ciphertext: base64UrlEncode(new Uint8Array(encryptedMetadata)),
+          },
+        }),
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.error || `Could not publish room metadata: ${response.status}`);
+      }
+      this.playerMd5 = this.playerRoomMetadata.md5;
+      return this.playerRoomMetadata;
     },
 
     async createWatchRoom() {
@@ -1501,9 +1704,6 @@ document.addEventListener("alpine:init", () => {
         ? "Requesting video checksum from the connector..."
         : "Hashing video for viewer acknowledgement...";
       try {
-        const hashResult = await this.getPlayerSourceChecksum("viewer acknowledgement", (progress) => {
-          this.playerShareProgress = progress;
-        });
         this.playerRoomKey = await crypto.subtle.generateKey(
           { name: "AES-GCM", length: 256 },
           true,
@@ -1519,38 +1719,8 @@ document.addEventListener("alpine:init", () => {
         if (!createdResponse.ok) throw new Error(created.error || `Could not create watch room: ${createdResponse.status}`);
         if (!created.roomId) throw new Error("Could not create watch room.");
 
-        this.playerRoomMetadata = {
-          name: this.playerSource.title,
-          type: this.playerSource.type || "video/mp4",
-          size: hashResult.totalBytes,
-          md5: hashResult.md5,
-          source: this.playerSource.sourceLabel,
-          mode: "Encrypted WebRTC watch room",
-          sharedAt: new Date().toISOString(),
-        };
-        const metadataIv = crypto.getRandomValues(new Uint8Array(12));
-        const encryptedMetadata = await crypto.subtle.encrypt(
-          { name: "AES-GCM", iv: metadataIv },
-          this.playerRoomKey,
-          new TextEncoder().encode(JSON.stringify(this.playerRoomMetadata)),
-        );
-        const response = await fetch(`/api/watch/rooms/${created.roomId}/metadata`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            metadata: {
-              iv: base64UrlEncode(metadataIv),
-              ciphertext: base64UrlEncode(new Uint8Array(encryptedMetadata)),
-            },
-          }),
-        });
-        if (!response.ok) {
-          const payload = await response.json().catch(() => ({}));
-          throw new Error(payload.error || `Could not publish room metadata: ${response.status}`);
-        }
-
         this.playerRoomId = created.roomId;
-        this.playerMd5 = this.playerRoomMetadata.md5;
+        await this.publishCurrentWatchRoomMetadata("viewer acknowledgement");
         this.playerRoomLink = `${window.location.origin}/watch/${created.roomId}#key=${this.playerRoomKeyText}`;
         await this.renderPlayerRoomQr();
         this.playerStatus = "Watch room ready. Keep this tab open while viewers watch.";
@@ -1566,12 +1736,7 @@ document.addEventListener("alpine:init", () => {
     async renderPlayerRoomQr() {
       this.playerRoomQrDataUrl = "";
       const value = this.playerRoomLink;
-      if (!value || !window.QRCode?.toDataURL) return;
-      this.playerRoomQrDataUrl = await window.QRCode.toDataURL(value, {
-        errorCorrectionLevel: "M",
-        margin: 1,
-        width: 280,
-      });
+      this.playerRoomQrDataUrl = await this.renderQrCode(value);
     },
 
     async createBigscreenLink() {
@@ -1624,9 +1789,19 @@ document.addEventListener("alpine:init", () => {
           type: this.playerSource.type || "video/mp4",
           size: hashResult.totalBytes,
           md5: hashResult.md5,
+          originalMd5: hashResult.provisional ? hashResult.md5 : "",
+          originalSize: hashResult.originalBytes || 0,
+          checksumKind: hashResult.provisional ? "original-source" : "stream",
+          provisional: Boolean(hashResult.provisional),
           source: this.playerSource.sourceLabel,
           mode: "Bigscreen P2P range stream",
           sharedAt: new Date().toISOString(),
+          playbackProfile: this.playerSource.playbackProfile || null,
+          mediaInfo: mediaInfoSummary(this.playerSource.mediaInfo),
+          progressiveTranscode: this.playerSource.progressiveTranscode ? {
+            percent: Number(this.playerTranscodeAvailablePercent || 0),
+            complete: false,
+          } : null,
         };
         const metadataIv = crypto.getRandomValues(new Uint8Array(12));
         const encryptedMetadata = await crypto.subtle.encrypt(
@@ -1777,6 +1952,22 @@ document.addEventListener("alpine:init", () => {
       }
     },
 
+    broadcastTranscodeProgress(percent) {
+      if (!this.playerRoomId || !this.playerRoomMetadata?.progressiveTranscode) return;
+      const normalizedPercent = Math.max(0, Math.min(100, Number(percent || 0)));
+      this.playerRoomMetadata.progressiveTranscode = {
+        percent: normalizedPercent,
+        complete: normalizedPercent >= 100,
+      };
+      for (const record of this.connectedWatchPeers()) {
+        sendChannelJson(record.channel, {
+          type: "transcode-progress",
+          percent: normalizedPercent,
+          complete: normalizedPercent >= 100,
+        });
+      }
+    },
+
     async pollWatchRoomParticipants() {
       if (!this.playerRoomId) return;
       const token = this.playerPollToken + 1;
@@ -1813,6 +2004,7 @@ document.addEventListener("alpine:init", () => {
                   remoteMicMuted: Boolean(existing?.remoteMicMuted),
                   voiceAvailable: Boolean(existing?.voiceAvailable),
                   micMuted: Boolean(existing?.micMuted),
+                  mediaCapabilities: existing?.mediaCapabilities || null,
                 };
                 this.connectWatchParticipant(participant);
               } else if (participant.kicked) {
@@ -1866,6 +2058,11 @@ document.addEventListener("alpine:init", () => {
           const message = JSON.parse(event.data);
           if (message.type === "voice-state") {
             this.updateParticipantVoiceState(record, message);
+            return;
+          }
+          if (message.type === "media-capabilities") {
+            record.mediaCapabilities = message.capabilities || null;
+            this.ensureWatchRoomCompatibleWithPeer(record);
             return;
           }
           if (message.type === "range-request") {
@@ -1981,12 +2178,13 @@ document.addEventListener("alpine:init", () => {
         if (!sendChannelJson(channel, {
           type: "video-done",
           md5,
-          expectedMd5: this.playerRoomMetadata.md5,
+          expectedMd5: this.playerRoomMetadata.checksumKind === "original-source" ? "" : this.playerRoomMetadata.md5,
           chunkCount: chunkIndex,
           sentBytes,
         })) throw dataChannelDisconnectedError();
-        record.status = md5 === this.playerRoomMetadata.md5 ? "Complete" : "Hash mismatch";
-        record.videoComplete = md5 === this.playerRoomMetadata.md5;
+        const hashMatches = this.playerRoomMetadata.checksumKind === "original-source" || md5 === this.playerRoomMetadata.md5;
+        record.status = hashMatches ? "Complete" : "Hash mismatch";
+        record.videoComplete = hashMatches;
       } catch (error) {
         if (isDataChannelClosedError(error)) {
           record.status = "Disconnected";
@@ -2005,7 +2203,18 @@ document.addEventListener("alpine:init", () => {
     async streamWatchRange(message, record) {
       const channel = record.channel;
       if (!channel || channel.readyState !== "open") return;
-      const totalSize = Number(this.playerRoomMetadata?.size || this.playerSource?.size || 0);
+      const sourceVersion = Number(this.playerRoomMetadata?.sourceVersion || 0);
+      if (message.sourceVersion && Number(message.sourceVersion) !== sourceVersion) {
+        sendChannelJson(channel, {
+          type: "range-error",
+          requestId: message.requestId,
+          sourceVersion: message.sourceVersion,
+          error: "The host switched video sources. Reloading the viewer stream.",
+        });
+        return;
+      }
+      const source = this.playerSource;
+      const totalSize = Number(this.playerRoomMetadata?.size || source?.size || 0);
       const start = Math.max(0, Number(message.start || 0));
       const end = Math.min(totalSize - 1, Number(message.end ?? totalSize - 1));
       const requestId = message.requestId;
@@ -2017,7 +2226,7 @@ document.addEventListener("alpine:init", () => {
         for (let offset = start; offset <= end; offset += chunkSize) {
           if (record.cancelledRanges?.has(requestId)) break;
           const nextEnd = Math.min(offset + chunkSize - 1, end);
-          const plainChunk = exactArrayBuffer(await this.playerSource.readRange(offset, nextEnd + 1));
+          const plainChunk = exactArrayBuffer(await source.readRange(offset, nextEnd + 1));
           rangeMd5.append(plainChunk);
           const iv = crypto.getRandomValues(new Uint8Array(12));
           const ciphertext = await crypto.subtle.encrypt(
@@ -2030,6 +2239,7 @@ document.addEventListener("alpine:init", () => {
             requestId,
             start: offset,
             end: nextEnd,
+            sourceVersion,
             iv: base64UrlEncode(iv),
           }, ciphertext)) throw dataChannelDisconnectedError();
           if (!(await waitForDataChannelBuffer(channel))) throw dataChannelDisconnectedError();
@@ -2043,6 +2253,7 @@ document.addEventListener("alpine:init", () => {
           if (!sendChannelJson(channel, {
             type: "range-done",
             requestId,
+            sourceVersion,
             md5: rangeMd5.end(),
             sentBytes,
           })) throw dataChannelDisconnectedError();
@@ -2058,6 +2269,7 @@ document.addEventListener("alpine:init", () => {
           sendChannelJson(channel, {
             type: "range-error",
             requestId,
+            sourceVersion,
             error: error.message,
           });
         }
@@ -2096,6 +2308,75 @@ document.addEventListener("alpine:init", () => {
         if (record.peer) record.peer.close();
         this.removeHostVoiceElement(record.id);
         record.status = "Kicked";
+      }
+    },
+
+    async ensureWatchRoomCompatibleWithPeer(record) {
+      if (!this.playerRoomId || !this.playerRoomMetadata || !record?.mediaCapabilities) return;
+      const profile = this.playerRoomMetadata.playbackProfile;
+      if (canCapabilitiesPlayProfile(record.mediaCapabilities, profile)) {
+        record.mediaStatus = "Compatible";
+        return;
+      }
+      record.mediaStatus = "Needs Stable MP4";
+      if (profile?.sourceKind === "stable-mp4") {
+        record.status = "Codec unsupported";
+        this.playerStatus = `${record.name} reports this browser cannot play the current Stable MP4 source.`;
+        return;
+      }
+      if (!this.playerConnectorLaunch?.mediaInfo?.ffmpegAvailable) {
+        record.status = "Codec unsupported";
+        this.playerStatus = `${record.name} cannot play ${playbackProfileLabel(profile)}, and Stable MP4 transcode is unavailable.`;
+        return;
+      }
+      await this.switchWatchRoomToStableMp4ForCompatibility(`${record.name} cannot play ${playbackProfileLabel(profile)}.`);
+    },
+
+    async switchWatchRoomToStableMp4ForCompatibility(reason) {
+      if (this.playerCompatibilitySwitching) return;
+      const launch = this.playerConnectorLaunch;
+      if (!launch?.item || !launch?.resource || !launch?.mediaInfo?.ffmpegAvailable) return;
+      this.playerCompatibilitySwitching = true;
+      const video = document.getElementById("host-video-player");
+      const resumeTime = video?.currentTime || 0;
+      const wasPaused = !video || video.paused;
+      const playbackRate = video?.playbackRate || 1;
+      this.hostSyncBarrier = null;
+      this.clearPendingHostSeekSync();
+      this.playerStatus = `Switching room to Stable MP4. ${reason}`;
+      try {
+        await this.launchFullTranscodedConnectorVideo(launch.item, launch.resource, launch.mediaInfo, launch.transcodeParts);
+        this.playerConnectorLaunch = launch;
+        const switchedVideo = document.getElementById("host-video-player");
+        if (switchedVideo) {
+          this.suppressHostPlayerEvents = true;
+          switchedVideo.pause();
+          switchedVideo.currentTime = resumeTime;
+          switchedVideo.playbackRate = playbackRate;
+          setTimeout(() => {
+            this.suppressHostPlayerEvents = false;
+          }, 1000);
+        }
+        await this.publishCurrentWatchRoomMetadata("compatibility fallback");
+        for (const peer of this.connectedWatchPeers()) {
+          peer.videoComplete = false;
+          peer.readySyncId = "";
+          peer.cancelledRanges?.clear();
+          sendChannelJson(peer.channel, {
+            type: "source-update",
+            reason: "A participant could not play the original stream, so the room switched to Stable MP4.",
+            metadata: this.playerRoomMetadata,
+          });
+        }
+        this.playerStatus = "Room switched to Stable MP4 for participant compatibility.";
+        if (!wasPaused) {
+          setTimeout(() => this.prepareSynchronizedResume("source-switch", resumeTime), 1200);
+        }
+      } catch (error) {
+        this.error = error.message;
+        this.playerStatus = "";
+      } finally {
+        this.playerCompatibilitySwitching = false;
       }
     },
 
@@ -2156,6 +2437,22 @@ document.addEventListener("alpine:init", () => {
         return;
       }
       this.broadcastPlayerState("seek");
+    },
+
+    handleHostPlayerSeeking() {
+      const video = document.getElementById("host-video-player");
+      if (!video || !this.playerSource?.progressiveTranscode) return;
+      const percent = Number(this.playerTranscodeAvailablePercent || 0);
+      if (!Number.isFinite(video.duration) || percent <= 0 || percent >= 100) return;
+      const maxTime = Math.max(0, (video.duration * percent / 100) - 2);
+      if (video.currentTime > maxTime) {
+        this.suppressHostPlayerEvents = true;
+        video.currentTime = maxTime;
+        this.playerStatus = `Still transcoding. Scrubbing is available up to ${percent}%.`;
+        setTimeout(() => {
+          this.suppressHostPlayerEvents = false;
+        }, 300);
+      }
     },
 
     handleHostPlayerPause() {
@@ -2681,6 +2978,143 @@ function mediaHasResumeBuffer(video, targetTime, secondsAhead, startedAt) {
   if (elapsed >= SYNC_RELAX_AFTER_MS && mediaHasBufferedTarget(video, targetTime, SYNC_RELAXED_BUFFER_SECONDS)) return true;
   if (elapsed >= SYNC_FORCE_AFTER_MS && mediaHasCurrentTarget(video, targetTime)) return true;
   return false;
+}
+
+function detectMediaPlaybackCapabilities() {
+  const video = document.createElement("video");
+  const canPlay = (tests) => tests.some((type) => {
+    const result = video.canPlayType(type);
+    return result === "probably" || result === "maybe";
+  });
+  return {
+    videoCodecs: {
+      h264: canPlay([
+        'video/mp4; codecs="avc1.42E01E"',
+        'video/mp4; codecs="avc1.4D401E"',
+      ]),
+      hevc: canPlay([
+        'video/mp4; codecs="hvc1"',
+        'video/mp4; codecs="hev1"',
+        'video/mp4; codecs="hvc1.1.6.L93.B0"',
+      ]),
+    },
+    audioCodecs: {
+      aac: canPlay(['audio/mp4; codecs="mp4a.40.2"', 'video/mp4; codecs="mp4a.40.2"']),
+      mp3: canPlay(['audio/mpeg', 'audio/mp3']),
+    },
+    containers: {
+      mp4: canPlay(["video/mp4"]),
+      hls: canPlay(["application/vnd.apple.mpegurl"]),
+    },
+  };
+}
+
+function mediaPlaybackDecisionForCapabilities(mediaInfo, contentType = "", capabilities = detectMediaPlaybackCapabilities()) {
+  if (!mediaInfo?.ok) {
+    return {
+      shouldTranscode: false,
+      audioPlayable: true,
+      videoPlayable: true,
+      reason: "unknown",
+    };
+  }
+  const audioCodec = codecName(mediaInfo.audioCodec);
+  const videoCodec = codecName(mediaInfo.videoCodec);
+  const hasAudio = Boolean(mediaInfo.defaultAudio);
+  const hasVideo = Boolean(mediaInfo.defaultVideo);
+  const audioPlayable = !hasAudio || Boolean(mediaInfo.audioPlayable);
+  let videoPlayable = !hasVideo || Boolean(mediaInfo.videoPlayable);
+  let reason = videoPlayable ? "native" : "unsupported";
+  if (!videoPlayable && isHevcCodec(videoCodec) && isMp4LikeContentType(contentType) && capabilities?.videoCodecs?.hevc) {
+    videoPlayable = true;
+    reason = "hevc-supported";
+  }
+  return {
+    shouldTranscode: (hasAudio && !audioPlayable) || (hasVideo && !videoPlayable),
+    audioPlayable,
+    videoPlayable,
+    reason,
+  };
+}
+
+function playbackProfileFromMediaInfo(mediaInfo, contentType = "", sourceKind = "original") {
+  const videoCodec = codecName(mediaInfo?.videoCodec);
+  const audioCodec = codecName(mediaInfo?.audioCodec);
+  return {
+    sourceKind,
+    containerType: contentType || "application/octet-stream",
+    videoCodec,
+    audioCodec,
+    universal: sourceKind === "stable-mp4" || (videoCodec === "h264" && ["", "aac", "mp3"].includes(audioCodec) && isMp4LikeContentType(contentType)),
+  };
+}
+
+function stableMp4PlaybackProfile(mediaInfo) {
+  return {
+    sourceKind: "stable-mp4",
+    containerType: "video/mp4",
+    videoCodec: "h264",
+    audioCodec: mediaInfo?.defaultAudio ? "aac" : "",
+    universal: true,
+  };
+}
+
+function mediaInfoSummary(mediaInfo) {
+  if (!mediaInfo) return null;
+  return {
+    ok: mediaInfo.ok,
+    audioCodec: mediaInfo.audioCodec || "",
+    videoCodec: mediaInfo.videoCodec || "",
+    audioPlayable: Boolean(mediaInfo.audioPlayable),
+    videoPlayable: Boolean(mediaInfo.videoPlayable),
+    shouldTranscode: Boolean(mediaInfo.shouldTranscode),
+    defaultAudio: mediaInfo.defaultAudio ? {
+      codec_name: mediaInfo.defaultAudio.codec_name,
+      profile: mediaInfo.defaultAudio.profile,
+    } : null,
+    defaultVideo: mediaInfo.defaultVideo ? {
+      codec_name: mediaInfo.defaultVideo.codec_name,
+      profile: mediaInfo.defaultVideo.profile,
+      pix_fmt: mediaInfo.defaultVideo.pix_fmt,
+      width: mediaInfo.defaultVideo.width,
+      height: mediaInfo.defaultVideo.height,
+    } : null,
+  };
+}
+
+function canCapabilitiesPlayProfile(capabilities, profile) {
+  if (!profile || profile.universal || profile.sourceKind === "stable-mp4") return true;
+  const videoCodec = codecName(profile.videoCodec);
+  if (isHevcCodec(videoCodec)) {
+    return Boolean(capabilities?.videoCodecs?.hevc) && isMp4LikeContentType(profile.containerType);
+  }
+  if (videoCodec === "h264" || videoCodec === "avc1") {
+    return capabilities?.videoCodecs?.h264 !== false;
+  }
+  return true;
+}
+
+function playbackProfileLabel(profile) {
+  if (!profile) return "the current source";
+  const videoCodec = profile.videoCodec ? profile.videoCodec.toUpperCase() : "video";
+  const container = profile.containerType || "unknown container";
+  return `${videoCodec} in ${container}`;
+}
+
+function codecName(value) {
+  const codec = String(value || "").toLowerCase().trim();
+  if (codec === "h265") return "hevc";
+  if (codec === "avc" || codec === "avc1") return "h264";
+  return codec;
+}
+
+function isHevcCodec(codec) {
+  return ["hevc", "h265", "hvc1", "hev1"].includes(codecName(codec));
+}
+
+function isMp4LikeContentType(contentType) {
+  const type = String(contentType || "").toLowerCase();
+  return type.includes("mp4") || type.includes("quicktime") || type.includes("x-m4v");
 }
 
 function clamp(value, min, max) {

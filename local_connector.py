@@ -55,9 +55,11 @@ MEDIA_INFO_CACHE: Dict[str, Dict[str, object]] = {}
 LOCAL_DIRECTORY_FILE = Path(os.environ.get("FILE_PIPE_DIRECTORIES_FILE", "instance/served_directories.json"))
 PLAYABLE_BROWSER_AUDIO_CODECS = {"aac", "mp3", "opus", "vorbis", "flac", "alac"}
 PLAYABLE_BROWSER_VIDEO_CODECS = {"h264"}
-TRANSCODE_CACHE_VERSION = "v3"
+TRANSCODE_CACHE_VERSION = "v4"
 TRANSCODE_CACHE_DIR = Path(os.environ.get("FILE_PIPE_TRANSCODE_CACHE_DIR", "instance/transcodes"))
 HLS_SEGMENT_SECONDS = int(os.environ.get("FILE_PIPE_HLS_SEGMENT_SECONDS", "6"))
+PROGRESSIVE_TRANSCODE_START_PERCENT = int(os.environ.get("FILE_PIPE_PROGRESSIVE_TRANSCODE_START_PERCENT", "3"))
+PROGRESSIVE_TRANSCODE_MIN_BYTES = int(os.environ.get("FILE_PIPE_PROGRESSIVE_TRANSCODE_MIN_BYTES", str(2 * 1024 * 1024)))
 TRANSCODE_LOCKS: Dict[str, threading.Lock] = {}
 TRANSCODE_PROGRESS: Dict[str, Dict[str, object]] = {}
 MEDIA_TOOL_DIRS = [
@@ -957,7 +959,7 @@ def build_transcode_command(
     command.extend(
         [
             "-movflags",
-            "+faststart",
+            "+frag_keyframe+empty_moov+default_base_moof",
             "-f",
             "mp4",
             output_path,
@@ -1038,6 +1040,10 @@ def build_hls_segment_command(
 def transcode_cache_path(resource_id: str, url: str) -> Path:
     url_hash = hashlib.sha256(f"{TRANSCODE_CACHE_VERSION}:{url}".encode("utf-8")).hexdigest()[:16]
     return TRANSCODE_CACHE_DIR / f"{resource_id}-{url_hash}.mp4"
+
+
+def transcode_part_path(resource_id: str, url: str) -> Path:
+    return transcode_cache_path(resource_id, url).with_suffix(".part.mp4")
 
 
 def transcoded_file_cached(resource_id: str, url: str) -> bool:
@@ -1147,6 +1153,30 @@ def update_transcode_progress(resource_id: str, **values) -> None:
     TRANSCODE_PROGRESS[resource_id] = current
 
 
+def transcode_artifact(resource_id: str, url: str) -> Optional[Dict[str, object]]:
+    path = transcode_cache_path(resource_id, url)
+    if path.exists() and path.stat().st_size > 0:
+        stat = path.stat()
+        return {
+            "path": str(path),
+            "size": stat.st_size,
+            "contentType": "video/mp4",
+            "cached": True,
+            "complete": True,
+        }
+    part_path = transcode_part_path(resource_id, url)
+    if part_path.exists() and part_path.stat().st_size > 0:
+        stat = part_path.stat()
+        return {
+            "path": str(part_path),
+            "size": stat.st_size,
+            "contentType": "video/mp4",
+            "cached": False,
+            "complete": False,
+        }
+    return None
+
+
 def run_transcode_command(command: List[str], temp_path: Path, resource_id: str, duration: Optional[float]) -> None:
     progress_command = [*command[:-1], "-progress", "pipe:1", "-nostats", command[-1]]
     process = subprocess.Popen(
@@ -1171,7 +1201,8 @@ def run_transcode_command(command: List[str], temp_path: Path, resource_id: str,
                 percent = 0
                 if duration and duration > 0:
                     percent = max(0, min(99, int((seconds / duration) * 100)))
-                update_transcode_progress(resource_id, status="running", seconds=seconds, percent=percent)
+                size = temp_path.stat().st_size if temp_path.exists() else 0
+                update_transcode_progress(resource_id, status="running", seconds=seconds, percent=percent, size=size)
             elif key == "progress" and value == "end":
                 update_transcode_progress(resource_id, status="finalizing", percent=99)
         assert process.stderr is not None
@@ -1188,6 +1219,83 @@ def run_transcode_command(command: List[str], temp_path: Path, resource_id: str,
         if temp_path.exists():
             temp_path.unlink()
         raise RuntimeError(f"ffmpeg could not transcode this resource: {detail}")
+
+
+def start_transcoded_file(resource_id: str, url: str, media_info: Dict[str, object]) -> Dict[str, object]:
+    ffmpeg_path = find_media_tool("ffmpeg")
+    if not ffmpeg_path:
+        raise RuntimeError("ffmpeg is not installed or is not on PATH.")
+    path = transcode_cache_path(resource_id, url)
+    part_path = transcode_part_path(resource_id, url)
+    cached = transcode_artifact(resource_id, url)
+    if cached and cached.get("complete"):
+        update_transcode_progress(resource_id, status="cached", percent=100, size=cached["size"])
+        return cached
+    status = TRANSCODE_PROGRESS.get(resource_id, {})
+    if status.get("status") in {"running", "finalizing"}:
+        artifact = transcode_artifact(resource_id, url)
+        if artifact:
+            return artifact
+        return {
+            "path": str(part_path),
+            "size": 0,
+            "contentType": "video/mp4",
+            "cached": False,
+            "complete": False,
+        }
+
+    TRANSCODE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    if part_path.exists():
+        part_path.unlink()
+    command = build_transcode_command(url, media_info, str(part_path), ffmpeg_path)
+    update_transcode_progress(
+        resource_id,
+        status="running",
+        percent=0,
+        seconds=0,
+        duration=parse_float(media_info.get("duration")),
+        size=0,
+        error="",
+        progressive=True,
+    )
+
+    def worker() -> None:
+        lock = lock_for_transcode(path)
+        with lock:
+            try:
+                run_transcode_command(command, part_path, resource_id, parse_float(media_info.get("duration")))
+                part_path.replace(path)
+                stat = path.stat()
+                update_transcode_progress(resource_id, status="complete", percent=100, size=stat.st_size, progressive=False)
+            except Exception:
+                if part_path.exists():
+                    part_path.unlink()
+
+    threading.Thread(target=worker, daemon=True).start()
+    return {
+        "path": str(part_path),
+        "size": 0,
+        "contentType": "video/mp4",
+        "cached": False,
+        "complete": False,
+    }
+
+
+def wait_for_progressive_transcode(resource_id: str, url: str, timeout: float = 45.0) -> Dict[str, object]:
+    started = time.monotonic()
+    while time.monotonic() - started < timeout:
+        artifact = transcode_artifact(resource_id, url)
+        status = TRANSCODE_PROGRESS.get(resource_id, {})
+        if artifact and (
+            artifact.get("complete")
+            or artifact.get("size", 0) >= PROGRESSIVE_TRANSCODE_MIN_BYTES
+            or int(status.get("percent") or 0) >= PROGRESSIVE_TRANSCODE_START_PERCENT
+        ):
+            return artifact
+        if status.get("status") == "error":
+            raise RuntimeError(str(status.get("error") or "ffmpeg could not transcode this resource."))
+        time.sleep(0.25)
+    raise RuntimeError("Timed out waiting for enough transcoded video to start playback.")
 
 
 def ensure_transcoded_file(resource_id: str, url: str, media_info: Dict[str, object]) -> Dict[str, object]:
@@ -1209,7 +1317,7 @@ def ensure_transcoded_file(resource_id: str, url: str, media_info: Dict[str, obj
 
         if not path.exists() or path.stat().st_size == 0:
             TRANSCODE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-            temp_path = path.with_suffix(f".{os.getpid()}.part")
+            temp_path = transcode_part_path(resource_id, url)
             if temp_path.exists():
                 temp_path.unlink()
             command = build_transcode_command(url, media_info, str(temp_path), ffmpeg_path)
@@ -1370,6 +1478,94 @@ def serve_file_with_range(path: Path, content_type: str):
         headers=headers,
         content_type=content_type,
     )
+
+
+def transcode_running(resource_id: str) -> bool:
+    return TRANSCODE_PROGRESS.get(resource_id, {}).get("status") in {"running", "finalizing"}
+
+
+def parse_open_range_header(range_header: str) -> Optional[Tuple[int, Optional[int]]]:
+    if not range_header or not range_header.startswith("bytes="):
+        return None
+    range_value = range_header.removeprefix("bytes=").split(",", 1)[0].strip()
+    if "-" not in range_value:
+        return None
+    start_text, end_text = range_value.split("-", 1)
+    if not start_text.isdigit():
+        return None
+    start = int(start_text)
+    end = int(end_text) if end_text.isdigit() else None
+    if end is not None and end < start:
+        return None
+    return start, end
+
+
+def serve_growing_file_with_range(path: Path, content_type: str, resource_id: str):
+    open_range = parse_open_range_header(request.headers.get("Range", ""))
+    chunk_size = 1024 * 256
+
+    if open_range is None and request.headers.get("Range"):
+        return Response("", status=416, headers={"Accept-Ranges": "bytes"}, content_type=content_type)
+
+    start = open_range[0] if open_range else 0
+    requested_end = open_range[1] if open_range else None
+
+    def wait_for_size(min_size: int, timeout: float = 30.0) -> bool:
+        started = time.monotonic()
+        while time.monotonic() - started < timeout:
+            if path.exists() and path.stat().st_size >= min_size:
+                return True
+            if not transcode_running(resource_id):
+                return path.exists() and path.stat().st_size >= min_size
+            time.sleep(0.1)
+        return False
+
+    if not wait_for_size(start + 1):
+        current_size = path.stat().st_size if path.exists() else 0
+        return Response(
+            "",
+            status=416,
+            headers={
+                "Accept-Ranges": "bytes",
+                "Content-Range": f"bytes */{current_size}",
+                "Cache-Control": "no-store",
+            },
+            content_type=content_type,
+        )
+
+    def generate():
+        position = start
+        with path.open("rb") as file:
+            file.seek(start)
+            while True:
+                current_size = path.stat().st_size if path.exists() else 0
+                if requested_end is not None and position > requested_end:
+                    break
+                available_end = current_size - 1
+                if requested_end is not None:
+                    available_end = min(available_end, requested_end)
+                available = available_end - position + 1
+                if available > 0:
+                    chunk = file.read(min(chunk_size, available))
+                    if chunk:
+                        position += len(chunk)
+                        yield chunk
+                        continue
+                if not transcode_running(resource_id):
+                    break
+                time.sleep(0.1)
+
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Cache-Control": "no-store",
+    }
+    status = 200
+    if open_range is not None:
+        status = 206
+        current_size = path.stat().st_size
+        end = requested_end if requested_end is not None else max(start, current_size - 1)
+        headers["Content-Range"] = f"bytes {start}-{end}/*"
+    return Response(stream_with_context(generate()), status=status, headers=headers, content_type=content_type)
 
 
 def resource_descriptor(resource_id: str) -> Optional[Dict[str, object]]:
@@ -1618,6 +1814,9 @@ def create_connector_app(security: Optional[ConnectorSecurity] = None):
             path = transcode_cache_path(resource_id, url)
             stat = path.stat()
             return jsonify({"ok": True, "status": "cached", "cached": True, "percent": 100, "size": stat.st_size})
+        artifact = transcode_artifact(resource_id, url)
+        if artifact:
+            status = {**status, "size": artifact["size"], "complete": artifact["complete"]}
         return jsonify({"ok": True, "status": status.get("status", "idle"), "cached": False, **status})
 
     @app.get("/resources/<resource_id>/checksum")
@@ -1717,7 +1916,11 @@ def create_connector_app(security: Optional[ConnectorSecurity] = None):
 
         try:
             media_info = cached_probe_media(url)
-            artifact = ensure_transcoded_file(resource_id, url, media_info)
+            if request.args.get("progressive") == "1":
+                start_transcoded_file(resource_id, url, media_info)
+                artifact = wait_for_progressive_transcode(resource_id, url)
+            else:
+                artifact = ensure_transcoded_file(resource_id, url, media_info)
         except subprocess.TimeoutExpired:
             return jsonify({"error": "Timed out while probing media tracks."}), 504
         except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
@@ -1731,6 +1934,8 @@ def create_connector_app(security: Optional[ConnectorSecurity] = None):
                 "type": artifact["contentType"],
                 "size": artifact["size"],
                 "cached": artifact["cached"],
+                "complete": artifact.get("complete", artifact["cached"]),
+                "progress": TRANSCODE_PROGRESS.get(resource_id, {}),
                 "mediaInfo": media_info,
             }
         )
@@ -1775,17 +1980,14 @@ def create_connector_app(security: Optional[ConnectorSecurity] = None):
             return jsonify({"error": "Unknown resource. Browse the file again."}), 404
 
         try:
-            path = transcode_cache_path(resource_id, url)
-            if path.exists() and path.stat().st_size > 0:
-                artifact = {
-                    "path": str(path),
-                    "size": path.stat().st_size,
-                    "contentType": "video/mp4",
-                    "cached": True,
-                }
-            else:
+            artifact = transcode_artifact(resource_id, url)
+            if not artifact:
                 media_info = cached_probe_media(url)
-                artifact = ensure_transcoded_file(resource_id, url, media_info)
+                if request.args.get("progressive") == "1":
+                    start_transcoded_file(resource_id, url, media_info)
+                    artifact = wait_for_progressive_transcode(resource_id, url)
+                else:
+                    artifact = ensure_transcoded_file(resource_id, url, media_info)
         except subprocess.TimeoutExpired:
             return jsonify({"error": "Timed out while probing media tracks."}), 504
         except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
@@ -1793,7 +1995,10 @@ def create_connector_app(security: Optional[ConnectorSecurity] = None):
         except RuntimeError as exc:
             return jsonify({"error": str(exc)}), 502
 
-        return serve_file_with_range(Path(artifact["path"]), artifact["contentType"])
+        artifact_path = Path(artifact["path"])
+        if request.args.get("progressive") == "1" and not artifact.get("complete", artifact.get("cached", False)):
+            return serve_growing_file_with_range(artifact_path, artifact["contentType"], resource_id)
+        return serve_file_with_range(artifact_path, artifact["contentType"])
 
     @app.get("/resources/<resource_id>/transcoded/checksum")
     def resource_transcoded_checksum(resource_id: str):

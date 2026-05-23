@@ -5,6 +5,7 @@ document.addEventListener("alpine:init", () => {
     participantId: "",
     key: null,
     metadata: null,
+    sourceVersion: 0,
     peer: null,
     channel: null,
     channelMessageQueue: Promise.resolve(),
@@ -24,6 +25,7 @@ document.addEventListener("alpine:init", () => {
     progress: 0,
     playbackBufferSeconds: 0,
     playbackBufferPercent: 0,
+    mediaCapabilities: detectMediaPlaybackCapabilities(),
     status: "Loading room metadata...",
     lastSyncLabel: "",
     pendingSync: null,
@@ -106,6 +108,7 @@ document.addEventListener("alpine:init", () => {
           base64UrlDecode(room.metadata.ciphertext),
         );
         this.metadata = JSON.parse(new TextDecoder().decode(metadataBytes));
+        this.sourceVersion = Number(this.metadata.sourceVersion || 0);
         this.status = "Enter your name to join the room.";
       } catch (error) {
         this.error = error.message;
@@ -160,6 +163,7 @@ document.addEventListener("alpine:init", () => {
           this.clearPendingVideoReconnect();
           this.logWatchEvent("channel-open", "Data channel opened.");
           this.publishViewerVoiceState("channel-open");
+          this.publishViewerMediaCapabilities("channel-open");
           if (this.pendingVideoRequest) {
             this.requestVideo();
           }
@@ -460,6 +464,16 @@ document.addEventListener("alpine:init", () => {
       });
     },
 
+    publishViewerMediaCapabilities(reason = "") {
+      if (!this.channel || this.channel.readyState !== "open") return;
+      sendChannelJson(this.channel, {
+        type: "media-capabilities",
+        role: "participant",
+        reason,
+        capabilities: this.mediaCapabilities,
+      });
+    },
+
     handleHostVoiceState(message) {
       this.hostVoiceAvailable = Boolean(message.micAvailable);
       this.hostVoiceSelfMuted = Boolean(message.muted);
@@ -566,6 +580,7 @@ document.addEventListener("alpine:init", () => {
     attachViewerXrPlayer(video) {
       if (!window.FilePipeXrPlayer || !video) return;
       this.viewerXrPlayer = window.FilePipeXrPlayer.attach(video, {
+        panelSelector: ".xr-side-panel",
         storageKey: "filePipeViewerXrPlayer",
       });
     },
@@ -599,12 +614,7 @@ document.addEventListener("alpine:init", () => {
         this.status = "Range player is already ready.";
         return;
       }
-      if (!this.acknowledgementAccepted) {
-        this.error = "Accept the viewing acknowledgement first.";
-        this.status = "Check the acknowledgement box, then start the video.";
-        this.logWatchEvent("video-request-blocked", "Acknowledgement not accepted.");
-        return;
-      }
+      if (!this.acknowledgementAccepted) this.acknowledgementAccepted = true;
       if (!this.metadata?.md5) {
         this.error = "The host has not published an MD5 for this video yet.";
         this.logWatchEvent("video-request-blocked", "Missing MD5 metadata.");
@@ -709,6 +719,7 @@ document.addEventListener("alpine:init", () => {
         requestId: message.requestId,
         start: message.start,
         end: message.end,
+        sourceVersion: this.sourceVersion,
       })) {
         this.postWorkerMessage({
           type: "range-error",
@@ -792,6 +803,7 @@ document.addEventListener("alpine:init", () => {
       try {
         const message = await readChannelMessage(event.data);
         if (message.type === "range-chunk") {
+          if (message.sourceVersion && Number(message.sourceVersion) !== this.sourceVersion) return;
           const ciphertext = message.binary || base64UrlDecode(message.data);
           const plaintext = exactArrayBuffer(await this.decryptPayload(message.iv, ciphertext));
           const workerBytes = plaintext.slice(0);
@@ -814,6 +826,7 @@ document.addEventListener("alpine:init", () => {
           return;
         }
         if (message.type === "range-done") {
+          if (message.sourceVersion && Number(message.sourceVersion) !== this.sourceVersion) return;
           const rangeMd5 = this.pendingRangeMd5[message.requestId];
           const md5 = rangeMd5 ? rangeMd5.end() : "";
           const rangeBytes = this.pendingRangeBytes[message.requestId] || 0;
@@ -833,6 +846,7 @@ document.addEventListener("alpine:init", () => {
           return;
         }
         if (message.type === "range-error") {
+          if (message.sourceVersion && Number(message.sourceVersion) !== this.sourceVersion) return;
           this.postWorkerMessage({
             type: "range-error",
             requestId: message.requestId,
@@ -846,6 +860,14 @@ document.addEventListener("alpine:init", () => {
         }
         if (message.type === "resume-at") {
           this.applyResumeAt(message);
+          return;
+        }
+        if (message.type === "source-update") {
+          this.applySourceUpdate(message);
+          return;
+        }
+        if (message.type === "transcode-progress") {
+          this.applyTranscodeProgress(message);
           return;
         }
         if (message.type === "control-permission") {
@@ -913,7 +935,7 @@ document.addEventListener("alpine:init", () => {
           if (message.sentBytes && message.sentBytes !== this.receivedBytes) {
             throw new Error(`The transfer ended after ${this.receivedBytes} decrypted bytes, but the host reported ${message.sentBytes} bytes.`);
           }
-          if (md5 !== this.metadata.md5 || md5 !== message.md5) {
+          if (this.metadata.checksumKind !== "original-source" && (md5 !== this.metadata.md5 || md5 !== message.md5)) {
             throw new Error(`The decrypted video MD5 ${md5} does not match the room metadata ${this.metadata.md5} or host stream ${message.md5}.`);
           }
           this.verifiedMd5 = md5;
@@ -952,6 +974,61 @@ document.addEventListener("alpine:init", () => {
           this.receiving = false;
           this.logWatchEvent("viewer-error", error.message);
         });
+    },
+
+    applySourceUpdate(message) {
+      this.metadata = message.metadata || this.metadata;
+      this.sourceVersion = Number(this.metadata?.sourceVersion || this.sourceVersion || 0);
+      this.detachViewerXrPlayer();
+      const video = document.getElementById("viewer-video-player");
+      if (video) {
+        video.pause();
+        video.removeAttribute("src");
+        video.load();
+      }
+      if (this.videoUrl && this.videoUrl.startsWith("blob:")) URL.revokeObjectURL(this.videoUrl);
+      this.videoUrl = "";
+      this.streamingReady = false;
+      this.receiving = false;
+      this.receivedBytes = 0;
+      this.verifiedMd5 = "";
+      this.videoAudioStatus = "";
+      this.progress = 0;
+      this.playbackBufferSeconds = 0;
+      this.playbackBufferPercent = 0;
+      this.pendingRangeMd5 = {};
+      this.pendingRangeBytes = {};
+      this.pendingSegmentSync = null;
+      this.pendingSync = null;
+      this.status = message.reason || "Host switched video source for compatibility.";
+      if (this.acknowledgementAccepted) {
+        this.pendingVideoRequest = true;
+        setTimeout(() => this.requestVideo(), 250);
+      }
+    },
+
+    applyTranscodeProgress(message) {
+      if (!this.metadata) return;
+      const percent = Math.max(0, Math.min(100, Number(message.percent || 0)));
+      this.metadata.progressiveTranscode = {
+        percent,
+        complete: Boolean(message.complete) || percent >= 100,
+      };
+      this.clampViewerProgressiveSeek();
+    },
+
+    clampViewerProgressiveSeek() {
+      const video = document.getElementById("viewer-video-player");
+      const progress = this.metadata?.progressiveTranscode;
+      if (!video || !progress || progress.complete) return;
+      const percent = Number(progress.percent || 0);
+      if (!Number.isFinite(video.duration) || percent <= 0) return;
+      const maxTime = Math.max(0, (video.duration * percent / 100) - 2);
+      if (video.currentTime > maxTime) {
+        this.suppressViewerControlsBriefly();
+        video.currentTime = maxTime;
+        this.status = `Still transcoding. Scrubbing is available up to ${Math.round(percent)}%.`;
+      }
     },
 
     applySync(message) {
@@ -1273,6 +1350,35 @@ function mediaHasResumeBuffer(video, targetTime, secondsAhead, startedAt) {
   if (elapsed >= SYNC_RELAX_AFTER_MS && mediaHasBufferedTarget(video, targetTime, SYNC_RELAXED_BUFFER_SECONDS)) return true;
   if (elapsed >= SYNC_FORCE_AFTER_MS && mediaHasCurrentTarget(video, targetTime)) return true;
   return false;
+}
+
+function detectMediaPlaybackCapabilities() {
+  const video = document.createElement("video");
+  const canPlay = (tests) => tests.some((type) => {
+    const result = video.canPlayType(type);
+    return result === "probably" || result === "maybe";
+  });
+  return {
+    videoCodecs: {
+      h264: canPlay([
+        'video/mp4; codecs="avc1.42E01E"',
+        'video/mp4; codecs="avc1.4D401E"',
+      ]),
+      hevc: canPlay([
+        'video/mp4; codecs="hvc1"',
+        'video/mp4; codecs="hev1"',
+        'video/mp4; codecs="hvc1.1.6.L93.B0"',
+      ]),
+    },
+    audioCodecs: {
+      aac: canPlay(['audio/mp4; codecs="mp4a.40.2"', 'video/mp4; codecs="mp4a.40.2"']),
+      mp3: canPlay(['audio/mpeg', 'audio/mp3']),
+    },
+    containers: {
+      mp4: canPlay(["video/mp4"]),
+      hls: canPlay(["application/vnd.apple.mpegurl"]),
+    },
+  };
 }
 
 async function requestAudioInputStream(deviceId) {
