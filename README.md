@@ -69,6 +69,8 @@ https://127.0.0.1:8765/health
 
 Then use the Local Connector tab in the web UI to unlock the connector, scan for DLNA servers, choose a server, and browse media from the Explorer tab.
 
+The browser remembers the connector URL, connector session token, and last selected media source/folder in local storage so reloads after a deploy can return to the same browsing context. Connector passwords are not saved.
+
 ## Authentication
 
 The Flask web app requires login by default. Credentials are loaded from environment variables or from a local `.env` file:

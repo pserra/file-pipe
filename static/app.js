@@ -7,6 +7,7 @@ document.addEventListener("alpine:init", () => {
     connectorAuthenticated: false,
     connectorSecure: false,
     connectorReady: false,
+    connectorRestoreAttempted: false,
     servers: [],
     selectedServer: null,
     selectedServerId: "",
@@ -136,7 +137,11 @@ document.addEventListener("alpine:init", () => {
     },
 
     saveConnectorUrl() {
+      const previousUrl = localStorage.getItem("filePipeConnectorUrl") || "";
       this.connectorUrl = this.connectorUrl.replace(/\/+$/, "");
+      if (previousUrl && previousUrl !== this.connectorUrl) {
+        this.connectorRestoreAttempted = false;
+      }
       localStorage.setItem("filePipeConnectorUrl", this.connectorUrl);
     },
 
@@ -212,7 +217,10 @@ document.addEventListener("alpine:init", () => {
         this.connectorAuthenticated = Boolean(health.authenticated);
         this.connectorSecure = Boolean(health.secure);
         this.connectorReady = !this.connectorAuthRequired || this.connectorAuthenticated;
-        if (this.connectorReady) this.loadConnectorDirectories();
+        if (this.connectorReady) {
+          await this.loadConnectorDirectories();
+          await this.restoreLastBrowseSelection();
+        }
       } catch (error) {
         this.connectorReady = false;
         this.connectorAuthenticated = false;
@@ -260,6 +268,7 @@ document.addEventListener("alpine:init", () => {
           this.selectedServer = null;
           this.selectedServerId = "";
           this.items = [];
+          this.clearLastBrowseSelection();
         }
       } catch (error) {
         this.error = error.message;
@@ -295,6 +304,7 @@ document.addEventListener("alpine:init", () => {
       if (!server) {
         this.selectedServer = null;
         this.items = [];
+        this.clearLastBrowseSelection();
         return;
       }
       await this.selectServer(server);
@@ -310,6 +320,7 @@ document.addEventListener("alpine:init", () => {
         this.currentObjectId = payload.objectId;
         this.currentPathLabel = payload.pathLabel || "";
         this.items = payload.items || [];
+        this.saveLastBrowseSelection();
       } catch (error) {
         this.error = error.message;
       } finally {
@@ -321,6 +332,62 @@ document.addEventListener("alpine:init", () => {
       if (item.type !== "container") return;
       this.history.push(this.currentObjectId);
       await this.browse(item.id);
+    },
+
+    savedBrowseSelection() {
+      try {
+        const saved = JSON.parse(localStorage.getItem("filePipeLastBrowseSelection") || "null");
+        if (!saved || typeof saved !== "object") return null;
+        return saved;
+      } catch (error) {
+        localStorage.removeItem("filePipeLastBrowseSelection");
+        return null;
+      }
+    },
+
+    saveLastBrowseSelection() {
+      if (!this.selectedServer || !this.currentObjectId) return;
+      localStorage.setItem(
+        "filePipeLastBrowseSelection",
+        JSON.stringify({
+          connectorUrl: this.connectorUrl.replace(/\/+$/, ""),
+          serverId: this.selectedServer.id,
+          serverName: this.selectedServer.friendlyName,
+          sourceType: this.selectedServer.sourceType || "dlna",
+          objectId: this.currentObjectId,
+          pathLabel: this.currentPathLabel || "",
+          history: this.history.slice(-50),
+          savedAt: new Date().toISOString(),
+        }),
+      );
+    },
+
+    clearLastBrowseSelection() {
+      localStorage.removeItem("filePipeLastBrowseSelection");
+    },
+
+    async restoreLastBrowseSelection() {
+      if (this.connectorRestoreAttempted || !this.connectorReady) return;
+      this.connectorRestoreAttempted = true;
+      const saved = this.savedBrowseSelection();
+      if (!saved || saved.connectorUrl !== this.connectorUrl.replace(/\/+$/, "") || !saved.serverId) return;
+
+      try {
+        if (this.servers.length === 0) {
+          const payload = await this.request("/servers");
+          this.servers = payload.servers || [];
+        }
+        const server = this.servers.find((candidate) => candidate.id === saved.serverId);
+        if (!server) return;
+
+        this.selectedServer = server;
+        this.selectedServerId = server.id;
+        this.history = Array.isArray(saved.history) ? saved.history : [];
+        this.currentPathLabel = saved.pathLabel || "";
+        await this.browse(saved.objectId || "0");
+      } catch (error) {
+        this.error = error.message;
+      }
     },
 
     async shareItem(item) {
