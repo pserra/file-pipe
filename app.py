@@ -1,0 +1,677 @@
+import argparse
+import hmac
+import os
+import re
+import secrets
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict
+from urllib.parse import urlparse
+
+from flask import Flask, abort, jsonify, redirect, render_template, request, session, url_for
+
+from local_tls import ensure_local_certificate
+
+
+SHARE_ID_BYTES = 18
+P2P_SHARES: Dict[str, dict] = {}
+WATCH_ROOMS: Dict[str, dict] = {}
+WATCH_ROOM_ALIASES: Dict[str, str] = {}
+BIGSCREEN_SESSIONS: Dict[str, dict] = {}
+LOGIN_ATTEMPTS: Dict[str, list] = {}
+ROOM_ALIAS_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{1,62}[a-z0-9]$")
+
+
+def load_dotenv(path: str = ".env") -> None:
+    dotenv_path = Path(path)
+    if not dotenv_path.exists():
+        return
+    for raw_line in dotenv_path.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip("\"'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+def env_bool(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def env_int(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
+@dataclass(frozen=True)
+class AuthConfig:
+    username: str
+    password: str
+    disabled: bool
+    rate_limit_disabled: bool
+    rate_limit_attempts: int
+    rate_limit_window_seconds: int
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.username and self.password)
+
+
+load_dotenv()
+
+
+def valid_share_id(share_id: str) -> bool:
+    return share_id.replace("-", "").replace("_", "").isalnum()
+
+
+def get_p2p_share(share_id: str) -> dict:
+    if not valid_share_id(share_id):
+        abort(404)
+    share = P2P_SHARES.get(share_id)
+    if share is None:
+        abort(404)
+    return share
+
+
+def get_watch_room(room_id: str) -> dict:
+    if not valid_share_id(room_id):
+        abort(404)
+    room = WATCH_ROOMS.get(room_id)
+    if room is None:
+        abort(404)
+    return room
+
+
+def normalize_room_alias(value: str) -> str:
+    alias = re.sub(r"\s+", "-", (value or "").strip().lower())
+    return alias
+
+
+def validate_room_alias(value: str) -> str:
+    alias = normalize_room_alias(value)
+    if not alias:
+        return ""
+    if not ROOM_ALIAS_PATTERN.fullmatch(alias):
+        raise ValueError("Room alias must be 3-64 characters using letters, numbers, hyphens, or underscores.")
+    return alias
+
+
+def room_id_for_alias(alias: str) -> str:
+    try:
+        normalized = validate_room_alias(alias)
+    except ValueError:
+        abort(404)
+    room_id = WATCH_ROOM_ALIASES.get(normalized)
+    if not room_id or room_id not in WATCH_ROOMS:
+        abort(404)
+    return room_id
+
+
+def get_bigscreen_session(session_id: str) -> dict:
+    if not valid_share_id(session_id):
+        abort(404)
+    session = BIGSCREEN_SESSIONS.get(session_id)
+    if session is None:
+        abort(404)
+    return session
+
+
+def auth_config_from_env() -> AuthConfig:
+    return AuthConfig(
+        username=os.environ.get("FILE_PIPE_AUTH_USERNAME", ""),
+        password=os.environ.get("FILE_PIPE_AUTH_PASSWORD", ""),
+        disabled=env_bool("FILE_PIPE_AUTH_DISABLED"),
+        rate_limit_disabled=env_bool("FILE_PIPE_LOGIN_RATE_LIMIT_DISABLED"),
+        rate_limit_attempts=max(1, env_int("FILE_PIPE_LOGIN_RATE_LIMIT", 5)),
+        rate_limit_window_seconds=max(1, env_int("FILE_PIPE_LOGIN_RATE_WINDOW_SECONDS", 300)),
+    )
+
+
+def is_authenticated(auth_config: AuthConfig) -> bool:
+    return auth_config.disabled or session.get("file_pipe_authenticated") is True
+
+
+def wants_json_response() -> bool:
+    return request.path.startswith("/api/") or request.accept_mimetypes.best == "application/json"
+
+
+def safe_next_url(value: str) -> str:
+    if not value:
+        return url_for("index")
+    parsed = urlparse(value)
+    if parsed.scheme or parsed.netloc:
+        return url_for("index")
+    if not value.startswith("/"):
+        return url_for("index")
+    return value
+
+
+def login_rate_key() -> str:
+    return request.remote_addr or "unknown"
+
+
+def login_rate_limited(auth_config: AuthConfig) -> int:
+    if auth_config.rate_limit_disabled:
+        return 0
+    now = time.time()
+    key = login_rate_key()
+    window_start = now - auth_config.rate_limit_window_seconds
+    attempts = [timestamp for timestamp in LOGIN_ATTEMPTS.get(key, []) if timestamp >= window_start]
+    LOGIN_ATTEMPTS[key] = attempts
+    if len(attempts) >= auth_config.rate_limit_attempts:
+        oldest = min(attempts)
+        return max(1, int(auth_config.rate_limit_window_seconds - (now - oldest)))
+    return 0
+
+
+def record_login_failure(auth_config: AuthConfig) -> None:
+    if auth_config.rate_limit_disabled:
+        return
+    LOGIN_ATTEMPTS.setdefault(login_rate_key(), []).append(time.time())
+
+
+def clear_login_failures() -> None:
+    LOGIN_ATTEMPTS.pop(login_rate_key(), None)
+
+
+def create_app():
+    app = Flask(__name__)
+    app.config["TEMPLATES_AUTO_RELOAD"] = True
+    app.jinja_env.auto_reload = True
+    app.secret_key = os.environ.get("FILE_PIPE_SECRET_KEY") or secrets.token_urlsafe(32)
+    app.config.update(
+        SESSION_COOKIE_HTTPONLY=True,
+        SESSION_COOKIE_SAMESITE="Lax",
+        SESSION_COOKIE_SECURE=env_bool("FILE_PIPE_SESSION_COOKIE_SECURE"),
+    )
+    auth_config = auth_config_from_env()
+
+    @app.before_request
+    def require_site_auth():
+        if auth_config.disabled:
+            return None
+        if request.endpoint in {"health", "login", "login_post", "static"}:
+            return None
+        if not auth_config.configured:
+            if wants_json_response():
+                return jsonify({"error": "File Pipe authentication is not configured."}), 503
+            return (
+                render_template(
+                    "login.html",
+                    auth_missing=True,
+                    next_url=request.full_path if request.query_string else request.path,
+                    rate_limit_disabled=auth_config.rate_limit_disabled,
+                ),
+                503,
+            )
+        if is_authenticated(auth_config):
+            return None
+        if wants_json_response():
+            return jsonify({"error": "Authentication required."}), 401
+        return (
+            render_template(
+                "login.html",
+                next_url=request.full_path if request.query_string else request.path,
+                rate_limit_disabled=auth_config.rate_limit_disabled,
+            ),
+            401,
+        )
+
+    @app.get("/login")
+    def login():
+        if auth_config.disabled or is_authenticated(auth_config):
+            return redirect(safe_next_url(request.args.get("next", "")))
+        return render_template(
+            "login.html",
+            next_url=request.args.get("next", ""),
+            rate_limit_disabled=auth_config.rate_limit_disabled,
+        )
+
+    @app.post("/login")
+    def login_post():
+        if auth_config.disabled:
+            return redirect(safe_next_url(request.form.get("next", "")))
+        if not auth_config.configured:
+            return render_template("login.html", auth_missing=True, rate_limit_disabled=auth_config.rate_limit_disabled), 503
+
+        retry_after = login_rate_limited(auth_config)
+        if retry_after:
+            response = render_template(
+                "login.html",
+                error=f"Too many failed attempts. Try again in {retry_after} seconds.",
+                next_url=request.form.get("next", ""),
+                retry_after=retry_after,
+                rate_limit_disabled=auth_config.rate_limit_disabled,
+            )
+            return response, 429, {"Retry-After": str(retry_after)}
+
+        username = request.form.get("username", "")
+        password = request.form.get("password", "")
+        valid_username = hmac.compare_digest(username, auth_config.username)
+        valid_password = hmac.compare_digest(password, auth_config.password)
+        if not valid_username or not valid_password:
+            record_login_failure(auth_config)
+            return (
+                render_template(
+                    "login.html",
+                    error="Invalid username or password.",
+                    next_url=request.form.get("next", ""),
+                    rate_limit_disabled=auth_config.rate_limit_disabled,
+                ),
+                401,
+            )
+
+        clear_login_failures()
+        session.clear()
+        session["file_pipe_authenticated"] = True
+        session["file_pipe_username"] = auth_config.username
+        return redirect(safe_next_url(request.form.get("next", "")))
+
+    @app.post("/logout")
+    def logout():
+        session.clear()
+        return redirect(url_for("login"))
+
+    @app.get("/health")
+    def health():
+        return jsonify({"ok": True, "service": "file-pipe"})
+
+    @app.get("/")
+    def index():
+        return render_template("index.html")
+
+    @app.get("/share/<share_id>")
+    def share(share_id: str):
+        return render_template("share.html", share_id=share_id)
+
+    @app.get("/watch/<room_id>")
+    def watch(room_id: str):
+        return render_template("watch.html", room_id=room_id)
+
+    @app.get("/join/<alias>")
+    def join_alias(alias: str):
+        room_id = room_id_for_alias(alias)
+        return render_template("join.html", alias=normalize_room_alias(alias), watch_path=url_for("watch", room_id=room_id))
+
+    @app.get("/bigscreen/<session_id>")
+    def bigscreen(session_id: str):
+        return render_template("bigscreen.html", session_id=session_id)
+
+    @app.get("/bigscreen-sw.js")
+    def bigscreen_service_worker():
+        response = app.send_static_file("bigscreen-sw.js")
+        response.headers["Service-Worker-Allowed"] = "/"
+        return response
+
+    @app.get("/bigscreen-media/<session_id>/<path:_filename>")
+    def bigscreen_media_fallback(session_id: str, _filename: str):
+        get_bigscreen_session(session_id)
+        return (
+            jsonify(
+                {
+                    "error": "This media URL is served by the browser service worker over WebRTC. Open the Bigscreen player page first."
+                }
+            ),
+            409,
+        )
+
+    @app.get("/watch-media/<room_id>/<path:_filename>")
+    def watch_media_fallback(room_id: str, _filename: str):
+        get_watch_room(room_id)
+        return (
+            jsonify(
+                {
+                    "error": "This media URL is served by the browser service worker over encrypted WebRTC range requests. Open the watch room page first."
+                }
+            ),
+            409,
+        )
+
+    @app.post("/api/p2p/shares")
+    def create_p2p_share():
+        share_id = secrets.token_urlsafe(SHARE_ID_BYTES)
+        P2P_SHARES[share_id] = {
+            "id": share_id,
+            "createdAt": int(time.time()),
+            "offer": None,
+            "answer": None,
+            "metadata": None,
+        }
+        return jsonify({"shareId": share_id})
+
+    @app.put("/api/p2p/shares/<share_id>/offer")
+    def put_p2p_offer(share_id: str):
+        share = get_p2p_share(share_id)
+        payload = request.get_json(force=True, silent=True) or {}
+        offer = payload.get("offer")
+        metadata = payload.get("metadata")
+        if not offer or not metadata:
+            return jsonify({"error": "Missing offer or encrypted metadata."}), 400
+        share["offer"] = offer
+        share["metadata"] = metadata
+        return jsonify({"ok": True})
+
+    @app.put("/api/p2p/shares/<share_id>/answer")
+    def put_p2p_answer(share_id: str):
+        share = get_p2p_share(share_id)
+        payload = request.get_json(force=True, silent=True) or {}
+        answer = payload.get("answer")
+        if not answer:
+            return jsonify({"error": "Missing answer."}), 400
+        share["answer"] = answer
+        return jsonify({"ok": True})
+
+    @app.get("/api/p2p/shares/<share_id>")
+    def get_p2p_signal(share_id: str):
+        share = get_p2p_share(share_id)
+        return jsonify(
+            {
+                "id": share["id"],
+                "createdAt": share["createdAt"],
+                "offer": share["offer"],
+                "answer": share["answer"],
+                "metadata": share["metadata"],
+            }
+        )
+
+    @app.post("/api/bigscreen/sessions")
+    def create_bigscreen_session():
+        session_id = secrets.token_urlsafe(SHARE_ID_BYTES)
+        BIGSCREEN_SESSIONS[session_id] = {
+            "id": session_id,
+            "createdAt": int(time.time()),
+            "offer": None,
+            "answer": None,
+            "metadata": None,
+        }
+        return jsonify({"sessionId": session_id})
+
+    @app.put("/api/bigscreen/sessions/<session_id>/offer")
+    def put_bigscreen_offer(session_id: str):
+        session = get_bigscreen_session(session_id)
+        payload = request.get_json(force=True, silent=True) or {}
+        offer = payload.get("offer")
+        metadata = payload.get("metadata")
+        if not offer or not metadata:
+            return jsonify({"error": "Missing offer or encrypted metadata."}), 400
+        session["offer"] = offer
+        session["answer"] = None
+        session["metadata"] = metadata
+        return jsonify({"ok": True})
+
+    @app.put("/api/bigscreen/sessions/<session_id>/answer")
+    def put_bigscreen_answer(session_id: str):
+        session = get_bigscreen_session(session_id)
+        payload = request.get_json(force=True, silent=True) or {}
+        answer = payload.get("answer")
+        if not answer:
+            return jsonify({"error": "Missing answer."}), 400
+        session["answer"] = answer
+        return jsonify({"ok": True})
+
+    @app.get("/api/bigscreen/sessions/<session_id>")
+    def get_bigscreen_signal(session_id: str):
+        session = get_bigscreen_session(session_id)
+        return jsonify(
+            {
+                "id": session["id"],
+                "createdAt": session["createdAt"],
+                "offer": session["offer"],
+                "answer": session["answer"],
+                "metadata": session["metadata"],
+            }
+        )
+
+    @app.route("/api/shares/<path:_path>", methods=["GET", "POST", "PUT", "DELETE"])
+    @app.post("/api/shares")
+    def removed_server_storage(_path=None):
+        return (
+            jsonify(
+                {
+                    "error": "Server-side file storage is disabled. Shares use WebRTC peer-to-peer signaling only."
+                }
+            ),
+            410,
+        )
+
+    @app.post("/api/watch/rooms")
+    def create_watch_room():
+        payload = request.get_json(force=True, silent=True) or {}
+        try:
+            alias = validate_room_alias(payload.get("alias", ""))
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        room_id = secrets.token_urlsafe(SHARE_ID_BYTES)
+        WATCH_ROOMS[room_id] = {
+            "id": room_id,
+            "alias": alias,
+            "createdAt": int(time.time()),
+            "metadata": None,
+            "participants": {},
+        }
+        if alias:
+            previous_room_id = WATCH_ROOM_ALIASES.get(alias)
+            if previous_room_id in WATCH_ROOMS:
+                WATCH_ROOMS[previous_room_id]["alias"] = ""
+            WATCH_ROOM_ALIASES[alias] = room_id
+        return jsonify({"roomId": room_id, "alias": alias, "joinPath": url_for("join_alias", alias=alias) if alias else ""})
+
+    @app.put("/api/watch/rooms/<room_id>/metadata")
+    def put_watch_metadata(room_id: str):
+        room = get_watch_room(room_id)
+        payload = request.get_json(force=True, silent=True) or {}
+        metadata = payload.get("metadata")
+        if not metadata:
+            return jsonify({"error": "Missing encrypted metadata."}), 400
+        room["metadata"] = metadata
+        return jsonify({"ok": True})
+
+    @app.get("/api/watch/rooms/<room_id>")
+    def get_watch_room_state(room_id: str):
+        room = get_watch_room(room_id)
+        participants = [
+            {
+                "id": participant["id"],
+                "name": participant["name"],
+                "joinedAt": participant["joinedAt"],
+                "generation": participant.get("generation", 0),
+                "offer": participant.get("offer"),
+                "answer": participant.get("answer"),
+                "kicked": bool(participant.get("kicked")),
+                "events": participant.get("events", [])[-10:],
+            }
+            for participant in room["participants"].values()
+        ]
+        return jsonify(
+            {
+                "id": room["id"],
+                "alias": room.get("alias", ""),
+                "createdAt": room["createdAt"],
+                "metadata": room["metadata"],
+                "participants": participants,
+            }
+        )
+
+    @app.post("/api/watch/rooms/<room_id>/participants")
+    def join_watch_room(room_id: str):
+        room = get_watch_room(room_id)
+        payload = request.get_json(force=True, silent=True) or {}
+        name = (payload.get("name") or "").strip()
+        if not name:
+            return jsonify({"error": "Name is required."}), 400
+        participant_id = secrets.token_urlsafe(12)
+        room["participants"][participant_id] = {
+            "id": participant_id,
+            "name": name[:80],
+            "joinedAt": int(time.time()),
+            "generation": 0,
+            "offer": None,
+            "answer": None,
+            "kicked": False,
+            "events": [],
+        }
+        return jsonify({"participantId": participant_id})
+
+    @app.put("/api/watch/rooms/<room_id>/participants/<participant_id>/offer")
+    def put_watch_offer(room_id: str, participant_id: str):
+        room = get_watch_room(room_id)
+        participant = room["participants"].get(participant_id)
+        if participant is None:
+            abort(404)
+        if participant.get("kicked"):
+            return jsonify({"error": "Participant was removed from the room."}), 410
+        payload = request.get_json(force=True, silent=True) or {}
+        offer = payload.get("offer")
+        if not offer:
+            return jsonify({"error": "Missing offer."}), 400
+        participant["offer"] = offer
+        return jsonify({"ok": True})
+
+    @app.post("/api/watch/rooms/<room_id>/participants/<participant_id>/reconnect")
+    def reconnect_watch_participant(room_id: str, participant_id: str):
+        room = get_watch_room(room_id)
+        participant = room["participants"].get(participant_id)
+        if participant is None:
+            abort(404)
+        if participant.get("kicked"):
+            return jsonify({"error": "Participant was removed from the room."}), 410
+        participant["generation"] = int(participant.get("generation", 0)) + 1
+        participant["offer"] = None
+        participant["answer"] = None
+        participant["reconnectedAt"] = int(time.time())
+        return jsonify({"ok": True, "generation": participant["generation"]})
+
+    @app.put("/api/watch/rooms/<room_id>/participants/<participant_id>/answer")
+    def put_watch_answer(room_id: str, participant_id: str):
+        room = get_watch_room(room_id)
+        participant = room["participants"].get(participant_id)
+        if participant is None:
+            abort(404)
+        if participant.get("kicked"):
+            return jsonify({"error": "Participant was removed from the room."}), 410
+        payload = request.get_json(force=True, silent=True) or {}
+        answer = payload.get("answer")
+        if not answer:
+            return jsonify({"error": "Missing answer."}), 400
+        participant["answer"] = answer
+        return jsonify({"ok": True})
+
+    @app.delete("/api/watch/rooms/<room_id>/participants/<participant_id>")
+    def kick_watch_participant(room_id: str, participant_id: str):
+        room = get_watch_room(room_id)
+        participant = room["participants"].get(participant_id)
+        if participant is None:
+            abort(404)
+        participant["kicked"] = True
+        participant["generation"] = int(participant.get("generation", 0)) + 1
+        participant["offer"] = None
+        participant["answer"] = None
+        participant["kickedAt"] = int(time.time())
+        return jsonify({"ok": True})
+
+    @app.post("/api/watch/rooms/<room_id>/participants/<participant_id>/events")
+    def add_watch_participant_event(room_id: str, participant_id: str):
+        room = get_watch_room(room_id)
+        participant = room["participants"].get(participant_id)
+        if participant is None:
+            abort(404)
+        payload = request.get_json(force=True, silent=True) or {}
+        event = {
+            "at": int(time.time()),
+            "event": str(payload.get("event") or "unknown")[:80],
+            "detail": str(payload.get("detail") or "")[:300],
+            "channelState": str(payload.get("channelState") or "")[:40],
+            "peerState": str(payload.get("peerState") or "")[:40],
+            "pendingVideoRequest": bool(payload.get("pendingVideoRequest")),
+            "receiving": bool(payload.get("receiving")),
+        }
+        participant.setdefault("events", []).append(event)
+        participant["events"] = participant["events"][-30:]
+        return jsonify({"ok": True})
+
+    @app.get("/api/watch/rooms/<room_id>/participants/<participant_id>")
+    def get_watch_participant(room_id: str, participant_id: str):
+        room = get_watch_room(room_id)
+        participant = room["participants"].get(participant_id)
+        if participant is None:
+            abort(404)
+        return jsonify(
+            {
+                "id": participant["id"],
+                "name": participant["name"],
+                "joinedAt": participant["joinedAt"],
+                "generation": participant.get("generation", 0),
+                "offer": participant.get("offer"),
+                "answer": participant.get("answer"),
+                "kicked": bool(participant.get("kicked")),
+                "events": participant.get("events", [])[-10:],
+                "metadata": room["metadata"],
+            }
+        )
+
+    return app
+
+
+app = create_app()
+
+
+def main():
+    parser = argparse.ArgumentParser(description="File Pipe web app.")
+    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--port", default=6500, type=int)
+    parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--cert", help="TLS certificate file for HTTPS.")
+    parser.add_argument("--key", help="TLS private key file for HTTPS.")
+    parser.add_argument("--no-tls", action="store_true", help="Serve plain HTTP. Use only for localhost development.")
+    parser.add_argument(
+        "--adhoc-tls",
+        action="store_true",
+        help="Use a generated self-signed HTTPS certificate for local/LAN testing.",
+    )
+    args = parser.parse_args()
+
+    ssl_context = None
+    if args.cert or args.key:
+        if not args.cert or not args.key:
+            parser.error("--cert and --key must be provided together.")
+        ssl_context = (args.cert, args.key)
+    elif args.adhoc_tls:
+        ssl_context = "adhoc"
+    elif not args.no_tls:
+        ssl_context = ensure_local_certificate(args.host)
+
+    scheme = "https" if ssl_context else "http"
+    print(f"File Pipe web app listening at {scheme}://{args.host}:{args.port}", flush=True)
+    if ssl_context == "adhoc":
+        print(
+            "Using a generated self-signed certificate. Open the HTTPS URL in the browser and accept the warning once before using share/watch/Bigscreen features.",
+            flush=True,
+        )
+    elif ssl_context:
+        print(
+            f"Using local certificate {ssl_context[0]}. Open the HTTPS URL in the browser and accept or trust the certificate once.",
+            flush=True,
+        )
+
+    app.run(
+        host=args.host,
+        port=args.port,
+        debug=args.debug,
+        ssl_context=ssl_context,
+    )
+
+
+if __name__ == "__main__":
+    main()

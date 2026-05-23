@@ -1,0 +1,15 @@
+{
+  "name": "file-pipe",
+  "description": "Local-first encrypted media sharing and watch rooms.",
+  "healthchecks": {
+    "web": [
+      {
+        "type": "startup",
+        "name": "web health",
+        "description": "Confirms the Flask app has booted.",
+        "path": "/health",
+        "attempts": 6
+      }
+    ]
+  }
+}

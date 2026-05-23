@@ -1,0 +1,892 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>File Pipe</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css', v='16') }}">
+    <script defer src="https://cdn.jsdelivr.net/npm/spark-md5@3.0.2/spark-md5.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
+    <script defer src="{{ url_for('static', filename='xr-player.js', v='1') }}"></script>
+    <script defer src="{{ url_for('static', filename='app.js', v='41') }}"></script>
+    <script defer src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  </head>
+  <body class="app-body" x-data="filePipe" x-init="initApp()">
+    <header class="app-header">
+      <div class="container-fluid py-3">
+        <div class="d-flex flex-column flex-lg-row gap-3 align-items-lg-center justify-content-between">
+          <div class="brand-lockup">
+            <div class="brand-mark"><i class="bi bi-bezier2"></i></div>
+            <div>
+              <div class="text-uppercase text-secondary fw-semibold small">Media browser</div>
+              <h1 class="h3 mb-0">File Pipe</h1>
+            </div>
+          </div>
+
+          <div class="header-controls">
+            <span class="status-pill" :class="connectorReady ? 'status-pill-ready' : 'status-pill-offline'">
+              <i class="bi" :class="connectorReady ? 'bi-check-circle-fill text-success' : 'bi-x-circle-fill text-danger'"></i>
+              <span class="ms-1" x-text="connectorReady ? 'Connector ready' : 'Connector offline'"></span>
+            </span>
+
+            <div class="input-group server-picker">
+              <span class="input-group-text"><i class="bi bi-hdd-network"></i></span>
+              <select class="form-select" x-model="selectedServerId" @change="selectServerById()" :disabled="!connectorReady || servers.length === 0">
+                <option value="">Select media source</option>
+                <template x-for="server in servers" :key="server.id">
+                  <option :value="server.id" x-text="`${server.friendlyName} (${sourceLabel(server)})`"></option>
+                </template>
+              </select>
+              <button class="btn btn-outline-primary" type="button" @click="discoverServers()" :disabled="loadingServers || !connectorReady">
+                <i class="bi bi-arrow-clockwise"></i>
+                <span x-text="loadingServers ? 'Scanning' : 'Scan'"></span>
+              </button>
+            </div>
+
+            <form method="post" action="{{ url_for('logout') }}">
+              <button class="btn btn-outline-secondary" type="submit">
+                <i class="bi bi-box-arrow-right"></i>
+                Sign out
+              </button>
+            </form>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <main class="container-fluid app-main">
+      <template x-if="error">
+        <div class="alert app-alert" :class="connectorReady ? 'alert-danger' : 'alert-warning'" role="alert">
+          <div class="app-alert-content">
+            <i class="bi" :class="connectorReady ? 'bi-exclamation-triangle-fill' : 'bi-plug-fill'"></i>
+            <div class="min-w-0">
+              <strong class="d-block" x-text="connectorReady ? 'Something needs attention' : 'Connector setup needed'"></strong>
+              <span x-text="error"></span>
+            </div>
+          </div>
+          <div class="app-alert-actions" x-show="!connectorReady">
+            <button class="btn btn-sm btn-warning" type="button" @click="showBootstrapTab('connector-tab')">
+              <i class="bi bi-shield-lock"></i> Open setup
+            </button>
+            <button class="btn btn-sm btn-outline-dark" type="button" @click="checkConnector()">
+              <i class="bi bi-arrow-clockwise"></i> Check again
+            </button>
+          </div>
+        </div>
+      </template>
+
+      <template x-if="recoveryStatus">
+        <div class="alert" :class="networkOnline ? 'alert-info' : 'alert-warning'" role="status">
+          <i class="bi" :class="networkOnline ? 'bi-wifi' : 'bi-wifi-off'"></i>
+          <span class="ms-1" x-text="recoveryStatus"></span>
+        </div>
+      </template>
+
+      <ul class="nav nav-tabs app-tabs" id="filePipeTabs" role="tablist">
+        <li class="nav-item" role="presentation">
+          <button class="nav-link active" id="explorer-tab" data-bs-toggle="tab" data-bs-target="#explorer-pane" type="button" role="tab">
+            <i class="bi bi-folder2-open"></i> Explorer
+          </button>
+        </li>
+        <li class="nav-item" role="presentation">
+          <button class="nav-link" id="sharing-tab" data-bs-toggle="tab" data-bs-target="#sharing-pane" type="button" role="tab">
+            <i class="bi bi-send-lock"></i> Sharing
+          </button>
+        </li>
+        <li class="nav-item" role="presentation">
+          <button class="nav-link" id="player-tab" data-bs-toggle="tab" data-bs-target="#player-pane" type="button" role="tab">
+            <i class="bi bi-play-btn"></i> Player
+          </button>
+        </li>
+        <li class="nav-item" role="presentation">
+          <button class="nav-link" id="activity-tab" data-bs-toggle="tab" data-bs-target="#activity-pane" type="button" role="tab">
+            <i class="bi bi-activity"></i> Activity
+          </button>
+        </li>
+        <li class="nav-item" role="presentation">
+          <button class="nav-link" id="connector-tab" data-bs-toggle="tab" data-bs-target="#connector-pane" type="button" role="tab">
+            <i class="bi bi-shield-lock"></i> Local Connector
+          </button>
+        </li>
+      </ul>
+
+      <div class="tab-content app-surface">
+        <section class="tab-pane fade show active p-3 p-lg-4" id="explorer-pane" role="tabpanel" aria-labelledby="explorer-tab" tabindex="0">
+          <div class="row g-4">
+            <div class="col-12 col-xl-8">
+              <div class="d-flex flex-column flex-md-row gap-2 align-items-md-center justify-content-between mb-3">
+                <div>
+                  <h2 class="h5 mb-1" x-text="selectedServer ? selectedServer.friendlyName : 'No server selected'"></h2>
+                  <div class="text-secondary small" x-text="pathLabel()"></div>
+                </div>
+                <button class="btn btn-outline-secondary" type="button" @click="goUp()" :disabled="history.length === 0 || loadingItems">
+                  <i class="bi bi-arrow-up"></i> Up
+                </button>
+              </div>
+
+              <template x-if="shareLink">
+                <div class="alert alert-success link-alert">
+                  <label class="form-label fw-semibold">Secure link</label>
+                  <div class="input-group">
+                    <input class="form-control" type="text" readonly :value="shareLink" @focus="$event.target.select()">
+                    <button class="btn btn-success" type="button" @click="copyToClipboard(shareLink)">
+                      <i class="bi bi-clipboard"></i> Copy
+                    </button>
+                  </div>
+                  <div class="form-text">The decryption key after # is never sent to the hosted server.</div>
+                </div>
+              </template>
+
+	              <template x-if="loadingItems">
+	                <div class="loading-panel">
+	                  <span class="spinner-border text-primary" aria-hidden="true"></span>
+                    <div>
+                      <strong class="d-block text-body">Loading folder</strong>
+                      <span class="text-secondary">Reading media from the selected source.</span>
+                    </div>
+	                </div>
+	              </template>
+
+	              <template x-if="transcodeStatus">
+	                <div class="alert alert-info py-2" x-text="transcodeStatus"></div>
+	              </template>
+
+              <template x-if="!selectedServer">
+                <div class="empty-state border rounded p-5 text-center text-secondary">
+                  <i class="bi bi-hdd-network display-5 d-block mb-3"></i>
+                  <strong class="d-block text-body mb-1">Choose a media source</strong>
+                  <span>Unlock the connector, refresh sources, then select a DLNA server or served folder.</span>
+                  <div class="empty-state-actions">
+                    <button class="btn btn-primary" type="button" x-show="!connectorReady" @click="showBootstrapTab('connector-tab')">
+                      <i class="bi bi-shield-lock"></i> Open connector setup
+                    </button>
+                    <button class="btn btn-primary" type="button" x-show="connectorReady" @click="discoverServers()" :disabled="loadingServers">
+                      <i class="bi bi-radar"></i>
+                      <span x-text="loadingServers ? 'Refreshing' : 'Refresh sources'"></span>
+                    </button>
+                  </div>
+                </div>
+              </template>
+
+              <template x-if="selectedServer && !loadingItems && items.length === 0">
+                <div class="empty-state border rounded p-5 text-center text-secondary">
+                  <i class="bi bi-folder2-open display-6 d-block mb-3"></i>
+                  <strong class="d-block text-body mb-1">No items here</strong>
+                  <span>This folder did not return any browsable media.</span>
+                  <div class="empty-state-actions" x-show="history.length > 0">
+                    <button class="btn btn-outline-secondary" type="button" @click="goUp()">
+                      <i class="bi bi-arrow-up"></i> Go up
+                    </button>
+                  </div>
+                </div>
+              </template>
+
+              <div class="list-group file-list" x-show="selectedServer && !loadingItems && items.length > 0">
+                <template x-for="item in items" :key="item.id">
+                  <div class="list-group-item">
+                    <div class="d-flex flex-column flex-lg-row gap-3 align-items-lg-center justify-content-between">
+                      <button type="button" class="file-title btn btn-link text-start p-0 text-decoration-none" @click="openItem(item)">
+                        <span class="file-icon">
+                          <i class="bi" :class="item.type === 'container' ? 'bi-folder-fill text-warning' : iconForItem(item)"></i>
+                        </span>
+                        <span class="min-w-0">
+                          <strong class="d-block text-body text-truncate" x-text="item.title"></strong>
+                          <small class="text-secondary text-truncate d-block" x-text="item.class || item.resources?.[0]?.protocolInfo || ''"></small>
+                        </span>
+                      </button>
+
+	                      <template x-if="item.type === 'item' && item.resources && item.resources.length">
+	                        <div class="dropdown">
+	                          <button class="btn btn-outline-primary btn-sm dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false">
+	                            <span class="spinner-border spinner-border-sm" x-show="sharingItemId === item.id || transcodeItemId === item.id || (playerLoading && playerTitle === item.title)" aria-hidden="true"></span>
+	                            <i class="bi bi-lightning-charge" x-show="!(sharingItemId === item.id || transcodeItemId === item.id || (playerLoading && playerTitle === item.title))"></i>
+	                            Action
+	                          </button>
+	                          <ul class="dropdown-menu dropdown-menu-end">
+	                            <li>
+	                              <button class="dropdown-item" type="button" @click="previewItem(item)" :disabled="previewLoading">
+	                                <i class="bi bi-eye me-2"></i>Preview
+	                              </button>
+	                            </li>
+	                            <li>
+	                              <button class="dropdown-item" type="button" @click="launchVideoItem(item)" :disabled="!isVideoItem(item) || playerLoading">
+	                                <i class="bi bi-play-circle me-2"></i><span x-text="playerLoading && playerTitle === item.title ? 'Loading player' : 'Open in player'"></span>
+	                              </button>
+	                            </li>
+	                            <li>
+	                              <button class="dropdown-item" type="button" @click="transcodeForLater(item)" :disabled="!isVideoItem(item) || transcodeItemId === item.id">
+	                                <i class="bi bi-cpu me-2"></i><span x-text="transcodeItemId === item.id ? 'Transcoding' : 'Transcode for later'"></span>
+	                              </button>
+	                            </li>
+	                            <li><hr class="dropdown-divider"></li>
+	                            <li>
+	                              <button class="dropdown-item" type="button" @click="shareItem(item)" :disabled="sharingItemId === item.id">
+	                                <i class="bi bi-send-lock me-2"></i><span x-text="sharingItemId === item.id ? 'Sharing' : 'Share encrypted link'"></span>
+	                              </button>
+	                            </li>
+	                            <li>
+		                              <a class="dropdown-item" :href="resourceOpenUrl(item)" target="_blank" rel="noreferrer">
+	                                <i class="bi bi-box-arrow-up-right me-2"></i>Open original
+	                              </a>
+	                            </li>
+	                          </ul>
+	                        </div>
+	                      </template>
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </div>
+
+            <aside class="col-12 col-xl-4">
+              <div class="card preview-card">
+                <div class="card-header d-flex align-items-center justify-content-between">
+                  <span class="fw-semibold">Preview</span>
+                  <button class="btn btn-sm btn-outline-secondary" type="button" @click="clearPreview()" :disabled="!previewUrl && !previewItemName">
+                    <i class="bi bi-x-lg"></i>
+                  </button>
+                </div>
+                <div class="card-body preview-stage">
+                  <template x-if="previewLoading">
+                    <div class="text-secondary">
+                      <span class="spinner-border spinner-border-sm me-2"></span>
+                      Loading preview...
+                    </div>
+                  </template>
+
+                  <template x-if="!previewLoading && !previewUrl">
+                    <div class="text-secondary text-center py-5">
+                      <i class="bi bi-file-earmark-play display-6 d-block mb-3"></i>
+                      <strong class="d-block text-body mb-1">Nothing selected</strong>
+                      <span>Use Preview on an image, audio file, or video.</span>
+                    </div>
+                  </template>
+
+                  <template x-if="previewUrl">
+                    <div>
+                      <h3 class="h6 text-truncate" x-text="previewItemName"></h3>
+                      <template x-if="previewType.startsWith('image/')">
+                        <img class="img-fluid rounded border" :src="previewUrl" :alt="previewItemName">
+                      </template>
+                      <template x-if="previewType.startsWith('video/')">
+                        <video class="w-100 rounded border" :src="previewUrl" controls></video>
+                      </template>
+                      <template x-if="previewType.startsWith('audio/')">
+                        <audio class="w-100" :src="previewUrl" controls></audio>
+                      </template>
+                      <template x-if="!isPreviewableType(previewType)">
+                        <div class="alert alert-secondary mb-0">Preview is not available for this file type.</div>
+                      </template>
+                    </div>
+                  </template>
+                </div>
+              </div>
+            </aside>
+          </div>
+        </section>
+
+        <section class="tab-pane fade p-3 p-lg-4" id="sharing-pane" role="tabpanel" aria-labelledby="sharing-tab" tabindex="0">
+          <div class="d-flex flex-column flex-lg-row gap-3 align-items-lg-center justify-content-between mb-3">
+            <div>
+              <h2 class="h5 mb-1">Sharing options</h2>
+              <div class="text-secondary small">Create encrypted links from connector media or a file selected from this computer.</div>
+            </div>
+            <span class="badge rounded-pill text-bg-light border" x-text="activeTransferCount() ? `${activeTransferCount()} transfer active` : 'No active transfers'"></span>
+          </div>
+
+	          <template x-if="shareStatus">
+	            <div class="alert alert-info">
+              <div class="d-flex justify-content-between gap-3">
+                <strong x-text="shareStatus"></strong>
+                <span x-show="shareProgress" x-text="`${shareProgress}%`"></span>
+              </div>
+              <div class="progress mt-2" role="progressbar">
+                <div class="progress-bar" :style="`width: ${shareProgress || 0}%`"></div>
+              </div>
+	            </div>
+	          </template>
+
+	          <template x-if="transcodeStatus">
+	            <div class="alert alert-info py-2" x-text="transcodeStatus"></div>
+	          </template>
+
+          <ul class="nav nav-pills mb-3" id="shareOptionTabs" role="tablist">
+            <li class="nav-item" role="presentation">
+              <button class="nav-link active" id="share-dlna-tab" data-bs-toggle="pill" data-bs-target="#share-dlna-pane" type="button" role="tab">
+	                <i class="bi bi-hdd-network"></i> Connector source
+              </button>
+            </li>
+            <li class="nav-item" role="presentation">
+              <button class="nav-link" id="share-local-tab" data-bs-toggle="pill" data-bs-target="#share-local-pane" type="button" role="tab">
+                <i class="bi bi-file-earmark-arrow-up"></i> This computer
+              </button>
+            </li>
+          </ul>
+
+          <div class="tab-content">
+            <section class="tab-pane fade show active" id="share-dlna-pane" role="tabpanel" aria-labelledby="share-dlna-tab" tabindex="0">
+              <div class="row g-4">
+                <div class="col-12 col-xl-7">
+                  <div class="card h-100">
+                    <div class="card-header d-flex flex-column flex-md-row gap-2 align-items-md-center justify-content-between">
+                      <div>
+	                        <div class="fw-semibold" x-text="selectedServer ? selectedServer.friendlyName : 'No source selected'"></div>
+                        <small class="text-secondary" x-text="pathLabel()"></small>
+                      </div>
+                      <button class="btn btn-sm btn-outline-secondary" type="button" @click="goUp()" :disabled="history.length === 0 || loadingItems">
+                        <i class="bi bi-arrow-up"></i> Up
+                      </button>
+                    </div>
+                    <div class="list-group list-group-flush">
+                      <template x-if="!selectedServer">
+	                        <div class="list-group-item text-secondary py-4 text-center">Select a media source from the header first.</div>
+                      </template>
+                      <template x-for="item in items" :key="`share-${item.id}`">
+                        <div class="list-group-item">
+                          <div class="d-flex flex-column flex-lg-row gap-3 align-items-lg-center justify-content-between">
+                            <button type="button" class="file-title btn btn-link text-start p-0 text-decoration-none" @click="openItem(item)">
+                              <span class="file-icon">
+                                <i class="bi" :class="item.type === 'container' ? 'bi-folder-fill text-warning' : iconForItem(item)"></i>
+                              </span>
+                              <span class="min-w-0">
+                                <strong class="d-block text-body text-truncate" x-text="item.title"></strong>
+                                <small class="text-secondary text-truncate d-block" x-text="item.type === 'container' ? 'Folder' : formatBytes(Number(item.resources?.[0]?.size || 0))"></small>
+                              </span>
+                            </button>
+	                            <template x-if="item.type === 'item' && item.resources && item.resources.length">
+	                              <div class="dropdown">
+	                                <button class="btn btn-outline-primary btn-sm dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false">
+	                                  <span class="spinner-border spinner-border-sm" x-show="sharingItemId === item.id || transcodeItemId === item.id || (playerLoading && playerTitle === item.title)" aria-hidden="true"></span>
+	                                  <i class="bi bi-lightning-charge" x-show="!(sharingItemId === item.id || transcodeItemId === item.id || (playerLoading && playerTitle === item.title))"></i>
+	                                  Action
+	                                </button>
+	                                <ul class="dropdown-menu dropdown-menu-end">
+	                                  <li>
+	                                    <button class="dropdown-item" type="button" @click="previewItem(item)" :disabled="previewLoading">
+	                                      <i class="bi bi-eye me-2"></i>Preview
+	                                    </button>
+	                                  </li>
+	                                  <li>
+	                                    <button class="dropdown-item" type="button" @click="launchVideoItem(item)" :disabled="!isVideoItem(item) || playerLoading">
+	                                      <i class="bi bi-play-circle me-2"></i><span x-text="playerLoading && playerTitle === item.title ? 'Loading player' : 'Open in player'"></span>
+	                                    </button>
+	                                  </li>
+	                                  <li>
+	                                    <button class="dropdown-item" type="button" @click="transcodeForLater(item)" :disabled="!isVideoItem(item) || transcodeItemId === item.id">
+	                                      <i class="bi bi-cpu me-2"></i><span x-text="transcodeItemId === item.id ? 'Transcoding' : 'Transcode for later'"></span>
+	                                    </button>
+	                                  </li>
+	                                  <li><hr class="dropdown-divider"></li>
+	                                  <li>
+	                                    <button class="dropdown-item" type="button" @click="shareItem(item)" :disabled="sharingItemId === item.id">
+	                                      <i class="bi bi-send-lock me-2"></i><span x-text="sharingItemId === item.id ? 'Sharing' : 'Share encrypted link'"></span>
+	                                    </button>
+	                                  </li>
+	                                </ul>
+	                              </div>
+	                            </template>
+                          </div>
+                        </div>
+                      </template>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="col-12 col-xl-5">
+                  <div class="card h-100">
+                    <div class="card-header fw-semibold">Latest secure link</div>
+                    <div class="card-body">
+                      <template x-if="!shareLink">
+	                        <p class="text-secondary mb-0">Share a connector file to generate an encrypted link.</p>
+                      </template>
+                      <template x-if="shareLink">
+                        <div>
+                          <label class="form-label">Secure link</label>
+                          <div class="input-group">
+                            <input class="form-control" type="text" readonly :value="shareLink" @focus="$event.target.select()">
+                            <button class="btn btn-success" type="button" @click="copyToClipboard(shareLink)">
+                              <i class="bi bi-clipboard"></i> Copy
+                            </button>
+                          </div>
+                          <div class="form-text">The key after # stays in the recipient browser and is not sent to the hosted server.</div>
+                        </div>
+                      </template>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section class="tab-pane fade" id="share-local-pane" role="tabpanel" aria-labelledby="share-local-tab" tabindex="0">
+              <div class="row g-4">
+                <div class="col-12 col-lg-6">
+                  <div class="card h-100">
+                    <div class="card-header fw-semibold">Select a local file</div>
+                    <div class="card-body">
+                      <label class="form-label">File from this computer</label>
+                      <input class="form-control file-control" type="file" @change="selectLocalFile($event)">
+
+                      <template x-if="localFile">
+                        <div class="border rounded p-3 mt-3">
+                          <div class="fw-semibold text-truncate" x-text="localFileName"></div>
+                          <div class="text-secondary small">
+                            <span x-text="formatBytes(localFileSize)"></span>
+                            <span x-show="localFileType"> · </span>
+                            <span x-text="localFileType"></span>
+                          </div>
+                        </div>
+                      </template>
+
+                      <button class="btn btn-primary mt-3" type="button" @click="shareLocalFile()" :disabled="!localFile || activeTransferCount() > 0">
+                        <i class="bi bi-send-lock"></i> Create encrypted link
+                      </button>
+                      <button class="btn btn-outline-primary mt-3 ms-lg-2" type="button" @click="launchLocalVideo()" :disabled="!localFile || !localFileType.startsWith('video/')">
+                        <i class="bi bi-play-circle"></i> Open in player
+                      </button>
+                      <p class="form-text mt-2 mb-0">The browser encrypts this file and streams it directly to the recipient over WebRTC. The hosted server only handles signaling.</p>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="col-12 col-lg-6">
+                  <div class="card h-100">
+                    <div class="card-header fw-semibold">Generated link</div>
+                    <div class="card-body">
+                      <template x-if="!shareLink">
+                        <p class="text-secondary mb-0">No local file link has been generated yet.</p>
+                      </template>
+                      <template x-if="shareLink">
+                        <div>
+                          <label class="form-label">Secure link</label>
+                          <div class="input-group">
+                            <input class="form-control" type="text" readonly :value="shareLink" @focus="$event.target.select()">
+                            <button class="btn btn-success" type="button" @click="copyToClipboard(shareLink)">
+                              <i class="bi bi-clipboard"></i> Copy
+                            </button>
+                          </div>
+                          <div class="form-text">Anyone with the full link can decrypt this file in their browser.</div>
+                        </div>
+                      </template>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section class="tab-pane fade p-3 p-lg-4" id="player-pane" role="tabpanel" aria-labelledby="player-tab" tabindex="0">
+          <div class="row g-4">
+            <div class="col-12 col-xl-8">
+              <div class="card">
+                <div class="card-header d-flex flex-column flex-md-row gap-2 align-items-md-center justify-content-between">
+                  <div>
+                    <div class="fw-semibold" x-text="playerTitle || 'No video loaded'"></div>
+                    <small class="text-secondary" x-text="playerType || 'Open a video file in the player from Explorer or Sharing.'"></small>
+                  </div>
+                  <div class="d-flex gap-2">
+                    <div class="input-group input-group-sm transcode-mode-picker">
+                      <span class="input-group-text"><i class="bi bi-cpu"></i></span>
+                      <select class="form-select" x-model="transcodePlaybackMode" @change="setTranscodePlaybackMode(transcodePlaybackMode)">
+                        <option value="full">Stable MP4</option>
+                        <option value="segmented">Fast segments</option>
+                      </select>
+                    </div>
+                    <button class="btn btn-outline-primary" type="button" @click="createBigscreenLink()" :disabled="!playerSource || playerSource?.shareDisabledReason">
+                      <i class="bi bi-badge-vr"></i> Bigscreen link
+                    </button>
+                    <button class="btn btn-primary" type="button" @click="createWatchRoom()" :disabled="!playerSource || playerSource?.shareDisabledReason || playerRoomCreating">
+                      <i class="bi bi-people"></i> Share player
+                      <span x-show="playerRoomId && !playerRoomCreating">(new link)</span>
+                    </button>
+                  </div>
+                </div>
+                <div class="card-body">
+                  <template x-if="playerLoading">
+                    <div class="empty-state border rounded p-5 text-center text-secondary">
+                      <span class="spinner-border text-primary mb-3" aria-hidden="true"></span>
+                      <strong class="d-block text-body mb-1">Loading video</strong>
+                      <span x-text="playerTitle ? `Preparing ${playerTitle}` : 'Preparing the player.'"></span>
+                    </div>
+                  </template>
+                  <template x-if="!playerUrl && !playerLoading">
+                    <div class="empty-state border rounded p-5 text-center text-secondary">
+                      <i class="bi bi-play-btn display-5 d-block mb-3"></i>
+                      <strong class="d-block text-body mb-1">Player is ready</strong>
+                      <span>Launch a video from Explorer or Sharing to start a watch room.</span>
+                    </div>
+                  </template>
+                  <template x-if="playerUrl">
+                    <div>
+                      <video id="host-video-player" class="w-100 rounded border bg-black" :src="playerType === 'application/vnd.apple.mpegurl' ? '' : playerUrl" crossorigin="anonymous" controls preload="auto" playsinline @loadedmetadata="prepareHostPlayerMedia()" @playing="setTimeout(() => inspectHostPlayerAudio(), 1000)" @play="handleHostPlayerPlay()" @pause="handleHostPlayerPause()" @seeked="handleHostPlayerSeeked()" @timeupdate.throttle.2000ms="broadcastPlayerState('time')"></video>
+	                      <template x-if="playerAudioStatus">
+	                        <div class="alert alert-secondary mt-3 mb-0" x-text="playerAudioStatus"></div>
+	                      </template>
+                      <template x-if="playerSource?.shareDisabledReason">
+                        <div class="alert alert-warning mt-3 mb-0" x-text="playerSource.shareDisabledReason"></div>
+                      </template>
+                    </div>
+                  </template>
+                </div>
+              </div>
+            </div>
+
+            <div class="col-12 col-xl-4">
+              <div class="card mb-3">
+                <div class="card-header fw-semibold">Watch room</div>
+                <div class="card-body">
+                  <template x-if="!playerRoomLink">
+                    <div>
+                      <label class="form-label">Room alias</label>
+                      <div class="input-group">
+                        <span class="input-group-text">/join/</span>
+                        <input class="form-control" type="text" x-model="playerRoomAlias" maxlength="64" placeholder="movie-night" autocomplete="off" autocapitalize="none" spellcheck="false">
+                      </div>
+                      <div class="form-text">Optional. Use letters, numbers, hyphens, or underscores.</div>
+                      <p class="text-secondary mb-0 mt-3">Create a room to generate an encrypted watch link. Keep this page open while others watch.</p>
+                    </div>
+                  </template>
+                  <template x-if="playerRoomLink">
+                    <div>
+                      <label class="form-label">Watch link</label>
+                      <div class="input-group">
+                        <input class="form-control" type="text" readonly :value="playerRoomLink" @focus="$event.target.select()">
+                        <button class="btn btn-success" type="button" @click="copyToClipboard(playerRoomLink)">
+                          <i class="bi bi-clipboard"></i> Copy
+                        </button>
+                      </div>
+                      <div class="form-text">The key after # is required to decrypt the video stream and metadata.</div>
+                      <template x-if="playerRoomAliasLink">
+                        <div class="mt-3">
+                          <label class="form-label">Alias link</label>
+                          <div class="input-group">
+                            <input class="form-control" type="text" readonly :value="playerRoomAliasLink" @focus="$event.target.select()">
+                            <button class="btn btn-success" type="button" @click="copyToClipboard(playerRoomAliasLink)">
+                              <i class="bi bi-clipboard"></i> Copy
+                            </button>
+                          </div>
+                          <div class="form-text">Shortcut to the same room for devices where typing a long URL is awkward.</div>
+                        </div>
+                      </template>
+                      <template x-if="playerRoomQrDataUrl">
+                        <div class="room-qr-panel mt-3">
+                          <img class="room-qr-code" :src="playerRoomQrDataUrl" alt="Watch room QR code">
+                        </div>
+                      </template>
+                    </div>
+                  </template>
+                  <template x-if="playerStatus">
+                    <div class="alert alert-info mt-3 mb-0" x-text="playerStatus"></div>
+                  </template>
+                </div>
+              </div>
+
+              <div class="card mb-3">
+                <div class="card-header fw-semibold">Bigscreen</div>
+                <div class="card-body">
+                  <template x-if="!bigscreenLink">
+                    <p class="text-secondary mb-0">Create a public player link for Bigscreen's browser. The file ranges stream peer-to-peer from this launcher tab.</p>
+                  </template>
+                  <template x-if="bigscreenLink">
+                    <div>
+                      <label class="form-label">Bigscreen player link</label>
+                      <div class="input-group">
+                        <input class="form-control" type="text" readonly :value="bigscreenLink" @focus="$event.target.select()">
+                        <button class="btn btn-success" type="button" @click="copyToClipboard(bigscreenLink)">
+                          <i class="bi bi-clipboard"></i> Copy
+                        </button>
+                      </div>
+                      <div class="form-text">Open this in Bigscreen. Keep this launcher tab open while the room watches.</div>
+                    </div>
+                  </template>
+                  <template x-if="bigscreenStatus">
+                    <div class="alert alert-info mt-3 mb-0">
+                      <div class="d-flex justify-content-between gap-3">
+                        <span x-text="bigscreenStatus"></span>
+                        <span x-show="bigscreenProgress" x-text="`${bigscreenProgress}%`"></span>
+                      </div>
+                    </div>
+                  </template>
+                </div>
+              </div>
+
+              <div class="card">
+                <div class="card-header fw-semibold">Viewers</div>
+                <div class="list-group list-group-flush">
+                  <template x-if="Object.keys(playerPeers).length === 0">
+                    <div class="list-group-item text-secondary">No viewers connected.</div>
+                  </template>
+		                  <template x-for="peer in Object.values(playerPeers)" :key="peer.id">
+		                    <div class="list-group-item">
+		                      <div class="d-flex align-items-center justify-content-between gap-2 mb-2">
+		                        <div class="voice-name-row min-w-0">
+		                          <span class="text-truncate" x-text="peer.name"></span>
+		                          <div class="voice-activity" :class="{ 'voice-activity-muted': peer.localVoiceMuted || peer.micMuted || !peer.voiceAvailable }">
+		                            <i class="bi" :class="voiceActivityIconClass(peer.voiceLevel, peer.localVoiceMuted || peer.micMuted, peer.voiceAvailable)"></i>
+		                            <span class="voice-activity-bar"><span :style="voiceLevelStyle(peer.voiceLevel)"></span></span>
+		                          </div>
+		                        </div>
+		                        <span class="badge" :class="peer.status === 'Connected' || peer.status === 'Synced' || peer.status === 'Control allowed' ? 'text-bg-success' : 'text-bg-secondary'" x-text="peer.status"></span>
+		                      </div>
+		                      <div class="d-flex gap-2">
+		                        <button class="btn btn-sm flex-fill" :class="peer.allowControl ? 'btn-primary' : 'btn-outline-primary'" type="button" @click="toggleParticipantControl(peer)" :disabled="peer.status === 'Kicked'">
+		                          <i class="bi" :class="peer.allowControl ? 'bi-unlock' : 'bi-lock'"></i>
+		                          <span x-text="peer.allowControl ? 'Shared control' : 'Allow control'"></span>
+		                        </button>
+		                        <button class="btn btn-sm btn-outline-danger" type="button" @click="kickParticipant(peer)" :disabled="peer.status === 'Kicked'">
+		                          <i class="bi bi-person-x"></i>
+		                        </button>
+		                      </div>
+		                      <div class="d-flex gap-2 mt-2">
+		                        <button class="btn btn-sm flex-fill" :class="peer.localVoiceMuted ? 'btn-secondary' : 'btn-outline-secondary'" type="button" @click="toggleParticipantAudioMute(peer)" :disabled="peer.status === 'Kicked'">
+		                          <i class="bi" :class="peer.localVoiceMuted ? 'bi-volume-mute' : 'bi-volume-up'"></i>
+		                          <span x-text="peer.localVoiceMuted ? 'Unmute here' : 'Mute here'"></span>
+		                        </button>
+		                        <button class="btn btn-sm flex-fill" :class="peer.remoteMicMuted ? 'btn-warning' : 'btn-outline-warning'" type="button" @click="toggleParticipantMicMute(peer)" :disabled="peer.status === 'Kicked' || !peer.channel || peer.channel.readyState !== 'open'">
+		                          <i class="bi" :class="peer.remoteMicMuted ? 'bi-mic' : 'bi-mic-mute'"></i>
+		                          <span x-text="peer.remoteMicMuted ? 'Allow mic' : 'Mute mic'"></span>
+		                        </button>
+		                      </div>
+		                      <div class="small text-secondary mt-2">
+		                        <span x-text="peer.voiceAvailable ? (peer.micMuted ? 'Participant mic muted' : 'Participant mic live') : 'Participant mic not connected'"></span>
+		                      </div>
+		                    </div>
+		                  </template>
+                </div>
+              </div>
+
+              <div class="card mt-3">
+	                <div class="card-header d-flex align-items-center justify-content-between">
+	                  <span class="fw-semibold">Voice audio</span>
+	                  <span class="badge" :class="voiceEnabled ? 'text-bg-success' : 'text-bg-secondary'" x-text="hostVoiceLabel()"></span>
+	                </div>
+	                <div class="card-body">
+	                  <div class="voice-name-row mb-3">
+	                    <span class="fw-semibold">You</span>
+	                    <div class="voice-activity" :class="{ 'voice-activity-muted': selfMuted || !hostMicStream }">
+	                      <i class="bi" :class="voiceActivityIconClass(hostVoiceLevel, selfMuted, Boolean(hostMicStream))"></i>
+	                      <span class="voice-activity-bar"><span :style="voiceLevelStyle(hostVoiceLevel)"></span></span>
+	                    </div>
+	                  </div>
+	                  <div class="d-flex gap-2 mb-3">
+	                    <button class="btn btn-outline-primary flex-fill" type="button" @click="enableHostVoice()">
+	                      <i class="bi bi-mic"></i>
+	                      <span x-text="hostMicStream && selfMuted ? 'Unmute voice' : 'Enable voice'"></span>
+	                    </button>
+	                    <button class="btn btn-outline-secondary" type="button" @click="stopHostVoice()" :disabled="!hostMicStream || selfMuted">
+	                      <i class="bi bi-mic-mute"></i>
+	                    </button>
+	                  </div>
+
+	                  <label class="form-label">Microphone</label>
+	                  <select class="form-select mb-3" x-model="voiceInputId" @change="changeHostVoiceInput()">
+                    <option value="">Default microphone</option>
+                    <template x-for="device in audioInputs" :key="device.deviceId">
+                      <option :value="device.deviceId" x-text="device.label || 'Microphone'"></option>
+                    </template>
+                  </select>
+
+                  <label class="form-label">Headphones</label>
+                  <select class="form-select mb-3" x-model="voiceOutputId" @change="setHostAudioOutput()">
+                    <option value="">Default output</option>
+                    <template x-for="device in audioOutputs" :key="device.deviceId">
+                      <option :value="device.deviceId" x-text="device.label || 'Audio output'"></option>
+                    </template>
+                  </select>
+
+                  <label class="form-label d-flex justify-content-between">
+                    <span>Media volume</span>
+                    <span x-text="`${Math.round(mediaVolume * 100)}%`"></span>
+                  </label>
+                  <input class="form-range" type="range" min="0" max="1" step="0.01" x-model.number="mediaVolume" @input="applyHostVolumes()">
+
+                  <label class="form-label d-flex justify-content-between mt-2">
+                    <span>Participant volume</span>
+                    <span x-text="`${Math.round(participantVolume * 100)}%`"></span>
+                  </label>
+                  <input class="form-range" type="range" min="0" max="1" step="0.01" x-model.number="participantVolume" @input="applyHostVolumes()">
+
+                  <template x-if="voiceStatus">
+                    <div class="form-text" x-text="voiceStatus"></div>
+                  </template>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="tab-pane fade p-3 p-lg-4" id="activity-pane" role="tabpanel" aria-labelledby="activity-tab" tabindex="0">
+          <div class="row g-4">
+            <div class="col-12 col-lg-5">
+              <div class="card h-100">
+                <div class="card-header fw-semibold">Current connections to you</div>
+                <div class="list-group list-group-flush">
+                  <div class="list-group-item d-flex align-items-center justify-content-between">
+                    <div>
+                      <div class="fw-semibold">Local connector</div>
+                      <small class="text-secondary" x-text="connectorUrl"></small>
+                    </div>
+                    <span class="badge" :class="connectorReady ? 'text-bg-success' : 'text-bg-secondary'" x-text="connectorReady ? 'Online' : 'Offline'"></span>
+                  </div>
+                  <div class="list-group-item d-flex align-items-center justify-content-between">
+                    <div>
+                      <div class="fw-semibold">Signaling server</div>
+                      <small class="text-secondary">WebRTC signaling only</small>
+                    </div>
+                    <span class="badge" :class="activeTransferCount() ? 'text-bg-primary' : 'text-bg-secondary'" x-text="activeTransferCount() ? `${activeTransferCount()} active` : 'Idle'"></span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="col-12 col-lg-7">
+              <div class="card h-100">
+                <div class="card-header fw-semibold">Outgoing peer-to-peer data</div>
+                <div class="table-responsive">
+                  <table class="table align-middle mb-0">
+                    <thead>
+                      <tr>
+                        <th>File</th>
+                        <th>Source</th>
+                        <th>Status</th>
+                        <th>Progress</th>
+                        <th>Sent</th>
+                        <th>MD5</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <template x-if="outgoingTransfers.length === 0">
+                        <tr>
+                          <td colspan="6" class="text-secondary py-4 text-center">No outgoing transfers yet.</td>
+                        </tr>
+                      </template>
+                      <template x-for="transfer in outgoingTransfers" :key="transfer.id">
+                        <tr>
+                          <td class="text-truncate transfer-name" x-text="transfer.title"></td>
+                          <td x-text="transfer.source || 'Unknown'"></td>
+                          <td>
+                            <span class="badge" :class="badgeForTransfer(transfer)" x-text="transfer.status"></span>
+                          </td>
+                          <td>
+                            <div class="progress transfer-progress">
+                              <div class="progress-bar" :style="`width: ${transfer.progress || 0}%`" x-text="transfer.progress ? `${transfer.progress}%` : ''"></div>
+                            </div>
+                          </td>
+                          <td x-text="formatBytes(transfer.bytesSent || 0)"></td>
+                          <td class="font-monospace small text-break" x-text="transfer.md5 || 'Pending'"></td>
+                        </tr>
+                      </template>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="tab-pane fade p-3 p-lg-4" id="connector-pane" role="tabpanel" aria-labelledby="connector-tab" tabindex="0">
+          <div class="row g-4">
+            <div class="col-12 col-lg-5">
+              <div class="card">
+                <div class="card-header fw-semibold">Local connector</div>
+                <div class="card-body">
+                  <div class="setup-steps mb-3">
+                    <div class="setup-step" :class="connectorReady ? 'setup-step-done' : ''">
+                      <span class="setup-step-index">1</span>
+                      <span>Start the local connector</span>
+                    </div>
+                    <div class="setup-step" :class="connectorReady ? 'setup-step-done' : ''">
+                      <span class="setup-step-index">2</span>
+                      <span>Check the browser connection</span>
+                    </div>
+                    <div class="setup-step" :class="servers.length ? 'setup-step-done' : ''">
+                      <span class="setup-step-index">3</span>
+	                      <span>Refresh and choose a media source</span>
+                    </div>
+                  </div>
+                  <div class="mb-3">
+                    <label class="form-label">Connector URL</label>
+                    <input class="form-control" type="url" x-model="connectorUrl" @change="saveConnectorUrl(); checkConnector()">
+                    <div class="d-flex gap-2 flex-wrap mt-2">
+                      <button class="btn btn-sm btn-outline-secondary" type="button" @click="setConnectorUrl('https://127.0.0.1:8765')">Use HTTPS</button>
+                      <button class="btn btn-sm btn-outline-secondary" type="button" @click="setConnectorUrl('http://127.0.0.1:8765')">Use HTTP testing</button>
+                      <a class="btn btn-sm btn-outline-primary" :href="connectorHealthUrl()" target="_blank" rel="noreferrer">Open health check</a>
+                      <a class="btn btn-sm btn-outline-primary" :href="connectorUrl" target="_blank" rel="noreferrer">Open manager</a>
+                    </div>
+                    <div class="form-text">
+                      For --adhoc-tls, open the health check directly once and accept the local certificate warning before checking from this page.
+                    </div>
+                  </div>
+                  <div class="d-flex gap-2 flex-wrap">
+                    <button class="btn btn-primary" type="button" @click="checkConnector()"><i class="bi bi-plug"></i> Check connection</button>
+                    <button class="btn btn-outline-secondary" type="button" @click="discoverServers()" :disabled="!connectorReady || loadingServers"><i class="bi bi-radar"></i> Refresh sources</button>
+                  </div>
+
+                  <template x-if="connectorAuthRequired && !connectorAuthenticated">
+                    <form class="border-top mt-3 pt-3" @submit.prevent="loginConnector()">
+                      <label class="form-label">Connector password</label>
+                      <input class="form-control mb-2" type="password" x-model="connectorPassword" autocomplete="current-password">
+                      <button class="btn btn-success" type="submit">Unlock connector</button>
+                      <div class="form-text text-danger" x-show="!connectorSecure">
+                        Password login requires an HTTPS connector unless it was started with the insecure testing flag.
+                      </div>
+                    </form>
+                  </template>
+
+                  <template x-if="connectorAuthRequired && connectorAuthenticated">
+                    <div class="border-top mt-3 pt-3">
+                      <button class="btn btn-outline-danger" type="button" @click="forgetConnectorAuth()">Forget password session</button>
+                    </div>
+                  </template>
+
+                  <div class="border-top mt-3 pt-3">
+                    <div class="d-flex align-items-center justify-content-between mb-2">
+                      <span class="fw-semibold">Served folders</span>
+                      <button class="btn btn-sm btn-outline-secondary" type="button" @click="loadConnectorDirectories()" :disabled="!connectorReady || loadingDirectories">
+                        <i class="bi bi-arrow-clockwise"></i>
+                      </button>
+                    </div>
+                    <template x-if="connectorDirectories.length === 0">
+                      <div class="text-secondary small">Open the connector manager to add local folders.</div>
+                    </template>
+                    <div class="list-group list-group-flush" x-show="connectorDirectories.length > 0">
+                      <template x-for="directory in connectorDirectories" :key="directory.id">
+                        <div class="list-group-item px-0">
+                          <div class="d-flex justify-content-between gap-2">
+                            <div class="min-w-0">
+                              <div class="fw-semibold text-truncate" x-text="directory.label"></div>
+                              <div class="text-secondary small text-truncate" x-text="directory.path"></div>
+                            </div>
+                            <span class="badge align-self-start" :class="directory.enabled && directory.exists ? 'text-bg-success' : 'text-bg-secondary'" x-text="directory.enabled && directory.exists ? 'Available' : 'Unavailable'"></span>
+                          </div>
+                        </div>
+                      </template>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="col-12 col-lg-7">
+              <div class="card">
+                <div class="card-header d-flex align-items-center justify-content-between gap-2">
+                  <span class="fw-semibold">Launch command</span>
+                  <button class="btn btn-sm btn-outline-primary" type="button" @click="copyToClipboard(connectorCommand())">
+                    <i class="bi bi-clipboard"></i> Copy
+                  </button>
+                </div>
+                <div class="card-body">
+                  <pre class="command-block mb-0" x-text="connectorCommand()"></pre>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+    </main>
+  </body>
+</html>
