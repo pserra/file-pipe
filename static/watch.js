@@ -643,6 +643,15 @@ document.addEventListener("alpine:init", () => {
         this.logWatchEvent("video-request-blocked", "Missing MD5 metadata.");
         return;
       }
+      if (this.metadata?.progressiveTranscode && !this.metadata.progressiveTranscode.complete) {
+        this.pendingVideoRequest = true;
+        this.error = "";
+        const percent = Math.round(Number(this.metadata.progressiveTranscode.percent || 0));
+        this.status = percent > 0
+          ? `Stable MP4 is still transcoding (${percent}%). Playback will start when it is ready.`
+          : "Stable MP4 is still transcoding. Playback will start when it is ready.";
+        return;
+      }
       if (!this.channel || this.channel.readyState !== "open") {
         if (this.pendingVideoRequest) {
           this.status = "Retrying host peer connection...";
@@ -808,6 +817,7 @@ document.addEventListener("alpine:init", () => {
 
     receiveButtonLabel() {
       if (this.receiving) return "Range player ready";
+      if (this.metadata?.progressiveTranscode && !this.metadata.progressiveTranscode.complete) return "Waiting for Stable MP4";
       if (this.pendingVideoRequest) return "Retry host connection";
       if (this.videoUrl) return "Video ready";
       if (!this.acknowledgementAccepted) return "Confirm acknowledgement";
@@ -816,6 +826,7 @@ document.addEventListener("alpine:init", () => {
 
     receiveDisabledReason() {
       if (!this.metadata?.md5 && this.metadata?.checksumKind !== "original-source") return "Waiting for the host to publish the required MD5 checksum.";
+      if (this.metadata?.progressiveTranscode && !this.metadata.progressiveTranscode.complete) return "The host is still preparing the Stable MP4 stream. Playback will start automatically when it is ready.";
       if (!this.acknowledgementAccepted) return "Check the acknowledgement box before starting the video.";
       if (this.pendingVideoRequest) return "Waiting for the host peer connection to open. File Pipe will retry automatically; click Retry to force it now.";
       if (!this.channelReady) return "You can request the video now; File Pipe will start it when the host connection opens.";
@@ -1033,12 +1044,17 @@ document.addEventListener("alpine:init", () => {
     applyTranscodeProgress(message) {
       if (!this.metadata) return;
       const percent = Math.max(0, Math.min(100, Number(message.percent || 0)));
+      const wasIncomplete = this.metadata.progressiveTranscode && !this.metadata.progressiveTranscode.complete;
       this.metadata.progressiveTranscode = {
         percent,
         availableBytes: Math.max(0, Number(message.availableBytes || 0)),
         complete: Boolean(message.complete) || percent >= 100,
       };
       this.clampViewerProgressiveSeek();
+      if (wasIncomplete && this.metadata.progressiveTranscode.complete && this.pendingVideoRequest && !this.videoUrl) {
+        this.status = "Stable MP4 is ready. Starting playback...";
+        setTimeout(() => this.requestVideo(), 250);
+      }
     },
 
     clampViewerProgressiveSeek() {

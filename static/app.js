@@ -606,6 +606,7 @@ document.addEventListener("alpine:init", () => {
                     this.playerSource.transcodedAvailableBytes = this.playerSource.size;
                   }
                   this.broadcastTranscodeProgress(100, Number(progress.size || this.playerSource?.size || 0));
+                  this.finalizeProgressiveWatchRoomMetadata();
                   setTimeout(() => {
                     if (this.playerStatus === `${title} is fully transcoded.`) this.playerStatus = "";
                   }, 10000);
@@ -1985,6 +1986,27 @@ document.addEventListener("alpine:init", () => {
           availableBytes: normalizedBytes,
           complete: normalizedPercent >= 100,
         });
+      }
+    },
+
+    async finalizeProgressiveWatchRoomMetadata() {
+      if (!this.playerRoomId || !this.playerRoomKey || !this.playerSource || !this.playerRoomMetadata?.progressiveTranscode) return;
+      try {
+        this.playerStatus = "Stable MP4 is ready. Publishing final watch metadata...";
+        await this.publishCurrentWatchRoomMetadata("Stable MP4 final metadata");
+        for (const peer of this.connectedWatchPeers()) {
+          peer.videoComplete = false;
+          peer.readySyncId = "";
+          peer.cancelledRanges?.clear();
+          sendChannelJson(peer.channel, {
+            type: "source-update",
+            reason: "Stable MP4 is ready. Restarting viewer playback.",
+            metadata: this.playerRoomMetadata,
+          });
+        }
+        this.playerStatus = "Stable MP4 watch stream is ready.";
+      } catch (error) {
+        this.error = error.message;
       }
     },
 
