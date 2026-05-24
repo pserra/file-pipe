@@ -17,6 +17,9 @@ document.addEventListener("alpine:init", () => {
     channelReady: false,
     remoteControlAllowed: false,
     suppressViewerControlEvents: false,
+    pendingViewerControlAction: "",
+    pendingViewerControlSentAt: 0,
+    pendingViewerControlUntil: 0,
     acknowledgementAccepted: false,
     pendingVideoRequest: false,
     pendingVideoRequestTimer: null,
@@ -814,8 +817,45 @@ document.addEventListener("alpine:init", () => {
       }, delay);
     },
 
+    rememberViewerControl(action) {
+      if (!["play", "pause", "seek"].includes(action)) return;
+      this.pendingViewerControlAction = action;
+      this.pendingViewerControlSentAt = Date.now();
+      this.pendingViewerControlUntil = this.pendingViewerControlSentAt + 3000;
+    },
+
+    clearPendingViewerControl() {
+      this.pendingViewerControlAction = "";
+      this.pendingViewerControlSentAt = 0;
+      this.pendingViewerControlUntil = 0;
+    },
+
+    clearViewerControlIfAcknowledged(message) {
+      if (!this.pendingViewerControlAction) return;
+      if (this.pendingViewerControlAction === "pause" && message.paused) {
+        this.clearPendingViewerControl();
+      } else if (this.pendingViewerControlAction === "play" && !message.paused) {
+        this.clearPendingViewerControl();
+      } else if (this.pendingViewerControlAction === "seek" && String(message.reason || "").includes("seek")) {
+        this.clearPendingViewerControl();
+      }
+    },
+
+    shouldIgnoreStaleHostSync(message) {
+      if (!this.pendingViewerControlAction || Date.now() > this.pendingViewerControlUntil) return false;
+      const sentAt = Number(message.sentAt || 0);
+      const fromBeforeControl = sentAt > 0 && sentAt < this.pendingViewerControlSentAt + 250;
+      if (this.pendingViewerControlAction === "pause" && !message.paused) {
+        return fromBeforeControl || ["time", "state", "viewer-ready"].includes(message.reason);
+      }
+      if (this.pendingViewerControlAction === "play" && message.paused) {
+        return fromBeforeControl || ["time", "state", "viewer-ready"].includes(message.reason);
+      }
+      return false;
+    },
+
     sendViewerControl(action) {
-      if (this.suppressViewerControlEvents) return;
+      if (this.suppressViewerControlEvents && action !== "pause") return;
       if (!this.videoUrl || !["play", "pause", "seek"].includes(action)) return;
       const video = document.getElementById("viewer-video-player");
       if (!video) return;
@@ -844,6 +884,7 @@ document.addEventListener("alpine:init", () => {
         this.status = "Cannot control playback because the host peer connection closed.";
         return;
       }
+      this.rememberViewerControl(action);
       this.status = "Sent playback control to host.";
     },
 
@@ -874,6 +915,7 @@ document.addEventListener("alpine:init", () => {
           this.status = "Cannot control playback because the host peer connection closed.";
           return;
         }
+        this.rememberViewerControl("seek");
         this.status = "Sent scrub position to host.";
       }, SEEK_CONTROL_DEBOUNCE_MS);
     },
@@ -1476,6 +1518,7 @@ document.addEventListener("alpine:init", () => {
         }
         if (message.type === "control-permission") {
           this.remoteControlAllowed = Boolean(message.allowed);
+          if (!this.remoteControlAllowed) this.clearPendingViewerControl();
           this.status = this.remoteControlAllowed
             ? "Shared playback control is enabled for you."
             : "Shared playback control is disabled for you.";
@@ -1483,6 +1526,7 @@ document.addEventListener("alpine:init", () => {
         }
         if (message.type === "control-denied") {
           this.remoteControlAllowed = false;
+          this.clearPendingViewerControl();
           this.status = message.reason || "The host has not enabled playback control for you.";
           return;
         }
@@ -1671,6 +1715,8 @@ document.addEventListener("alpine:init", () => {
     applySync(message) {
       const video = document.getElementById("viewer-video-player");
       if (!video) return;
+      if (this.shouldIgnoreStaleHostSync(message)) return;
+      this.clearViewerControlIfAcknowledged(message);
       this.suppressViewerControlsBriefly();
       const baseRate = message.playbackRate || 1;
       let targetTime = Number.isFinite(message.currentTime) ? Math.max(0, message.currentTime) : 0;
