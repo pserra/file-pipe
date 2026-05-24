@@ -157,6 +157,8 @@ function buildHlsPlaylist(metadata) {
   const duration = Math.max(0, Number(hls.duration || 0));
   const segmentDuration = Math.max(1, Number(hls.segmentDuration || 8));
   const segmentCount = Math.max(1, Number(hls.segmentCount || Math.ceil(duration / segmentDuration) || 1));
+  const sourceVersion = metadata.sourceVersion ? encodeURIComponent(String(metadata.sourceVersion)) : "";
+  const segmentQuery = sourceVersion ? `?v=${sourceVersion}` : "";
   const lines = [
     "#EXTM3U",
     "#EXT-X-VERSION:3",
@@ -171,7 +173,7 @@ function buildHlsPlaylist(metadata) {
       ? Math.max(0.1, Math.min(segmentDuration, duration - startTime))
       : segmentDuration;
     lines.push(`#EXTINF:${segmentLength.toFixed(3)},`);
-    lines.push(`segments/${index}.ts`);
+    lines.push(`segments/${index}.ts${segmentQuery}`);
   }
   lines.push("#EXT-X-ENDLIST");
   return `${lines.join("\n")}\n`;

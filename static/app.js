@@ -596,6 +596,7 @@ document.addEventListener("alpine:init", () => {
               if (target === "player") {
                 this.playerStatus = `${status} ${title}... ${percent}%`;
                 this.playerTranscodeAvailablePercent = percent;
+                if (this.playerSource) this.playerSource.progressiveTranscodePercent = percent;
                 if (this.playerSource && progress.size) this.playerSource.transcodedAvailableBytes = Number(progress.size);
                 if (this.playerSource && progress.estimatedFinalSize) this.playerSource.estimatedFinalSize = Number(progress.estimatedFinalSize);
                 this.broadcastTranscodeProgress(percent, Number(progress.size || 0));
@@ -962,7 +963,7 @@ document.addEventListener("alpine:init", () => {
       this.playerType = "video/mp4";
       this.playerTitle = item.title;
       this.playerTranscodeComplete = Boolean(transcodeInfo.complete);
-      this.playerSource = {
+      const source = {
         title: item.title,
         type: "video/mp4",
         size: transcodeSize,
@@ -976,35 +977,56 @@ document.addEventListener("alpine:init", () => {
         duration: transcodeDuration,
         shareDisabledReason: "",
         checksumPath: `${transcodePath}/checksum`,
-        readRange: async (start, endExclusive) => {
-          const expectedBytes = Math.max(0, Number(endExclusive || 0) - Number(start || 0));
-          const response = await fetch(`${this.connectorUrl}${transcodePath}${this.playerSource?.progressiveTranscode ? "?progressive=1" : ""}`, {
+      };
+      source.readRange = async (start, endExclusive) => {
+        const requestedStart = Math.max(0, Number(start || 0));
+        const requestedEndExclusive = Math.max(requestedStart, Number(endExclusive || 0));
+        const expectedBytes = requestedEndExclusive - requestedStart;
+        const maxAttempts = source.progressiveTranscode ? 45 : 1;
+        for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+          const progressiveQuery = source.progressiveTranscode ? "?progressive=1" : "";
+          const response = await fetch(`${this.connectorUrl}${transcodePath}${progressiveQuery}`, {
             headers: this.connectorHeaders({
-              Range: `bytes=${start}-${Math.max(start, endExclusive - 1)}`,
+              Range: `bytes=${requestedStart}-${Math.max(requestedStart, requestedEndExclusive - 1)}`,
             }),
           });
+          if (response.status === 503 && source.progressiveTranscode) {
+            const availableBytes = Number(response.headers.get("X-Available-Bytes") || 0);
+            if (availableBytes) source.transcodedAvailableBytes = Math.max(Number(source.transcodedAvailableBytes || 0), availableBytes);
+            const retryAfterMs = Math.max(250, Math.min(2000, Number(response.headers.get("Retry-After") || 1) * 1000));
+            await sleep(retryAfterMs);
+            continue;
+          }
           if (response.status !== 206) {
             throw new Error(`Connector returned ${response.status} for transcoded range; expected 206 Partial Content.`);
           }
           const buffer = await response.arrayBuffer();
           if (expectedBytes && buffer.byteLength !== expectedBytes) {
+            if (source.progressiveTranscode && buffer.byteLength < expectedBytes && attempt + 1 < maxAttempts) {
+              source.transcodedAvailableBytes = Math.max(Number(source.transcodedAvailableBytes || 0), requestedStart + buffer.byteLength);
+              await sleep(750);
+              continue;
+            }
             throw new Error(`Connector returned ${buffer.byteLength} bytes for a ${expectedBytes}-byte transcoded range.`);
           }
           return buffer;
-        },
-        openStream: async () => {
-          const response = await fetch(`${this.connectorUrl}${transcodePath}${this.playerSource?.progressiveTranscode ? "?progressive=1" : ""}`, {
-            headers: this.connectorHeaders(),
-          });
-          if (!response.ok) throw new Error(`Connector returned ${response.status} for transcoded video.`);
-          const totalBytes = Number(response.headers.get("Content-Length") || estimatedFinalSize || transcodeSize || 0);
-          return {
-            totalBytes,
-            stream: response.body,
-            arrayBuffer: () => response.arrayBuffer(),
-          };
-        },
+        }
+        throw new Error("Timed out waiting for the transcoded range to become available.");
       };
+      source.openStream = async () => {
+        const progressiveQuery = source.progressiveTranscode ? "?progressive=1" : "";
+        const response = await fetch(`${this.connectorUrl}${transcodePath}${progressiveQuery}`, {
+          headers: this.connectorHeaders(),
+        });
+        if (!response.ok) throw new Error(`Connector returned ${response.status} for transcoded video.`);
+        const totalBytes = Number(response.headers.get("Content-Length") || source.estimatedFinalSize || source.size || 0);
+        return {
+          totalBytes,
+          stream: response.body,
+          arrayBuffer: () => response.arrayBuffer(),
+        };
+      };
+      this.playerSource = source;
       this.playerStatus = transcodeInfo.complete
         ? `Video ready with browser-safe ${transcodeParts.join(" and ")}.`
         : "Playing while transcoding continues. Scrubbing is limited to the transcoded portion.";
@@ -2007,6 +2029,7 @@ document.addEventListener("alpine:init", () => {
           peer,
           channel,
           key,
+          source: this.playerSource,
           metadata,
           cancelledRanges: new Set(),
           status: "Creating offer",
@@ -2092,7 +2115,16 @@ document.addEventListener("alpine:init", () => {
     async streamBigscreenRange(message, transfer) {
       const channel = transfer.channel;
       if (!channel || channel.readyState !== "open") return;
-      const totalSize = Number(transfer.metadata.size || this.playerSource.size || 0);
+      const source = transfer.source || this.playerSource;
+      if (!source?.readRange) {
+        sendChannelJson(channel, {
+          type: "range-error",
+          requestId: message.requestId,
+          error: "The Bigscreen source is no longer available. Create a new Bigscreen link.",
+        });
+        return;
+      }
+      const totalSize = Number((!source.progressiveTranscode && source.size) || transfer.metadata.size || source.size || 0);
       const start = Math.max(0, Number(message.start || 0));
       const end = Math.min(totalSize - 1, Number(message.end ?? totalSize - 1));
       const requestId = message.requestId;
@@ -2102,7 +2134,7 @@ document.addEventListener("alpine:init", () => {
         for (let offset = start; offset <= end; offset += chunkSize) {
           if (transfer.cancelledRanges.has(requestId)) break;
           const nextEnd = Math.min(offset + chunkSize - 1, end);
-          const plainChunk = await this.playerSource.readRange(offset, nextEnd + 1);
+          const plainChunk = await source.readRange(offset, nextEnd + 1);
           const iv = crypto.getRandomValues(new Uint8Array(12));
           const ciphertext = await crypto.subtle.encrypt(
             { name: "AES-GCM", iv },
@@ -2378,7 +2410,9 @@ document.addEventListener("alpine:init", () => {
         if (!sendChannelJson(channel, { type: "video-start", metadata: this.playerRoomMetadata })) {
           throw dataChannelDisconnectedError();
         }
-        const opened = await this.playerSource.openStream();
+        const source = this.playerRoomSource || this.playerSource;
+        if (!source?.openStream) throw new Error("The current watch room source cannot be streamed.");
+        const opened = await source.openStream();
         let sentBytes = 0;
         let chunkIndex = 0;
         const sendPlainChunk = async (plainChunk) => {
@@ -2461,7 +2495,7 @@ document.addEventListener("alpine:init", () => {
         });
         return;
       }
-      const source = this.playerRoomHlsSource || (this.playerRoomSource?.readHlsSegment ? this.playerRoomSource : this.playerSource);
+      const source = this.playerRoomHlsSource || (this.playerRoomSource?.readHlsSegment ? this.playerRoomSource : null);
       const requestId = message.requestId;
       const segmentIndex = Math.max(0, Number(message.segmentIndex || 0));
       const chunkSize = RANGE_STREAM_CHUNK_SIZE;
@@ -2548,9 +2582,10 @@ document.addEventListener("alpine:init", () => {
         });
         return;
       }
-      const source = this.playerRoomRangeSource || (this.playerRoomSource?.readRange ? this.playerRoomSource : this.playerSource);
+      const source = this.playerRoomRangeSource || (this.playerRoomSource?.readRange ? this.playerRoomSource : null);
       const totalSize = Number(
-        this.playerRoomMetadata?.availableModes?.range?.size
+        (!source?.progressiveTranscode && source?.size)
+        || this.playerRoomMetadata?.availableModes?.range?.size
         || this.playerRoomMetadata?.size
         || source?.estimatedFinalSize
         || source?.size
@@ -2568,14 +2603,14 @@ document.addEventListener("alpine:init", () => {
         }
         record.cancelledRanges?.delete(requestId);
         if (source?.progressiveTranscode) {
-          const ready = await this.waitForProgressiveTranscodeOffset(start, record, requestId);
+          const ready = await this.waitForProgressiveTranscodeOffset(start, record, requestId, source);
           if (!ready) return;
         }
         for (let offset = start; offset <= end; offset += chunkSize) {
           if (record.cancelledRanges?.has(requestId)) break;
           const nextEnd = Math.min(offset + chunkSize - 1, end);
           if (source?.progressiveTranscode) {
-            const ready = await this.waitForProgressiveTranscodeOffset(nextEnd, record, requestId);
+            const ready = await this.waitForProgressiveTranscodeOffset(nextEnd, record, requestId, source);
             if (!ready) break;
           }
           const plainChunk = exactArrayBuffer(await source.readRange(offset, nextEnd + 1));
@@ -2630,11 +2665,12 @@ document.addEventListener("alpine:init", () => {
       }
     },
 
-    async waitForProgressiveTranscodeOffset(offset, record, requestId) {
-      const totalSize = Number(this.playerRoomMetadata?.size || this.playerSource?.estimatedFinalSize || this.playerSource?.size || 0);
+    async waitForProgressiveTranscodeOffset(offset, record, requestId, source = this.playerRoomRangeSource || this.playerSource) {
+      const rangeMetadata = this.playerRoomMetadata?.availableModes?.range || this.playerRoomMetadata || {};
+      const totalSize = Number(rangeMetadata.size || source?.estimatedFinalSize || source?.size || 0);
       if (!totalSize || offset <= 0) return true;
       const requiredPercent = Math.min(100, ((offset + 1) / totalSize) * 100);
-      while (this.playerSource?.progressiveTranscode && !this.progressiveTranscodeOffsetReady(offset, requiredPercent)) {
+      while (source?.progressiveTranscode && !this.progressiveTranscodeOffsetReady(offset, requiredPercent, source, rangeMetadata)) {
         if (record.cancelledRanges?.has(requestId)) return false;
         if (!isDataChannelOpen(record.channel)) return false;
         record.status = `Waiting for transcode ${Math.ceil(requiredPercent)}%`;
@@ -2643,10 +2679,11 @@ document.addEventListener("alpine:init", () => {
       return true;
     },
 
-    progressiveTranscodeOffsetReady(offset, requiredPercent) {
-      const availableBytes = Number(this.playerSource?.transcodedAvailableBytes || this.playerRoomMetadata?.progressiveTranscode?.availableBytes || 0);
+    progressiveTranscodeOffsetReady(offset, requiredPercent, source = this.playerRoomRangeSource || this.playerSource, rangeMetadata = this.playerRoomMetadata?.availableModes?.range || this.playerRoomMetadata || {}) {
+      const progress = rangeMetadata.progressiveTranscode || this.playerRoomMetadata?.progressiveTranscode || {};
+      const availableBytes = Number(source?.transcodedAvailableBytes || progress.availableBytes || 0);
       if (availableBytes > 0) return availableBytes > offset;
-      return Number(this.playerTranscodeAvailablePercent || 0) + 0.25 >= requiredPercent;
+      return Number(source?.progressiveTranscodePercent || progress.percent || this.playerTranscodeAvailablePercent || 0) + 0.25 >= requiredPercent;
     },
 
     isWatchRoomKeyReady() {

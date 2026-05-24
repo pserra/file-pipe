@@ -146,6 +146,11 @@ document.addEventListener("alpine:init", () => {
 
     defaultPlaybackMode(metadata = this.metadata) {
       if (!metadata) return "range";
+      const modes = metadata.availableModes || {};
+      const rangeProgress = modes.range?.progressiveTranscode || metadata.progressiveTranscode;
+      if (modes.hls && rangeProgress && !rangeProgress.complete) {
+        return "hls";
+      }
       if (metadata.streamMode === "hls" || metadata.playbackProfile?.sourceKind === "hls-live" || String(metadata.type || "").includes("mpegurl")) {
         return "hls";
       }
@@ -157,7 +162,14 @@ document.addEventListener("alpine:init", () => {
       const modes = this.metadata.availableModes || {};
       const result = [];
       if (modes.range || this.defaultPlaybackMode(this.metadata) === "range") {
-        result.push({ id: "range", label: "Watch", description: "More metadata and scrubbing" });
+        const progress = modes.range?.progressiveTranscode || this.metadata.progressiveTranscode;
+        const disabled = Boolean(modes.hls && progress && !progress.complete);
+        result.push({
+          id: "range",
+          label: "Watch",
+          description: disabled ? "Available when Stable MP4 finishes" : "More metadata and scrubbing",
+          disabled,
+        });
       }
       if (modes.hls || this.defaultPlaybackMode(this.metadata) === "hls") {
         result.push({ id: "hls", label: "Stream", description: "More compatible playback" });
@@ -171,6 +183,14 @@ document.addEventListener("alpine:init", () => {
 
     playbackModeLabel() {
       return this.selectedPlaybackMode === "hls" ? "Stream" : "Watch";
+    },
+
+    playbackModeHelpText() {
+      const selected = this.availablePlaybackModes().find((mode) => mode.id === this.selectedPlaybackMode);
+      if (selected?.description) return selected.description;
+      return this.selectedPlaybackMode === "hls"
+        ? "Stream mode favors compatibility and steadier playback."
+        : "Watch mode favors metadata, range requests, and scrubbing.";
     },
 
     playbackMetadata() {
@@ -207,7 +227,8 @@ document.addEventListener("alpine:init", () => {
     },
 
     setPlaybackMode(mode) {
-      if (!this.availablePlaybackModes().some((item) => item.id === mode) || this.selectedPlaybackMode === mode) return;
+      const selected = this.availablePlaybackModes().find((item) => item.id === mode);
+      if (!selected || selected.disabled || this.selectedPlaybackMode === mode) return;
       this.selectedPlaybackMode = mode;
       this.teardownViewerHlsPlayer();
       this.detachViewerXrPlayer();
@@ -839,7 +860,8 @@ document.addEventListener("alpine:init", () => {
           metadata: plainData(playbackMetadata),
         });
         const fileName = hlsStream ? "playlist.m3u8" : encodeURIComponent(playbackMetadata.name || "video");
-        this.videoUrl = `/watch-media/${this.roomId}/${fileName}`;
+        const sourceVersion = encodeURIComponent(String(playbackMetadata.sourceVersion || this.sourceVersion || 0));
+        this.videoUrl = `/watch-media/${this.roomId}/${fileName}?mode=${hlsStream ? "hls" : "range"}&v=${sourceVersion}`;
         this.streamingReady = true;
         const video = await this.waitForViewerVideoElement();
         if (!video) throw new Error("The video player did not initialize. Reload the watch page and try again.");
@@ -865,7 +887,7 @@ document.addEventListener("alpine:init", () => {
     },
 
     async registerServiceWorker() {
-      const registration = await navigator.serviceWorker.register("/bigscreen-sw.js?v=5", { scope: "/" });
+      const registration = await navigator.serviceWorker.register("/bigscreen-sw.js?v=6", { scope: "/" });
       await navigator.serviceWorker.ready;
       if (!navigator.serviceWorker.controller) {
         await new Promise((resolve) => {
@@ -1000,18 +1022,22 @@ document.addEventListener("alpine:init", () => {
     },
 
     receiveButtonLabel() {
-      if (this.receiving) return this.isHlsStream() ? "Live stream ready" : "Range player ready";
-      if (this.metadata?.progressiveTranscode && !this.metadata.progressiveTranscode.complete) return "Waiting for Stable MP4";
+      const hlsStream = this.isHlsStream();
+      const playbackMetadata = this.playbackMetadata();
+      if (this.receiving) return hlsStream ? "Live stream ready" : "Range player ready";
+      if (!hlsStream && playbackMetadata?.progressiveTranscode && !playbackMetadata.progressiveTranscode.complete) return "Waiting for Stable MP4";
       if (this.pendingVideoRequest) return "Retry host connection";
       if (this.videoUrl) return "Video ready";
       if (!this.acknowledgementAccepted) return "Confirm acknowledgement";
-      return this.isHlsStream() ? "Acknowledge and start live stream" : "Acknowledge and start streaming";
+      return hlsStream ? "Acknowledge and start live stream" : "Acknowledge and start streaming";
     },
 
     receiveDisabledReason() {
-      if (!this.isHlsStream() && !this.metadata?.md5 && this.metadata?.checksumKind !== "original-source") return "Waiting for the host to publish the required MD5 checksum.";
-      if (!this.isHlsStream() && this.metadata?.progressiveTranscode && !this.metadata.progressiveTranscode.complete) return "The host is still preparing the Stable MP4 stream. Playback will start automatically when it is ready.";
-      if (this.isHlsStream()) return "Live stream segments transcode on demand, so the first play or a scrub may take a moment.";
+      const hlsStream = this.isHlsStream();
+      const playbackMetadata = this.playbackMetadata();
+      if (!hlsStream && !playbackMetadata?.md5 && playbackMetadata?.checksumKind !== "original-source") return "Waiting for the host to publish the required MD5 checksum.";
+      if (!hlsStream && playbackMetadata?.progressiveTranscode && !playbackMetadata.progressiveTranscode.complete) return "The host is still preparing the Stable MP4 stream. Playback will start automatically when it is ready.";
+      if (hlsStream) return "Live stream segments transcode on demand, so the first play or a scrub may take a moment.";
       if (!this.acknowledgementAccepted) return "Check the acknowledgement box before starting the video.";
       if (this.pendingVideoRequest) return "Waiting for the host peer connection to open. File Pipe will retry automatically; click Retry to force it now.";
       if (!this.channelReady) return "You can request the video now; File Pipe will start it when the host connection opens.";
@@ -1291,6 +1317,10 @@ document.addEventListener("alpine:init", () => {
         if (this.metadata.progressiveTranscode.estimatedFinalSize) {
           this.metadata.availableModes.range.size = this.metadata.progressiveTranscode.estimatedFinalSize;
         }
+      }
+      if (this.selectedPlaybackMode === "range" && !this.metadata.progressiveTranscode.complete && this.metadata.availableModes?.hls) {
+        this.selectedPlaybackMode = "hls";
+        this.status = "Stable MP4 is still preparing, so Stream mode will play first.";
       }
       this.clampViewerProgressiveSeek();
       if (wasIncomplete && this.metadata.progressiveTranscode.complete && this.pendingVideoRequest && !this.videoUrl) {

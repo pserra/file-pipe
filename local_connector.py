@@ -1770,46 +1770,19 @@ def serve_growing_file_with_range(
     total_size = int(total_size or 0)
     duration = parse_float(duration)
 
+    def current_file_size() -> int:
+        return path.stat().st_size if path.exists() else 0
+
     def content_range_total(current_size: int) -> str:
-        if total_size > 0:
+        if total_size > 0 and transcode_running(resource_id):
             return str(max(total_size, current_size))
+        if current_size > 0:
+            return str(current_size)
+        if total_size > 0:
+            return str(total_size)
         return "*"
 
-    if open_range is None and request.headers.get("Range"):
-        return Response("", status=416, headers={"Accept-Ranges": "bytes"}, content_type=content_type)
-
-    synthetic_range = open_range is None and total_size > 0
-    start = open_range[0] if open_range else 0
-    requested_end = open_range[1] if open_range else None
-    running = transcode_running(resource_id)
-    if total_size > 0 and requested_end is not None and not running:
-        requested_end = min(requested_end, total_size - 1)
-    if total_size > 0 and start >= total_size and not running:
-        return Response(
-            "",
-            status=416,
-            headers={
-                "Accept-Ranges": "bytes",
-                "Content-Range": f"bytes */{total_size}",
-                "Cache-Control": "no-store",
-            },
-            content_type=content_type,
-        )
-
-    def wait_for_size(min_size: int, timeout: float = 30.0) -> bool:
-        started = time.monotonic()
-        while time.monotonic() - started < timeout:
-            if path.exists() and path.stat().st_size >= min_size:
-                return True
-            if not transcode_running(resource_id):
-                return path.exists() and path.stat().st_size >= min_size
-            time.sleep(0.1)
-        return False
-
-    if not wait_for_size(start + 1):
-        current_size = path.stat().st_size if path.exists() else 0
-        pending_known_range = total_size > 0 and start < total_size and transcode_running(resource_id)
-        status = 503 if pending_known_range or (total_size <= 0 and transcode_running(resource_id)) else 416
+    def range_not_ready_response(current_size: int, status: int = 503) -> Response:
         headers = {
             "Accept-Ranges": "bytes",
             "Content-Range": f"bytes */{content_range_total(current_size)}",
@@ -1827,15 +1800,66 @@ def serve_growing_file_with_range(
             content_type=content_type,
         )
 
-    if synthetic_range and requested_end is None:
-        requested_end = max(start, path.stat().st_size - 1)
+    if open_range is None and request.headers.get("Range"):
+        return Response("", status=416, headers={"Accept-Ranges": "bytes"}, content_type=content_type)
+
+    synthetic_range = open_range is None and total_size > 0
+    start = open_range[0] if open_range else 0
+    requested_end = open_range[1] if open_range else None
+    running = transcode_running(resource_id)
+    if total_size > 0 and requested_end is not None and not running:
+        requested_end = min(requested_end, total_size - 1)
+    if total_size > 0 and start >= total_size and not running:
+        current_size = current_file_size()
+        return Response(
+            "",
+            status=416,
+            headers={
+                "Accept-Ranges": "bytes",
+                "Content-Range": f"bytes */{current_size or total_size}",
+                "Cache-Control": "no-store",
+            },
+            content_type=content_type,
+        )
+
+    def wait_for_size(min_size: int, timeout: float = 30.0) -> bool:
+        started = time.monotonic()
+        while time.monotonic() - started < timeout:
+            if current_file_size() >= min_size:
+                return True
+            if not transcode_running(resource_id):
+                return current_file_size() >= min_size
+            time.sleep(0.1)
+        return False
+
+    if not wait_for_size(start + 1):
+        current_size = current_file_size()
+        pending_known_range = total_size > 0 and start < total_size and transcode_running(resource_id)
+        return range_not_ready_response(
+            current_size,
+            503 if pending_known_range or (total_size <= 0 and transcode_running(resource_id)) else 416,
+        )
+
+    if requested_end is None:
+        requested_end = max(start, current_file_size() - 1)
+
+    if requested_end is not None:
+        if transcode_running(resource_id) and not wait_for_size(requested_end + 1):
+            return range_not_ready_response(current_file_size(), 503)
+        current_size = current_file_size()
+        if requested_end >= current_size:
+            if transcode_running(resource_id):
+                return range_not_ready_response(current_size, 503)
+            requested_end = current_size - 1
+        if requested_end < start:
+            return range_not_ready_response(current_size, 416)
 
     def generate():
         position = start
         with path.open("rb") as file:
             file.seek(start)
             while True:
-                current_size = path.stat().st_size if path.exists() else 0
+                current_size = current_file_size()
                 if requested_end is not None and position > requested_end:
                     break
                 available_end = current_size - 1
@@ -1862,7 +1886,7 @@ def serve_growing_file_with_range(
     status = 200
     if open_range is not None or synthetic_range:
         status = 206
-        current_size = path.stat().st_size
+        current_size = current_file_size()
         end = requested_end if requested_end is not None else max(start, current_size - 1)
         headers["Content-Range"] = f"bytes {start}-{end}/{content_range_total(current_size)}"
         if end >= start:
