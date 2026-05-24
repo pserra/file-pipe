@@ -3,10 +3,18 @@
   const DEFAULT_SETTINGS = {
     layout: "mono",
     eye: "left",
+    headsetMode: "vr",
     panelWidth: 3.2,
     panelHeight: 1.8,
+    panelX: 0,
+    panelY: 0,
+    panelYaw: 0,
     distance: 3,
     roomDim: 80,
+    sidePanelVisible: false,
+    aspectLocked: true,
+    backlightMode: "off",
+    theme: "default",
   };
   const LAYOUT_LABELS = {
     mono: "Full frame",
@@ -29,24 +37,41 @@
       this.renderer = null;
       this.scene = null;
       this.camera = null;
+      this.screenGroup = null;
       this.videoMesh = null;
+      this.gridMesh = null;
+      this.themeGroup = null;
+      this.themeObjects = [];
+      this.themes = [];
+      this.themeRevision = 0;
       this.videoTexture = null;
+      this.backlightMesh = null;
+      this.backlightSampleCanvas = null;
+      this.backlightSampleContext = null;
+      this.lastBacklightSampleAt = 0;
       this.xrSidePanelCanvas = null;
       this.xrSidePanelContext = null;
       this.xrSidePanelTexture = null;
       this.xrSidePanelMesh = null;
       this.lastSidePanelTextureAt = 0;
       this.xrSupported = false;
+      this.xrVrSupported = false;
+      this.xrArSupported = false;
       this.xrSupportChecked = false;
+      this.xrSessionMode = "";
       this.sidePanel = null;
       this.sidePanelPlaceholder = null;
       this.xrSession = null;
       this.xrSessionEndHandler = null;
       this.inTheater = false;
+      this.controllers = [];
+      this.controllerLines = [];
+      this.activeGrab = null;
 
       this.buildInlineControls();
       this.bindInlineControls();
       this.refreshXrSupport();
+      this.loadThemes();
       this.updateInlineStatus();
     }
 
@@ -61,10 +86,18 @@
         return {
           layout: isKnownLayout(stored.layout) ? stored.layout : DEFAULT_SETTINGS.layout,
           eye: stored.eye === "right" ? "right" : DEFAULT_SETTINGS.eye,
+          headsetMode: stored.headsetMode === "mr" ? "mr" : DEFAULT_SETTINGS.headsetMode,
           panelWidth: clampNumber(Number(stored.panelWidth), 1.4, 6, DEFAULT_SETTINGS.panelWidth),
           panelHeight: clampNumber(Number(stored.panelHeight), 0.8, 3.6, DEFAULT_SETTINGS.panelHeight),
+          panelX: clampNumber(Number(stored.panelX), -3, 3, DEFAULT_SETTINGS.panelX),
+          panelY: clampNumber(Number(stored.panelY), -1.4, 1.4, DEFAULT_SETTINGS.panelY),
+          panelYaw: clampNumber(Number(stored.panelYaw), -35, 35, DEFAULT_SETTINGS.panelYaw),
           distance: clampNumber(Number(stored.distance), 1.4, 6, DEFAULT_SETTINGS.distance),
           roomDim: clampNumber(Number(stored.roomDim), 0, 100, DEFAULT_SETTINGS.roomDim),
+          sidePanelVisible: Boolean(stored.sidePanelVisible ?? DEFAULT_SETTINGS.sidePanelVisible),
+          aspectLocked: stored.aspectLocked !== false,
+          backlightMode: ["off", "soft", "dynamic"].includes(stored.backlightMode) ? stored.backlightMode : DEFAULT_SETTINGS.backlightMode,
+          theme: typeof stored.theme === "string" && stored.theme ? stored.theme : DEFAULT_SETTINGS.theme,
         };
       } catch (error) {
         return { ...DEFAULT_SETTINGS };
@@ -101,6 +134,13 @@
               <option value="right">Right</option>
             </select>
           </label>
+          <label class="fp-xr-field">
+            <span>Headset</span>
+            <select class="form-select form-select-sm" data-role="headset-mode">
+              <option value="vr">VR room</option>
+              <option value="mr">MR passthrough</option>
+            </select>
+          </label>
           <button class="btn btn-sm btn-primary" type="button" data-action="enter-vr">
             <i class="bi bi-badge-vr"></i>
             <span data-role="vr-label">Open XR Theater</span>
@@ -116,12 +156,14 @@
       }
       this.layoutSelect = this.panel.querySelector("[data-role='layout']");
       this.eyeSelect = this.panel.querySelector("[data-role='eye']");
+      this.headsetModeSelect = this.panel.querySelector("[data-role='headset-mode']");
       this.eyeField = this.panel.querySelector("[data-role='eye-field']");
       this.vrButton = this.panel.querySelector("[data-action='enter-vr']");
       this.vrLabel = this.panel.querySelector("[data-role='vr-label']");
       this.statusElement = this.panel.querySelector("[data-role='status']");
       this.layoutSelect.value = this.settings.layout;
       this.eyeSelect.value = this.settings.eye;
+      this.headsetModeSelect.value = this.settings.headsetMode;
       this.eyeField.hidden = this.settings.layout === "mono";
     }
 
@@ -129,8 +171,10 @@
       this.listen(this.layoutSelect, "change", () => {
         this.settings.layout = this.layoutSelect.value;
         this.eyeField.hidden = this.settings.layout === "mono";
+        if (this.settings.aspectLocked) this.applyAspectRatioFrom("width");
         this.saveSettings();
         this.updateVideoMaterialUv();
+        this.updateVideoGeometry();
         this.syncOverlayControls();
         this.updateInlineStatus();
       });
@@ -140,8 +184,19 @@
         this.updateVideoMaterialUv();
         this.syncOverlayControls();
       });
+      this.listen(this.headsetModeSelect, "change", () => {
+        this.settings.headsetMode = this.headsetModeSelect.value === "mr" ? "mr" : "vr";
+        this.saveSettings();
+        this.syncOverlayControls();
+        this.updateInlineStatus();
+      });
       this.listen(this.vrButton, "click", () => this.openTheater());
-      this.listen(this.video, "loadedmetadata", () => this.updateVideoGeometry());
+      this.listen(this.video, "loadedmetadata", () => {
+        if (this.settings.aspectLocked) this.applyAspectRatioFrom("width");
+        this.saveSettings();
+        this.syncOverlayControls();
+        this.updateVideoGeometry();
+      });
       this.listen(this.video, "play", () => this.updatePlaybackControls());
       this.listen(this.video, "pause", () => this.updatePlaybackControls());
       this.listen(this.video, "timeupdate", () => this.updatePlaybackControls());
@@ -157,10 +212,19 @@
 
     async refreshXrSupport() {
       this.xrSupportChecked = true;
-      this.xrSupported = Boolean(window.isSecureContext && navigator.xr?.isSessionSupported);
-      if (this.xrSupported) {
-        this.xrSupported = await navigator.xr.isSessionSupported("immersive-vr").catch(() => false);
+      const canCheck = Boolean(window.isSecureContext && navigator.xr?.isSessionSupported);
+      this.xrVrSupported = false;
+      this.xrArSupported = false;
+      if (canCheck) {
+        const [vrSupported, arSupported] = await Promise.all([
+          navigator.xr.isSessionSupported("immersive-vr").catch(() => false),
+          navigator.xr.isSessionSupported("immersive-ar").catch(() => false),
+        ]);
+        this.xrVrSupported = Boolean(vrSupported);
+        this.xrArSupported = Boolean(arSupported);
       }
+      this.xrSupported = this.xrVrSupported || this.xrArSupported;
+      if (this.settings.headsetMode === "mr" && !this.xrArSupported) this.settings.headsetMode = "vr";
       this.updateInlineStatus();
       this.syncOverlayControls();
     }
@@ -172,9 +236,154 @@
         return;
       }
       const layout = LAYOUT_LABELS[this.settings.layout] || LAYOUT_LABELS.mono;
+      const headset = this.settings.headsetMode === "mr" ? "MR passthrough" : "VR room";
       this.statusElement.textContent = this.xrSupported
-        ? `${layout}. Open the theater, then enter the headset from the top bar.`
+        ? `${layout}. ${headset}. Open the theater, then enter the headset from the top bar.`
         : `${layout}. Desktop theater is available; no WebXR headset is visible to this browser.`;
+    }
+
+    async loadThemes() {
+      try {
+        const response = await fetch("/api/xr/themes", { headers: { Accept: "application/json" } });
+        if (!response.ok) throw new Error(`Theme list failed with ${response.status}.`);
+        const payload = await response.json();
+        this.themes = Array.isArray(payload.themes) ? payload.themes : [];
+      } catch (error) {
+        this.themes = [];
+      }
+      if (!this.themes.some((theme) => theme.id === this.settings.theme)) {
+        this.settings.theme = this.themes[0]?.id || DEFAULT_SETTINGS.theme;
+      }
+      this.syncOverlayControls();
+      if (this.scene) this.applyTheme();
+    }
+
+    syncThemeOptions() {
+      if (!this.themeSelect) return;
+      const existing = this.themeSelect.value;
+      const themes = this.themes.length
+        ? this.themes
+        : [{ id: "default", name: "Default room" }];
+      this.themeSelect.innerHTML = "";
+      for (const theme of themes) {
+        const option = document.createElement("option");
+        option.value = theme.id;
+        option.textContent = theme.name || theme.id;
+        this.themeSelect.appendChild(option);
+      }
+      if (themes.some((theme) => theme.id === this.settings.theme)) {
+        this.themeSelect.value = this.settings.theme;
+      } else if (themes.some((theme) => theme.id === existing)) {
+        this.themeSelect.value = existing;
+      }
+    }
+
+    currentTheme() {
+      return this.themes.find((theme) => theme.id === this.settings.theme) || {
+        id: "default",
+        name: "Default room",
+        background: "#01040a",
+        floor: { color: "#162033", grid: true },
+        assets: [],
+      };
+    }
+
+    applyTheme() {
+      if (!this.scene || !this.themeGroup || !window.THREE) return;
+      const revision = this.themeRevision + 1;
+      this.themeRevision = revision;
+      this.clearThemeObjects();
+      const theme = this.currentTheme();
+      const floor = typeof theme.floor === "object" && theme.floor ? theme.floor : {};
+      if (floor.grid !== false) {
+        const grid = new THREE.GridHelper(
+          Number(floor.size || 8),
+          Number(floor.divisions || 16),
+          colorFromTheme(floor.accent || "#2f80ff", new THREE.Color("#2f80ff")),
+          colorFromTheme(floor.color || "#1f2937", new THREE.Color("#1f2937")),
+        );
+        grid.position.y = Number(floor.y ?? -1.65);
+        this.themeGroup.add(grid);
+        this.gridMesh = grid;
+        this.themeObjects.push(grid);
+      } else {
+        this.gridMesh = null;
+      }
+      for (const asset of Array.isArray(theme.assets) ? theme.assets : []) {
+        this.addThemeAsset(asset, revision);
+      }
+      this.updateSceneLighting();
+    }
+
+    clearThemeObjects() {
+      for (const object of this.themeObjects || []) {
+        object.parent?.remove(object);
+        object.traverse?.((child) => {
+          child.geometry?.dispose?.();
+          if (Array.isArray(child.material)) {
+            child.material.forEach((material) => material.dispose?.());
+          } else {
+            child.material?.map?.dispose?.();
+            child.material?.dispose?.();
+          }
+        });
+        object.geometry?.dispose?.();
+        object.material?.dispose?.();
+      }
+      this.themeObjects = [];
+      if (this.themeGroup) this.themeGroup.clear();
+    }
+
+    addThemeAsset(asset, revision = this.themeRevision) {
+      if (!asset?.url) return;
+      if (asset.type === "image") {
+        const texture = new THREE.TextureLoader().load(asset.url);
+        texture.colorSpace = THREE.SRGBColorSpace;
+        const material = new THREE.MeshBasicMaterial({
+          map: texture,
+          transparent: Number(asset.opacity ?? 1) < 1,
+          opacity: clampNumber(Number(asset.opacity ?? 1), 0, 1, 1),
+          side: THREE.DoubleSide,
+        });
+        const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), material);
+        this.applyThemeTransform(mesh, asset);
+        if (revision === this.themeRevision) {
+          this.themeGroup.add(mesh);
+          this.themeObjects.push(mesh);
+        }
+      } else if (asset.type === "obj") {
+        fetch(asset.url)
+          .then((response) => response.ok ? response.text() : "")
+          .then((text) => {
+            if (!text || !this.themeGroup || revision !== this.themeRevision) return;
+            const geometry = parseObjGeometry(text);
+            if (!geometry) return;
+            const material = new THREE.MeshBasicMaterial({
+              color: colorFromTheme(asset.color || "#94a3b8", new THREE.Color("#94a3b8")),
+              wireframe: Boolean(asset.wireframe),
+            });
+            const mesh = new THREE.Mesh(geometry, material);
+            this.applyThemeTransform(mesh, asset);
+            if (revision === this.themeRevision) {
+              this.themeGroup.add(mesh);
+              this.themeObjects.push(mesh);
+            }
+          })
+          .catch(() => {});
+      }
+    }
+
+    applyThemeTransform(object, asset) {
+      const position = Array.isArray(asset.position) ? asset.position : [0, 0, -4];
+      const scale = Array.isArray(asset.scale) ? asset.scale : [1, 1, 1];
+      const rotation = Array.isArray(asset.rotation) ? asset.rotation : [0, 0, 0];
+      object.position.set(Number(position[0] ?? 0), Number(position[1] ?? 0), Number(position[2] ?? -4));
+      object.scale.set(Number(scale[0] ?? 1), Number(scale[1] ?? scale[0] ?? 1), Number(scale[2] ?? 1));
+      object.rotation.set(
+        THREE.MathUtils.degToRad(Number(rotation[0] ?? 0)),
+        THREE.MathUtils.degToRad(Number(rotation[1] ?? 0)),
+        THREE.MathUtils.degToRad(Number(rotation[2] ?? 0)),
+      );
     }
 
     openTheater() {
@@ -187,6 +396,7 @@
       this.buildOverlay();
       this.initThree();
       this.moveSidePanelIntoOverlay();
+      if (this.settings.aspectLocked) this.applyAspectRatioFrom("width");
       this.updateVideoGeometry();
       this.updateVideoMaterialUv();
       this.resizeRenderer();
@@ -204,6 +414,7 @@
         session.removeEventListener("end", this.xrSessionEndHandler);
         session.end().catch(() => {});
       }
+      this.xrSessionMode = "";
       this.xrSessionEndHandler = null;
       if (this.renderer) this.renderer.setAnimationLoop(null);
       this.restoreSidePanel();
@@ -215,6 +426,11 @@
         this.xrSidePanelMesh.geometry?.dispose();
         this.xrSidePanelMesh.material?.dispose();
       }
+      this.clearThemeObjects();
+      if (this.backlightMesh) {
+        this.backlightMesh.geometry?.dispose();
+        this.backlightMesh.material?.dispose();
+      }
       if (this.renderer) this.renderer.dispose();
       this.renderer = null;
       this.scene = null;
@@ -225,6 +441,16 @@
       this.xrSidePanelTexture = null;
       this.xrSidePanelCanvas = null;
       this.xrSidePanelContext = null;
+      this.screenGroup = null;
+      this.gridMesh = null;
+      this.themeGroup = null;
+      this.themeObjects = [];
+      this.backlightMesh = null;
+      this.backlightSampleCanvas = null;
+      this.backlightSampleContext = null;
+      this.controllers = [];
+      this.controllerLines = [];
+      this.activeGrab = null;
       document.body.classList.remove("fp-three-xr-active");
     }
 
@@ -241,6 +467,13 @@
             <button class="btn btn-sm btn-info" type="button" data-action="enter-webxr">
               <i class="bi bi-badge-vr"></i>
               <span data-role="webxr-label">Enter headset</span>
+            </button>
+            <button class="btn btn-sm btn-light" type="button" data-action="recenter">
+              <i class="bi bi-crosshair"></i>
+            </button>
+            <button class="btn btn-sm btn-light" type="button" data-action="toggle-side-panel">
+              <i class="bi bi-layout-sidebar-inset-reverse"></i>
+              <span data-role="side-panel-label">Voice</span>
             </button>
             <button class="btn btn-sm btn-light" type="button" data-action="close">
               <i class="bi bi-x-lg"></i>
@@ -261,6 +494,27 @@
             <div class="fp-three-xr-tool-card">
               <div class="fp-three-xr-tool-title">Video Panel</div>
               <label class="fp-xr-field">
+                <span>Headset</span>
+                <select class="form-select form-select-sm" data-role="overlay-headset-mode">
+                  <option value="vr">VR room</option>
+                  <option value="mr">MR passthrough</option>
+                </select>
+              </label>
+              <label class="fp-xr-field">
+                <span>Room</span>
+                <select class="form-select form-select-sm" data-role="theme">
+                  <option value="default">Default room</option>
+                </select>
+              </label>
+              <label class="fp-xr-field">
+                <span>Backlight</span>
+                <select class="form-select form-select-sm" data-role="backlight">
+                  <option value="off">Off</option>
+                  <option value="soft">Soft glow</option>
+                  <option value="dynamic">Dynamic video</option>
+                </select>
+              </label>
+              <label class="fp-xr-field">
                 <span>View</span>
                 <select class="form-select form-select-sm" data-role="overlay-layout">
                   <option value="mono">Full frame</option>
@@ -275,10 +529,20 @@
                   <option value="right">Right</option>
                 </select>
               </label>
+              <label class="fp-xr-check">
+                <input class="form-check-input" type="checkbox" data-role="aspect-lock">
+                <span>Keep aspect ratio</span>
+              </label>
               <label class="fp-xr-range"><span>Width <output data-role="width-label"></output></span><input class="form-range" type="range" min="1.4" max="6" step="0.1" data-role="panel-width"></label>
               <label class="fp-xr-range"><span>Height <output data-role="height-label"></output></span><input class="form-range" type="range" min="0.8" max="3.6" step="0.1" data-role="panel-height"></label>
+              <label class="fp-xr-range"><span>X <output data-role="x-label"></output></span><input class="form-range" type="range" min="-3" max="3" step="0.05" data-role="panel-x"></label>
+              <label class="fp-xr-range"><span>Height pos <output data-role="y-label"></output></span><input class="form-range" type="range" min="-1.4" max="1.4" step="0.05" data-role="panel-y"></label>
+              <label class="fp-xr-range"><span>Yaw <output data-role="yaw-label"></output></span><input class="form-range" type="range" min="-35" max="35" step="1" data-role="panel-yaw"></label>
               <label class="fp-xr-range"><span>Distance <output data-role="distance-label"></output></span><input class="form-range" type="range" min="1.4" max="6" step="0.1" data-role="panel-distance"></label>
               <label class="fp-xr-range"><span>Room dim <output data-role="dim-label"></output></span><input class="form-range" type="range" min="0" max="100" step="5" data-role="room-dim"></label>
+              <button class="btn btn-sm btn-outline-light w-100" type="button" data-action="reset-screen">
+                <i class="bi bi-crosshair"></i> Recenter screen
+              </button>
             </div>
             <div class="fp-three-xr-side-slot" data-role="side-slot"></div>
           </aside>
@@ -287,15 +551,25 @@
       document.body.appendChild(this.overlay);
       this.canvas = this.overlay.querySelector(".fp-three-xr-canvas");
       this.theaterStatus = this.overlay.querySelector("[data-role='theater-status']");
+      this.overlayHeadsetModeSelect = this.overlay.querySelector("[data-role='overlay-headset-mode']");
+      this.themeSelect = this.overlay.querySelector("[data-role='theme']");
+      this.backlightSelect = this.overlay.querySelector("[data-role='backlight']");
       this.overlayLayoutSelect = this.overlay.querySelector("[data-role='overlay-layout']");
       this.overlayEyeSelect = this.overlay.querySelector("[data-role='overlay-eye']");
       this.overlayEyeField = this.overlay.querySelector("[data-role='overlay-eye-field']");
+      this.aspectLockInput = this.overlay.querySelector("[data-role='aspect-lock']");
       this.widthInput = this.overlay.querySelector("[data-role='panel-width']");
       this.heightInput = this.overlay.querySelector("[data-role='panel-height']");
+      this.xInput = this.overlay.querySelector("[data-role='panel-x']");
+      this.yInput = this.overlay.querySelector("[data-role='panel-y']");
+      this.yawInput = this.overlay.querySelector("[data-role='panel-yaw']");
       this.distanceInput = this.overlay.querySelector("[data-role='panel-distance']");
       this.dimInput = this.overlay.querySelector("[data-role='room-dim']");
       this.widthLabel = this.overlay.querySelector("[data-role='width-label']");
       this.heightLabel = this.overlay.querySelector("[data-role='height-label']");
+      this.xLabel = this.overlay.querySelector("[data-role='x-label']");
+      this.yLabel = this.overlay.querySelector("[data-role='y-label']");
+      this.yawLabel = this.overlay.querySelector("[data-role='yaw-label']");
       this.distanceLabel = this.overlay.querySelector("[data-role='distance-label']");
       this.dimLabel = this.overlay.querySelector("[data-role='dim-label']");
       this.playButton = this.overlay.querySelector("[data-action='play-toggle']");
@@ -306,9 +580,14 @@
       this.muteIcon = this.muteButton.querySelector(".bi");
       this.webXrButton = this.overlay.querySelector("[data-action='enter-webxr']");
       this.webXrLabel = this.overlay.querySelector("[data-role='webxr-label']");
+      this.sidePanelToggleButton = this.overlay.querySelector("[data-action='toggle-side-panel']");
+      this.sidePanelLabel = this.overlay.querySelector("[data-role='side-panel-label']");
       this.sideSlot = this.overlay.querySelector("[data-role='side-slot']");
       this.overlay.querySelector("[data-action='close']").addEventListener("click", () => this.closeTheater());
+      this.overlay.querySelector("[data-action='recenter']").addEventListener("click", () => this.recenterScreen());
+      this.overlay.querySelector("[data-action='reset-screen']").addEventListener("click", () => this.recenterScreen({ resetDistance: true }));
       this.webXrButton.addEventListener("click", () => this.enterWebXr());
+      this.sidePanelToggleButton.addEventListener("click", () => this.toggleSidePanel());
       this.playButton.addEventListener("click", () => this.togglePlayback());
       this.muteButton.addEventListener("click", () => {
         this.video.muted = !this.video.muted;
@@ -318,11 +597,39 @@
         const duration = Number(this.video.duration || 0);
         if (duration) this.video.currentTime = duration * (Number(this.seekInput.value || 0) / 1000);
       });
+      this.overlayHeadsetModeSelect.addEventListener("change", () => {
+        this.settings.headsetMode = this.overlayHeadsetModeSelect.value === "mr" ? "mr" : "vr";
+        this.headsetModeSelect.value = this.settings.headsetMode;
+        this.saveSettings();
+        this.syncOverlayControls();
+        this.updateInlineStatus();
+      });
+      this.themeSelect.addEventListener("change", () => {
+        this.settings.theme = this.themeSelect.value || DEFAULT_SETTINGS.theme;
+        this.saveSettings();
+        this.syncOverlayControls();
+        this.applyTheme();
+      });
+      this.backlightSelect.addEventListener("change", () => {
+        this.settings.backlightMode = ["soft", "dynamic"].includes(this.backlightSelect.value) ? this.backlightSelect.value : "off";
+        this.saveSettings();
+        this.syncOverlayControls();
+        this.updateBacklight(true);
+      });
+      this.aspectLockInput.addEventListener("change", () => {
+        this.settings.aspectLocked = this.aspectLockInput.checked;
+        if (this.settings.aspectLocked) this.applyAspectRatioFrom("width");
+        this.saveSettings();
+        this.syncOverlayControls();
+        this.updateVideoGeometry();
+      });
       this.overlayLayoutSelect.addEventListener("change", () => {
         this.settings.layout = this.overlayLayoutSelect.value;
         this.layoutSelect.value = this.settings.layout;
+        if (this.settings.aspectLocked) this.applyAspectRatioFrom("width");
         this.saveSettings();
         this.updateVideoMaterialUv();
+        this.updateVideoGeometry();
         this.syncOverlayControls();
         this.updateInlineStatus();
       });
@@ -333,36 +640,62 @@
         this.updateVideoMaterialUv();
         this.syncOverlayControls();
       });
-      this.widthInput.addEventListener("input", () => this.updateNumericSetting("panelWidth", this.widthInput.value));
-      this.heightInput.addEventListener("input", () => this.updateNumericSetting("panelHeight", this.heightInput.value));
+      this.widthInput.addEventListener("input", () => this.updatePanelSize("width", this.widthInput.value));
+      this.heightInput.addEventListener("input", () => this.updatePanelSize("height", this.heightInput.value));
+      this.xInput.addEventListener("input", () => this.updateNumericSetting("panelX", this.xInput.value));
+      this.yInput.addEventListener("input", () => this.updateNumericSetting("panelY", this.yInput.value));
+      this.yawInput.addEventListener("input", () => this.updateNumericSetting("panelYaw", this.yawInput.value));
       this.distanceInput.addEventListener("input", () => this.updateNumericSetting("distance", this.distanceInput.value));
       this.dimInput.addEventListener("input", () => this.updateNumericSetting("roomDim", this.dimInput.value));
       this.syncOverlayControls();
     }
 
     syncOverlayControls() {
+      if (this.headsetModeSelect) {
+        this.headsetModeSelect.value = this.settings.headsetMode;
+        this.headsetModeSelect.querySelector("option[value='mr']").disabled = !this.xrArSupported;
+      }
       if (!this.overlay) return;
+      this.overlayHeadsetModeSelect.value = this.settings.headsetMode;
+      this.overlayHeadsetModeSelect.querySelector("option[value='mr']").disabled = !this.xrArSupported;
+      this.syncThemeOptions();
+      this.themeSelect.value = this.settings.theme;
+      this.backlightSelect.value = this.settings.backlightMode;
+      this.aspectLockInput.checked = Boolean(this.settings.aspectLocked);
       this.overlayLayoutSelect.value = this.settings.layout;
       this.overlayEyeSelect.value = this.settings.eye;
       this.overlayEyeField.hidden = this.settings.layout === "mono";
       this.widthInput.value = String(this.settings.panelWidth);
       this.heightInput.value = String(this.settings.panelHeight);
+      this.xInput.value = String(this.settings.panelX);
+      this.yInput.value = String(this.settings.panelY);
+      this.yawInput.value = String(this.settings.panelYaw);
       this.distanceInput.value = String(this.settings.distance);
       this.dimInput.value = String(this.settings.roomDim);
       this.widthLabel.textContent = `${this.settings.panelWidth.toFixed(1)}m`;
       this.heightLabel.textContent = `${this.settings.panelHeight.toFixed(1)}m`;
+      this.xLabel.textContent = `${this.settings.panelX.toFixed(2)}m`;
+      this.yLabel.textContent = `${this.settings.panelY.toFixed(2)}m`;
+      this.yawLabel.textContent = `${Math.round(this.settings.panelYaw)}°`;
       this.distanceLabel.textContent = `${this.settings.distance.toFixed(1)}m`;
       this.dimLabel.textContent = `${Math.round(this.settings.roomDim)}%`;
       if (this.webXrButton) {
-        this.webXrButton.disabled = !this.xrSupported || Boolean(this.xrSession);
+        const modeSupported = this.settings.headsetMode === "mr" ? this.xrArSupported : this.xrVrSupported;
+        this.webXrButton.disabled = !modeSupported || Boolean(this.xrSession);
         this.webXrLabel.textContent = this.xrSession
           ? "Headset active"
-          : this.xrSupported
-            ? "Enter headset"
-            : "No headset";
+          : modeSupported
+            ? (this.settings.headsetMode === "mr" ? "Enter MR" : "Enter VR")
+            : (this.settings.headsetMode === "mr" ? "No MR" : "No headset");
       }
+      if (this.sidePanelLabel) {
+        this.sidePanelLabel.textContent = this.settings.sidePanelVisible ? "Hide voice" : "Show voice";
+      }
+      this.syncSidePanelVisibility();
       if (this.theaterStatus) {
-        const mode = this.xrSession ? "WebXR active" : "Desktop theater";
+        const mode = this.xrSession
+          ? (this.xrSessionMode === "immersive-ar" ? "MR active" : "VR active")
+          : "Desktop theater";
         this.theaterStatus.textContent = `${mode} · ${LAYOUT_LABELS[this.settings.layout] || "Video"} · ${this.settings.panelWidth.toFixed(1)} x ${this.settings.panelHeight.toFixed(1)}m`;
       }
     }
@@ -371,6 +704,9 @@
       const limits = {
         panelWidth: [1.4, 6],
         panelHeight: [0.8, 3.6],
+        panelX: [-3, 3],
+        panelY: [-1.4, 1.4],
+        panelYaw: [-35, 35],
         distance: [1.4, 6],
         roomDim: [0, 100],
       }[key];
@@ -381,15 +717,79 @@
       this.updateSceneLighting();
     }
 
+    updatePanelSize(axis, value) {
+      const aspect = this.videoAspectRatio();
+      if (this.settings.aspectLocked) {
+        const size = lockedPanelSize(axis, Number(value), aspect, this.settings);
+        this.settings.panelWidth = size.width;
+        this.settings.panelHeight = size.height;
+      } else if (axis === "height") {
+        this.settings.panelHeight = clampNumber(Number(value), 0.8, 3.6, DEFAULT_SETTINGS.panelHeight);
+      } else {
+        this.settings.panelWidth = clampNumber(Number(value), 1.4, 6, DEFAULT_SETTINGS.panelWidth);
+      }
+      this.saveSettings();
+      this.syncOverlayControls();
+      this.updateVideoGeometry();
+      this.updateBacklight(true);
+    }
+
+    applyAspectRatioFrom(axis = "width") {
+      const aspect = this.videoAspectRatio();
+      const value = axis === "height" ? this.settings.panelHeight : this.settings.panelWidth;
+      const size = lockedPanelSize(axis, value, aspect, this.settings);
+      this.settings.panelWidth = size.width;
+      this.settings.panelHeight = size.height;
+    }
+
+    videoAspectRatio() {
+      const width = Number(this.video.videoWidth || 16);
+      const height = Number(this.video.videoHeight || 9);
+      if (!width || !height) return 16 / 9;
+      if (this.settings.layout === "full-sbs") return Math.max(0.1, (width / 2) / height);
+      return Math.max(0.1, width / height);
+    }
+
+    recenterScreen(options = {}) {
+      this.settings.panelX = 0;
+      this.settings.panelY = 0;
+      this.settings.panelYaw = 0;
+      if (options.resetDistance) {
+        this.settings.distance = DEFAULT_SETTINGS.distance;
+        this.settings.panelWidth = DEFAULT_SETTINGS.panelWidth;
+        this.settings.panelHeight = DEFAULT_SETTINGS.panelHeight;
+      }
+      this.saveSettings();
+      this.syncOverlayControls();
+      this.updateVideoGeometry();
+    }
+
+    toggleSidePanel(force = null) {
+      this.settings.sidePanelVisible = force === null ? !this.settings.sidePanelVisible : Boolean(force);
+      this.saveSettings();
+      this.syncOverlayControls();
+      this.updateXrSidePanelTexture(true);
+    }
+
+    syncSidePanelVisibility() {
+      if (this.sideSlot) this.sideSlot.hidden = !this.settings.sidePanelVisible;
+    }
+
     initThree() {
-      this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: true, alpha: false });
+      this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: true, alpha: true });
       this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+      this.renderer.setClearAlpha(0);
       this.renderer.xr.enabled = true;
+      this.renderer.xr.setReferenceSpaceType("local-floor");
       this.scene = new THREE.Scene();
       this.camera = new THREE.PerspectiveCamera(60, 1, 0.1, 100);
       this.camera.position.set(0, 0, 0);
       const ambient = new THREE.AmbientLight(0xffffff, 1);
       this.scene.add(ambient);
+      this.screenGroup = new THREE.Group();
+      this.scene.add(this.screenGroup);
+      this.themeGroup = new THREE.Group();
+      this.scene.add(this.themeGroup);
       this.videoTexture = new THREE.VideoTexture(this.video);
       this.videoTexture.colorSpace = THREE.SRGBColorSpace;
       this.videoTexture.minFilter = THREE.LinearFilter;
@@ -397,40 +797,196 @@
       this.videoTexture.generateMipmaps = false;
       const material = new THREE.MeshBasicMaterial({ map: this.videoTexture, side: THREE.DoubleSide });
       this.videoMesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), material);
-      this.scene.add(this.videoMesh);
+      this.videoMesh.onBeforeRender = (_renderer, _scene, camera) => this.applyVideoTextureUvForCamera(camera);
+      this.screenGroup.add(this.videoMesh);
+      this.initBacklight();
       this.initXrSidePanel();
-      const grid = new THREE.GridHelper(8, 16, 0x2f80ff, 0x1f2937);
-      grid.position.y = -1.65;
-      this.scene.add(grid);
+      this.initXrControllers();
+      this.applyTheme();
       this.updateSceneLighting();
     }
 
     updateSceneLighting() {
       if (!this.scene) return;
       const dim = clampNumber(Number(this.settings.roomDim), 0, 100, DEFAULT_SETTINGS.roomDim) / 100;
-      this.scene.background = new THREE.Color(dim * 0.025, dim * 0.03, dim * 0.04);
+      const mrActive = this.xrSessionMode === "immersive-ar";
+      const theme = this.currentTheme();
+      const background = colorFromTheme(theme.background, new THREE.Color(0.025, 0.03, 0.04));
+      this.scene.background = mrActive ? null : new THREE.Color(
+        background.r * dim,
+        background.g * dim,
+        background.b * dim,
+      );
+      if (this.gridMesh) this.gridMesh.visible = !mrActive && dim > 0.05;
+      if (this.themeGroup) this.themeGroup.visible = !mrActive;
     }
 
     updateVideoGeometry() {
       if (!this.videoMesh) return;
       this.videoMesh.scale.set(this.settings.panelWidth, this.settings.panelHeight, 1);
-      this.videoMesh.position.set(0, 0, -this.settings.distance);
+      this.videoMesh.position.set(0, 0, 0);
+      if (this.screenGroup) {
+        this.screenGroup.position.set(this.settings.panelX, this.settings.panelY, -this.settings.distance);
+        this.screenGroup.rotation.set(0, THREE.MathUtils.degToRad(this.settings.panelYaw), 0);
+      }
+      this.updateBacklightGeometry();
       this.updateXrSidePanelGeometry();
     }
 
     updateVideoMaterialUv() {
+      this.applyVideoTextureUvForCamera(null);
+    }
+
+    applyVideoTextureUvForCamera(camera) {
       if (!this.videoTexture) return;
       this.videoTexture.offset.set(0, 0);
       this.videoTexture.repeat.set(1, 1);
       if (this.settings.layout === "half-sbs") {
         this.videoTexture.repeat.set(0.5, 1);
-        this.videoTexture.offset.set(this.settings.eye === "right" ? 0.5 : 0, 0);
+        this.videoTexture.offset.set(this.videoEyeForCamera(camera) === "right" ? 0.5 : 0, 0);
       }
       if (this.settings.layout === "full-sbs") {
         this.videoTexture.repeat.set(0.5, 1);
-        this.videoTexture.offset.set(this.settings.eye === "right" ? 0.5 : 0, 0);
+        this.videoTexture.offset.set(this.videoEyeForCamera(camera) === "right" ? 0.5 : 0, 0);
       }
       this.videoTexture.needsUpdate = true;
+    }
+
+    videoEyeForCamera(camera) {
+      if (!this.xrSession || !camera) return this.settings.eye;
+      const viewport = camera.viewport;
+      if (viewport && Number(viewport.x || 0) > 0) return "right";
+      if (typeof camera.name === "string" && camera.name.toLowerCase().includes("right")) return "right";
+      return "left";
+    }
+
+    initXrControllers() {
+      if (!this.renderer || !this.scene) return;
+      const lineGeometry = new THREE.BufferGeometry().setFromPoints([
+        new THREE.Vector3(0, 0, 0),
+        new THREE.Vector3(0, 0, -1),
+      ]);
+      for (let index = 0; index < 2; index += 1) {
+        const controller = this.renderer.xr.getController(index);
+        controller.userData.index = index;
+        controller.addEventListener("selectstart", () => this.toggleSidePanel());
+        controller.addEventListener("squeezestart", () => this.startScreenGrab(controller));
+        controller.addEventListener("squeezeend", () => this.endScreenGrab(controller));
+        controller.addEventListener("disconnected", () => this.endScreenGrab(controller));
+        const line = new THREE.Line(
+          lineGeometry.clone(),
+          new THREE.LineBasicMaterial({ color: index === 0 ? 0x93c5fd : 0xf8fafc, transparent: true, opacity: 0.72 }),
+        );
+        line.name = "screen-ray";
+        line.scale.z = 3;
+        controller.add(line);
+        this.scene.add(controller);
+        this.controllers.push(controller);
+        this.controllerLines.push(line);
+      }
+    }
+
+    startScreenGrab(controller) {
+      if (!this.screenGroup || !this.xrSession) return;
+      this.activeGrab = {
+        controller,
+        controllerStart: new THREE.Vector3().setFromMatrixPosition(controller.matrixWorld),
+        screenStart: this.screenGroup.position.clone(),
+      };
+      this.updateInlineStatus("Grip held: move the controller to place the screen.");
+    }
+
+    endScreenGrab(controller) {
+      if (!this.activeGrab || this.activeGrab.controller !== controller) return;
+      this.activeGrab = null;
+      this.settings.panelX = clampNumber(this.screenGroup.position.x, -3, 3, DEFAULT_SETTINGS.panelX);
+      this.settings.panelY = clampNumber(this.screenGroup.position.y, -1.4, 1.4, DEFAULT_SETTINGS.panelY);
+      this.settings.distance = clampNumber(Math.abs(this.screenGroup.position.z), 1.4, 6, DEFAULT_SETTINGS.distance);
+      this.saveSettings();
+      this.syncOverlayControls();
+    }
+
+    updateControllerDrag() {
+      if (!this.activeGrab || !this.screenGroup) return;
+      const current = new THREE.Vector3().setFromMatrixPosition(this.activeGrab.controller.matrixWorld);
+      const delta = current.sub(this.activeGrab.controllerStart);
+      const next = this.activeGrab.screenStart.clone().add(delta);
+      next.x = clampNumber(next.x, -3, 3, DEFAULT_SETTINGS.panelX);
+      next.y = clampNumber(next.y, -1.4, 1.4, DEFAULT_SETTINGS.panelY);
+      next.z = -clampNumber(Math.abs(next.z), 1.4, 6, DEFAULT_SETTINGS.distance);
+      this.screenGroup.position.copy(next);
+    }
+
+    initBacklight() {
+      const material = new THREE.MeshBasicMaterial({
+        color: 0x3b82f6,
+        transparent: true,
+        opacity: 0.42,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+        side: THREE.DoubleSide,
+      });
+      this.backlightMesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), material);
+      this.backlightMesh.position.set(0, 0, -0.06);
+      this.screenGroup.add(this.backlightMesh);
+      this.backlightSampleCanvas = document.createElement("canvas");
+      this.backlightSampleCanvas.width = 32;
+      this.backlightSampleCanvas.height = 18;
+      this.backlightSampleContext = this.backlightSampleCanvas.getContext("2d", { willReadFrequently: true });
+      this.updateBacklightGeometry();
+      this.updateBacklight(true);
+    }
+
+    updateBacklightGeometry() {
+      if (!this.backlightMesh) return;
+      this.backlightMesh.scale.set(this.settings.panelWidth + 0.72, this.settings.panelHeight + 0.52, 1);
+    }
+
+    updateBacklight(force = false) {
+      if (!this.backlightMesh) return;
+      const mode = this.settings.backlightMode;
+      this.backlightMesh.visible = mode !== "off";
+      if (mode === "off") return;
+      if (mode === "soft") {
+        this.backlightMesh.material.color.set("#3b82f6");
+        this.backlightMesh.material.opacity = 0.34;
+        return;
+      }
+      const now = performance.now();
+      if (!force && now - this.lastBacklightSampleAt < 220) return;
+      this.lastBacklightSampleAt = now;
+      const color = this.sampleVideoColor();
+      this.backlightMesh.material.color.setRGB(color.r, color.g, color.b);
+      this.backlightMesh.material.opacity = 0.46;
+    }
+
+    sampleVideoColor() {
+      if (!this.backlightSampleContext || this.video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+        return { r: 0.23, g: 0.51, b: 0.96 };
+      }
+      try {
+        const context = this.backlightSampleContext;
+        const width = this.backlightSampleCanvas.width;
+        const height = this.backlightSampleCanvas.height;
+        context.drawImage(this.video, 0, 0, width, height);
+        const data = context.getImageData(0, 0, width, height).data;
+        let r = 0;
+        let g = 0;
+        let b = 0;
+        const pixels = data.length / 4;
+        for (let index = 0; index < data.length; index += 4) {
+          r += data[index];
+          g += data[index + 1];
+          b += data[index + 2];
+        }
+        return {
+          r: clampNumber((r / pixels) / 255 * 1.25, 0.08, 1, 0.25),
+          g: clampNumber((g / pixels) / 255 * 1.25, 0.08, 1, 0.45),
+          b: clampNumber((b / pixels) / 255 * 1.25, 0.08, 1, 0.9),
+        };
+      } catch (error) {
+        return { r: 0.23, g: 0.51, b: 0.96 };
+      }
     }
 
     resizeRenderer() {
@@ -448,6 +1004,8 @@
       if (this.videoTexture && this.video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
         this.videoTexture.needsUpdate = true;
       }
+      this.updateControllerDrag();
+      this.updateBacklight();
       this.updateXrSidePanelTexture();
       this.updatePlaybackControls();
       this.renderer.render(this.scene, this.camera);
@@ -462,22 +1020,29 @@
       let session = null;
       try {
         await this.video.play().catch(() => {});
-        session = await this.requestImmersiveVrSession();
+        const sessionMode = this.settings.headsetMode === "mr" && this.xrArSupported ? "immersive-ar" : "immersive-vr";
+        session = await this.requestImmersiveSession(sessionMode);
         this.xrSession = session;
+        this.xrSessionMode = sessionMode;
         this.xrSessionEndHandler = () => {
           this.xrSession = null;
+          this.xrSessionMode = "";
           this.xrSessionEndHandler = null;
+          this.activeGrab = null;
+          this.updateSceneLighting();
           this.syncOverlayControls();
         };
         session.addEventListener("end", this.xrSessionEndHandler, { once: true });
         await this.renderer.xr.setSession(session);
         this.updateXrSidePanelGeometry();
         this.updateXrSidePanelTexture(true);
+        this.updateSceneLighting();
         this.syncOverlayControls();
       } catch (error) {
         if (session && this.xrSession === session) {
           session.removeEventListener("end", this.xrSessionEndHandler);
           this.xrSession = null;
+          this.xrSessionMode = "";
           this.xrSessionEndHandler = null;
           session.end().catch(() => {});
         }
@@ -486,17 +1051,20 @@
       }
     }
 
-    async requestImmersiveVrSession() {
+    async requestImmersiveSession(sessionMode) {
       if (!navigator.xr) throw new Error("WebXR is unavailable in this browser.");
+      const optionalFeatures = sessionMode === "immersive-ar"
+        ? ["local-floor", "bounded-floor", "dom-overlay", "hit-test"]
+        : ["local-floor", "bounded-floor", "dom-overlay"];
       try {
-        return await navigator.xr.requestSession("immersive-vr", {
-          optionalFeatures: ["local-floor", "bounded-floor", "dom-overlay"],
+        return await navigator.xr.requestSession(sessionMode, {
+          optionalFeatures,
           domOverlay: { root: this.overlay },
         });
       } catch (overlayError) {
         try {
-          return await navigator.xr.requestSession("immersive-vr", {
-            optionalFeatures: ["local-floor", "bounded-floor"],
+          return await navigator.xr.requestSession(sessionMode, {
+            optionalFeatures: optionalFeatures.filter((feature) => feature !== "dom-overlay"),
           });
         } catch (plainError) {
           throw plainError || overlayError;
@@ -518,7 +1086,7 @@
       });
       this.xrSidePanelMesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), material);
       this.xrSidePanelMesh.visible = false;
-      this.scene.add(this.xrSidePanelMesh);
+      this.screenGroup.add(this.xrSidePanelMesh);
       this.updateXrSidePanelGeometry();
       this.updateXrSidePanelTexture(true);
     }
@@ -531,7 +1099,7 @@
       this.xrSidePanelMesh.position.set(
         this.settings.panelWidth / 2 + 0.35 + sideWidth / 2,
         0,
-        -this.settings.distance + 0.04,
+        0.04,
       );
       this.xrSidePanelMesh.rotation.set(0, -0.12, 0);
     }
@@ -539,7 +1107,7 @@
     updateXrSidePanelTexture(force = false) {
       if (!this.xrSidePanelContext || !this.xrSidePanelTexture) return;
       const now = performance.now();
-      if (this.xrSidePanelMesh) this.xrSidePanelMesh.visible = Boolean(this.xrSession);
+      if (this.xrSidePanelMesh) this.xrSidePanelMesh.visible = Boolean(this.xrSession && this.settings.sidePanelVisible);
       if (!force && now - this.lastSidePanelTextureAt < 500) return;
       this.lastSidePanelTextureAt = now;
 
@@ -560,7 +1128,7 @@
       context.fillText("Voice & Room", 56, 92);
       context.fillStyle = "rgba(248, 250, 252, 0.62)";
       context.font = "700 28px system-ui, -apple-system, BlinkMacSystemFont, sans-serif";
-      context.fillText("Headset side panel", 56, 136);
+      context.fillText("Trigger toggles this panel. Grip moves the screen.", 56, 136);
 
       let y = 205;
       for (const line of lines.slice(0, 18)) {
@@ -630,10 +1198,12 @@
       panel.parentNode.insertBefore(this.sidePanelPlaceholder, panel);
       this.sideSlot.appendChild(panel);
       panel.classList.add("fp-three-xr-moved-panel");
+      this.syncSidePanelVisibility();
     }
 
     restoreSidePanel() {
       if (!this.sidePanel || !this.sidePanelPlaceholder) return;
+      if (this.sideSlot) this.sideSlot.hidden = false;
       this.sidePanel.classList.remove("fp-three-xr-moved-panel");
       this.sidePanelPlaceholder.parentNode.insertBefore(this.sidePanel, this.sidePanelPlaceholder);
       this.sidePanelPlaceholder.remove();
@@ -679,6 +1249,43 @@
     return Math.min(max, Math.max(min, value));
   }
 
+  function lockedPanelSize(axis, value, aspect, current) {
+    const minWidth = 1.4;
+    const maxWidth = 6;
+    const minHeight = 0.8;
+    const maxHeight = 3.6;
+    let width = clampNumber(Number(current.panelWidth), minWidth, maxWidth, DEFAULT_SETTINGS.panelWidth);
+    let height = clampNumber(Number(current.panelHeight), minHeight, maxHeight, DEFAULT_SETTINGS.panelHeight);
+    const ratio = clampNumber(Number(aspect), 0.1, 10, 16 / 9);
+    if (axis === "height") {
+      height = clampNumber(Number(value), minHeight, maxHeight, height);
+      width = height * ratio;
+      if (width > maxWidth) {
+        width = maxWidth;
+        height = width / ratio;
+      }
+      if (width < minWidth) {
+        width = minWidth;
+        height = width / ratio;
+      }
+    } else {
+      width = clampNumber(Number(value), minWidth, maxWidth, width);
+      height = width / ratio;
+      if (height > maxHeight) {
+        height = maxHeight;
+        width = height * ratio;
+      }
+      if (height < minHeight) {
+        height = minHeight;
+        width = height * ratio;
+      }
+    }
+    return {
+      width: clampNumber(width, minWidth, maxWidth, DEFAULT_SETTINGS.panelWidth),
+      height: clampNumber(height, minHeight, maxHeight, DEFAULT_SETTINGS.panelHeight),
+    };
+  }
+
   function formatTime(seconds) {
     if (!Number.isFinite(seconds) || seconds < 0) return "0:00";
     const total = Math.floor(seconds);
@@ -721,6 +1328,47 @@
     context.lineTo(x, y + r);
     context.quadraticCurveTo(x, y, x + r, y);
     context.closePath();
+  }
+
+  function colorFromTheme(value, fallback) {
+    try {
+      return new THREE.Color(String(value || "") || fallback);
+    } catch (error) {
+      return fallback instanceof THREE.Color ? fallback : new THREE.Color(fallback || "#000000");
+    }
+  }
+
+  function parseObjGeometry(text) {
+    const vertices = [];
+    const positions = [];
+    const lines = text.split(/\r?\n/);
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith("#")) continue;
+      const parts = line.split(/\s+/);
+      if (parts[0] === "v" && parts.length >= 4) {
+        vertices.push([
+          Number(parts[1] || 0),
+          Number(parts[2] || 0),
+          Number(parts[3] || 0),
+        ]);
+      }
+      if (parts[0] === "f" && parts.length >= 4) {
+        const indexes = parts.slice(1).map((part) => Number(part.split("/")[0]) - 1).filter((index) => index >= 0);
+        for (let i = 1; i < indexes.length - 1; i += 1) {
+          for (const index of [indexes[0], indexes[i], indexes[i + 1]]) {
+            const vertex = vertices[index];
+            if (vertex) positions.push(vertex[0], vertex[1], vertex[2]);
+          }
+        }
+      }
+    }
+    if (!positions.length) return null;
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geometry.computeVertexNormals();
+    geometry.computeBoundingSphere();
+    return geometry;
   }
 
   window.FilePipeXrPlayer = {

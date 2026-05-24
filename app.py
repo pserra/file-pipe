@@ -6,7 +6,7 @@ import secrets
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional
 from urllib.parse import urlparse
 
 from flask import Flask, abort, jsonify, redirect, render_template, request, session, url_for
@@ -30,7 +30,9 @@ PUBLIC_WATCH_ENDPOINTS = {
     "put_watch_answer",
     "add_watch_participant_event",
     "get_watch_participant",
+    "xr_themes",
 }
+XR_THEME_FOLDER = "xr-themes"
 
 
 def load_dotenv(path: str = ".env") -> None:
@@ -241,6 +243,129 @@ def rate_limit_public_access(auth_config: AuthConfig):
     return render_template("rate_limited.html", retry_after=retry_after), 429, {"Retry-After": str(retry_after)}
 
 
+def parse_yaml_scalar(value: str):
+    value = value.strip()
+    if not value:
+        return ""
+    if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+        return value[1:-1]
+    lowered = value.lower()
+    if lowered in {"true", "false"}:
+        return lowered == "true"
+    if value.startswith("[") and value.endswith("]"):
+        inner = value[1:-1].strip()
+        if not inner:
+            return []
+        return [parse_yaml_scalar(part.strip()) for part in inner.split(",")]
+    try:
+        if "." in value:
+            return float(value)
+        return int(value)
+    except ValueError:
+        return value
+
+
+def parse_simple_yaml(text: str):
+    lines = []
+    for raw_line in text.splitlines():
+        if not raw_line.strip() or raw_line.lstrip().startswith("#"):
+            continue
+        indent = len(raw_line) - len(raw_line.lstrip(" "))
+        lines.append((indent, raw_line.strip()))
+
+    def parse_block(index: int, indent: int):
+        if index >= len(lines):
+            return {}, index
+        return parse_list(index, indent) if lines[index][1].startswith("- ") else parse_dict(index, indent)
+
+    def parse_dict(index: int, indent: int):
+        output = {}
+        while index < len(lines):
+            line_indent, line = lines[index]
+            if line_indent < indent or line.startswith("- "):
+                break
+            if line_indent > indent:
+                index += 1
+                continue
+            if ":" not in line:
+                index += 1
+                continue
+            key, value = line.split(":", 1)
+            key = key.strip()
+            value = value.strip()
+            index += 1
+            if value:
+                output[key] = parse_yaml_scalar(value)
+            else:
+                child, index = parse_block(index, lines[index][0] if index < len(lines) else indent + 2)
+                output[key] = child
+        return output, index
+
+    def parse_list(index: int, indent: int):
+        output = []
+        while index < len(lines):
+            line_indent, line = lines[index]
+            if line_indent < indent or not line.startswith("- "):
+                break
+            item_text = line[2:].strip()
+            index += 1
+            if not item_text:
+                child, index = parse_block(index, lines[index][0] if index < len(lines) else indent + 2)
+                output.append(child)
+                continue
+            if ":" in item_text:
+                key, value = item_text.split(":", 1)
+                item = {key.strip(): parse_yaml_scalar(value.strip()) if value.strip() else {}}
+                while index < len(lines) and lines[index][0] > line_indent:
+                    child, index = parse_dict(index, lines[index][0])
+                    if isinstance(child, dict):
+                        item.update(child)
+                output.append(item)
+            else:
+                output.append(parse_yaml_scalar(item_text))
+        return output, index
+
+    parsed, _index = parse_block(0, lines[0][0] if lines else 0)
+    return parsed
+
+
+def normalize_xr_theme(theme_dir: Path) -> Optional[dict]:
+    yaml_path = next((theme_dir / name for name in ("theme.yaml", "theme.yml") if (theme_dir / name).is_file()), None)
+    if not yaml_path:
+        return None
+    try:
+        data = parse_simple_yaml(yaml_path.read_text(encoding="utf-8"))
+    except OSError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    theme_id = str(data.get("id") or theme_dir.name).strip() or theme_dir.name
+    assets = data.get("assets") if isinstance(data.get("assets"), list) else []
+    normalized_assets = []
+    for asset in assets:
+        if not isinstance(asset, dict):
+            continue
+        file_name = str(asset.get("file") or "").strip()
+        if not file_name or ".." in Path(file_name).parts:
+            continue
+        asset_path = theme_dir / file_name
+        if not asset_path.is_file():
+            continue
+        normalized_assets.append(
+            {
+                **asset,
+                "url": url_for("static", filename=f"{XR_THEME_FOLDER}/{theme_dir.name}/{file_name}"),
+            }
+        )
+    return {
+        **data,
+        "id": theme_id,
+        "name": str(data.get("name") or theme_id),
+        "assets": normalized_assets,
+        "baseUrl": url_for("static", filename=f"{XR_THEME_FOLDER}/{theme_dir.name}/"),
+    }
+
+
 def create_app():
     app = Flask(__name__)
     app.config["TEMPLATES_AUTO_RELOAD"] = True
@@ -355,6 +480,18 @@ def create_app():
     @app.get("/health")
     def health():
         return jsonify({"ok": True, "service": "file-pipe"})
+
+    @app.get("/api/xr/themes")
+    def xr_themes():
+        static_root = Path(app.static_folder or "static")
+        themes_root = static_root / XR_THEME_FOLDER
+        themes = []
+        if themes_root.is_dir():
+            for theme_dir in sorted(path for path in themes_root.iterdir() if path.is_dir()):
+                theme = normalize_xr_theme(theme_dir)
+                if theme:
+                    themes.append(theme)
+        return jsonify({"themes": themes})
 
     @app.get("/")
     def index():

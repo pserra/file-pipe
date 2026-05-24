@@ -1,0 +1,11 @@
+id: default
+name: Default room
+background: "#01040a"
+floor:
+  color: "#1f2937"
+  accent: "#2f80ff"
+  grid: true
+  size: 8
+  divisions: 16
+  y: -1.65
+assets: []
