@@ -755,6 +755,14 @@ progress {
   background: #eef4ff;
 }
 
+.voice-chat-card .d-flex.gap-2 {
+  flex-wrap: wrap;
+}
+
+.voice-chat-card .d-flex.gap-2 > .btn {
+  flex: 1 1 9rem;
+}
+
 @media (min-width: 1200px) {
   .xr-side-panel {
     max-height: calc(100vh - 4.75rem);
@@ -844,7 +852,7 @@ progress {
 .fp-three-xr-main {
   display: grid;
   gap: 0.85rem;
-  grid-template-columns: minmax(0, 1fr) minmax(18rem, 26rem);
+  grid-template-columns: minmax(0, 1fr) minmax(25rem, 34rem);
   min-height: 0;
   padding: 0.85rem;
 }
@@ -911,6 +919,10 @@ progress {
   padding: 0.8rem;
 }
 
+.fp-three-xr-side-slot {
+  padding: 1rem;
+}
+
 .fp-three-xr-tool-title {
   color: #ffffff;
   font-size: 0.82rem;
@@ -949,10 +961,23 @@ progress {
   overflow: visible !important;
   position: static !important;
   top: auto !important;
+  width: 100%;
 }
 
 .fp-three-xr-moved-panel > .card:first-child {
   margin-top: 0 !important;
+}
+
+.fp-three-xr-moved-panel .card-body {
+  padding: 0.95rem;
+}
+
+.fp-three-xr-moved-panel .d-flex.gap-2 {
+  flex-wrap: wrap;
+}
+
+.fp-three-xr-moved-panel .d-flex.gap-2 > .btn {
+  flex: 1 1 10rem;
 }
 
 .fp-xr-stage {
@@ -1129,6 +1154,15 @@ progress {
 
   .transcode-mode-picker {
     width: 100%;
+  }
+
+  .fp-three-xr-main {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(18rem, 1fr) minmax(0, auto);
+  }
+
+  .fp-three-xr-tools {
+    max-height: 42vh;
   }
 }
 

@@ -31,6 +31,11 @@
       this.camera = null;
       this.videoMesh = null;
       this.videoTexture = null;
+      this.xrSidePanelCanvas = null;
+      this.xrSidePanelContext = null;
+      this.xrSidePanelTexture = null;
+      this.xrSidePanelMesh = null;
+      this.lastSidePanelTextureAt = 0;
       this.xrSupported = false;
       this.xrSupportChecked = false;
       this.sidePanel = null;
@@ -96,9 +101,9 @@
               <option value="right">Right</option>
             </select>
           </label>
-          <button class="btn btn-sm btn-outline-info" type="button" data-action="enter-vr">
+          <button class="btn btn-sm btn-primary" type="button" data-action="enter-vr">
             <i class="bi bi-badge-vr"></i>
-            <span data-role="vr-label">View in VR</span>
+            <span data-role="vr-label">Open XR Theater</span>
           </button>
         </div>
         <div class="fp-xr-status" data-role="status"></div>
@@ -168,8 +173,8 @@
       }
       const layout = LAYOUT_LABELS[this.settings.layout] || LAYOUT_LABELS.mono;
       this.statusElement.textContent = this.xrSupported
-        ? `${layout}. Three.js theater is ready for desktop or WebXR.`
-        : `${layout}. Three.js theater is available; WebXR is unavailable in this browser.`;
+        ? `${layout}. Open the theater, then enter the headset from the top bar.`
+        : `${layout}. Desktop theater is available; no WebXR headset is visible to this browser.`;
     }
 
     openTheater() {
@@ -205,12 +210,21 @@
       if (this.overlay) this.overlay.remove();
       this.overlay = null;
       if (this.videoTexture) this.videoTexture.dispose();
+      if (this.xrSidePanelTexture) this.xrSidePanelTexture.dispose();
+      if (this.xrSidePanelMesh) {
+        this.xrSidePanelMesh.geometry?.dispose();
+        this.xrSidePanelMesh.material?.dispose();
+      }
       if (this.renderer) this.renderer.dispose();
       this.renderer = null;
       this.scene = null;
       this.camera = null;
       this.videoMesh = null;
       this.videoTexture = null;
+      this.xrSidePanelMesh = null;
+      this.xrSidePanelTexture = null;
+      this.xrSidePanelCanvas = null;
+      this.xrSidePanelContext = null;
       document.body.classList.remove("fp-three-xr-active");
     }
 
@@ -220,12 +234,13 @@
       this.overlay.innerHTML = `
         <div class="fp-three-xr-topbar">
           <div>
-            <strong>File Pipe Theater</strong>
+            <strong>XR Theater</strong>
             <span data-role="theater-status"></span>
           </div>
           <div class="fp-three-xr-top-actions">
-            <button class="btn btn-sm btn-outline-light" type="button" data-action="enter-webxr">
-              <i class="bi bi-badge-vr"></i> WebXR
+            <button class="btn btn-sm btn-info" type="button" data-action="enter-webxr">
+              <i class="bi bi-badge-vr"></i>
+              <span data-role="webxr-label">Enter headset</span>
             </button>
             <button class="btn btn-sm btn-light" type="button" data-action="close">
               <i class="bi bi-x-lg"></i>
@@ -290,6 +305,7 @@
       this.muteButton = this.overlay.querySelector("[data-action='mute-toggle']");
       this.muteIcon = this.muteButton.querySelector(".bi");
       this.webXrButton = this.overlay.querySelector("[data-action='enter-webxr']");
+      this.webXrLabel = this.overlay.querySelector("[data-role='webxr-label']");
       this.sideSlot = this.overlay.querySelector("[data-role='side-slot']");
       this.overlay.querySelector("[data-action='close']").addEventListener("click", () => this.closeTheater());
       this.webXrButton.addEventListener("click", () => this.enterWebXr());
@@ -339,6 +355,11 @@
       this.dimLabel.textContent = `${Math.round(this.settings.roomDim)}%`;
       if (this.webXrButton) {
         this.webXrButton.disabled = !this.xrSupported || Boolean(this.xrSession);
+        this.webXrLabel.textContent = this.xrSession
+          ? "Headset active"
+          : this.xrSupported
+            ? "Enter headset"
+            : "No headset";
       }
       if (this.theaterStatus) {
         const mode = this.xrSession ? "WebXR active" : "Desktop theater";
@@ -377,6 +398,7 @@
       const material = new THREE.MeshBasicMaterial({ map: this.videoTexture, side: THREE.DoubleSide });
       this.videoMesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), material);
       this.scene.add(this.videoMesh);
+      this.initXrSidePanel();
       const grid = new THREE.GridHelper(8, 16, 0x2f80ff, 0x1f2937);
       grid.position.y = -1.65;
       this.scene.add(grid);
@@ -393,6 +415,7 @@
       if (!this.videoMesh) return;
       this.videoMesh.scale.set(this.settings.panelWidth, this.settings.panelHeight, 1);
       this.videoMesh.position.set(0, 0, -this.settings.distance);
+      this.updateXrSidePanelGeometry();
     }
 
     updateVideoMaterialUv() {
@@ -425,6 +448,7 @@
       if (this.videoTexture && this.video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
         this.videoTexture.needsUpdate = true;
       }
+      this.updateXrSidePanelTexture();
       this.updatePlaybackControls();
       this.renderer.render(this.scene, this.camera);
     }
@@ -438,10 +462,7 @@
       let session = null;
       try {
         await this.video.play().catch(() => {});
-        session = await navigator.xr.requestSession("immersive-vr", {
-          optionalFeatures: ["local-floor", "bounded-floor", "dom-overlay"],
-          domOverlay: { root: this.overlay },
-        });
+        session = await this.requestImmersiveVrSession();
         this.xrSession = session;
         this.xrSessionEndHandler = () => {
           this.xrSession = null;
@@ -450,6 +471,8 @@
         };
         session.addEventListener("end", this.xrSessionEndHandler, { once: true });
         await this.renderer.xr.setSession(session);
+        this.updateXrSidePanelGeometry();
+        this.updateXrSidePanelTexture(true);
         this.syncOverlayControls();
       } catch (error) {
         if (session && this.xrSession === session) {
@@ -461,6 +484,142 @@
         this.updateInlineStatus(error.message || "Could not enter WebXR.");
         this.syncOverlayControls();
       }
+    }
+
+    async requestImmersiveVrSession() {
+      if (!navigator.xr) throw new Error("WebXR is unavailable in this browser.");
+      try {
+        return await navigator.xr.requestSession("immersive-vr", {
+          optionalFeatures: ["local-floor", "bounded-floor", "dom-overlay"],
+          domOverlay: { root: this.overlay },
+        });
+      } catch (overlayError) {
+        try {
+          return await navigator.xr.requestSession("immersive-vr", {
+            optionalFeatures: ["local-floor", "bounded-floor"],
+          });
+        } catch (plainError) {
+          throw plainError || overlayError;
+        }
+      }
+    }
+
+    initXrSidePanel() {
+      this.xrSidePanelCanvas = document.createElement("canvas");
+      this.xrSidePanelCanvas.width = 1024;
+      this.xrSidePanelCanvas.height = 1024;
+      this.xrSidePanelContext = this.xrSidePanelCanvas.getContext("2d");
+      this.xrSidePanelTexture = new THREE.CanvasTexture(this.xrSidePanelCanvas);
+      this.xrSidePanelTexture.colorSpace = THREE.SRGBColorSpace;
+      const material = new THREE.MeshBasicMaterial({
+        map: this.xrSidePanelTexture,
+        side: THREE.DoubleSide,
+        transparent: true,
+      });
+      this.xrSidePanelMesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), material);
+      this.xrSidePanelMesh.visible = false;
+      this.scene.add(this.xrSidePanelMesh);
+      this.updateXrSidePanelGeometry();
+      this.updateXrSidePanelTexture(true);
+    }
+
+    updateXrSidePanelGeometry() {
+      if (!this.xrSidePanelMesh) return;
+      const sideWidth = clampNumber(this.settings.panelWidth * 0.48, 1.25, 2.05, 1.55);
+      const sideHeight = clampNumber(this.settings.panelHeight, 1.05, 3.2, 1.8);
+      this.xrSidePanelMesh.scale.set(sideWidth, sideHeight, 1);
+      this.xrSidePanelMesh.position.set(
+        this.settings.panelWidth / 2 + 0.35 + sideWidth / 2,
+        0,
+        -this.settings.distance + 0.04,
+      );
+      this.xrSidePanelMesh.rotation.set(0, -0.12, 0);
+    }
+
+    updateXrSidePanelTexture(force = false) {
+      if (!this.xrSidePanelContext || !this.xrSidePanelTexture) return;
+      const now = performance.now();
+      if (this.xrSidePanelMesh) this.xrSidePanelMesh.visible = Boolean(this.xrSession);
+      if (!force && now - this.lastSidePanelTextureAt < 500) return;
+      this.lastSidePanelTextureAt = now;
+
+      const context = this.xrSidePanelContext;
+      const width = this.xrSidePanelCanvas.width;
+      const height = this.xrSidePanelCanvas.height;
+      const lines = this.collectSidePanelLines();
+      context.clearRect(0, 0, width, height);
+      context.fillStyle = "rgba(8, 13, 24, 0.94)";
+      roundRect(context, 0, 0, width, height, 44);
+      context.fill();
+      context.strokeStyle = "rgba(148, 197, 255, 0.45)";
+      context.lineWidth = 5;
+      context.stroke();
+
+      context.fillStyle = "#f8fafc";
+      context.font = "700 54px system-ui, -apple-system, BlinkMacSystemFont, sans-serif";
+      context.fillText("Voice & Room", 56, 92);
+      context.fillStyle = "rgba(248, 250, 252, 0.62)";
+      context.font = "700 28px system-ui, -apple-system, BlinkMacSystemFont, sans-serif";
+      context.fillText("Headset side panel", 56, 136);
+
+      let y = 205;
+      for (const line of lines.slice(0, 18)) {
+        if (line.kind === "header") {
+          context.fillStyle = "#93c5fd";
+          context.font = "800 34px system-ui, -apple-system, BlinkMacSystemFont, sans-serif";
+          y += y > 205 ? 28 : 0;
+          context.fillText(line.text, 56, y);
+          y += 52;
+        } else {
+          context.fillStyle = "rgba(248, 250, 252, 0.88)";
+          context.font = "500 29px system-ui, -apple-system, BlinkMacSystemFont, sans-serif";
+          for (const wrapped of wrapCanvasText(context, line.text, 900)) {
+            context.fillText(wrapped, 70, y);
+            y += 42;
+            if (y > height - 92) break;
+          }
+        }
+        if (y > height - 92) break;
+      }
+
+      context.fillStyle = "rgba(248, 250, 252, 0.48)";
+      context.font = "600 24px system-ui, -apple-system, BlinkMacSystemFont, sans-serif";
+      context.fillText("Use desktop controls for mic/device changes.", 56, height - 46);
+      this.xrSidePanelTexture.needsUpdate = true;
+    }
+
+    collectSidePanelLines() {
+      if (!this.sidePanel) {
+        return [
+          { kind: "header", text: "Status" },
+          { kind: "text", text: "No side panel is attached to this player." },
+        ];
+      }
+      const cards = [
+        ...Array.from(this.sidePanel.querySelectorAll(".voice-chat-card")),
+        ...Array.from(this.sidePanel.querySelectorAll(".card:not(.voice-chat-card)")).slice(0, 3),
+      ];
+      const output = [];
+      for (const card of cards) {
+        const header = cleanPanelText(card.querySelector(".card-header")?.textContent || "Panel");
+        output.push({ kind: "header", text: header });
+        const candidates = Array.from(card.querySelectorAll(".list-group-item, .form-text, .badge, label, button"))
+          .map((node) => cleanPanelText(node.textContent || ""))
+          .filter(Boolean);
+        const seen = new Set();
+        for (const candidate of candidates) {
+          if (candidate.length < 2 || seen.has(candidate)) continue;
+          seen.add(candidate);
+          output.push({ kind: "text", text: candidate });
+          if (seen.size >= 5) break;
+        }
+      }
+      return output.length
+        ? output
+        : [
+            { kind: "header", text: "Status" },
+            { kind: "text", text: "Voice controls are available on the page side panel." },
+          ];
     }
 
     moveSidePanelIntoOverlay() {
@@ -526,6 +685,42 @@
     const minutes = Math.floor(total / 60);
     const remaining = total % 60;
     return `${minutes}:${String(remaining).padStart(2, "0")}`;
+  }
+
+  function cleanPanelText(value) {
+    return String(value || "").replace(/\s+/g, " ").trim();
+  }
+
+  function wrapCanvasText(context, text, maxWidth) {
+    const words = cleanPanelText(text).split(" ");
+    const lines = [];
+    let line = "";
+    for (const word of words) {
+      const candidate = line ? `${line} ${word}` : word;
+      if (context.measureText(candidate).width <= maxWidth || !line) {
+        line = candidate;
+      } else {
+        lines.push(line);
+        line = word;
+      }
+    }
+    if (line) lines.push(line);
+    return lines;
+  }
+
+  function roundRect(context, x, y, width, height, radius) {
+    const r = Math.min(radius, width / 2, height / 2);
+    context.beginPath();
+    context.moveTo(x + r, y);
+    context.lineTo(x + width - r, y);
+    context.quadraticCurveTo(x + width, y, x + width, y + r);
+    context.lineTo(x + width, y + height - r);
+    context.quadraticCurveTo(x + width, y + height, x + width - r, y + height);
+    context.lineTo(x + r, y + height);
+    context.quadraticCurveTo(x, y + height, x, y + height - r);
+    context.lineTo(x, y + r);
+    context.quadraticCurveTo(x, y, x + r, y);
+    context.closePath();
   }
 
   window.FilePipeXrPlayer = {
