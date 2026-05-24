@@ -192,21 +192,14 @@ function isHlsMetadata(metadata) {
 
 function parseRange(rangeHeader, totalSize, metadata = {}) {
   if (!rangeHeader || !totalSize) {
-    if (metadata.progressiveTranscode && totalSize) {
-      const availableBytes = Number(metadata.progressiveTranscode.availableBytes || 0);
-      const bootstrapBytes = availableBytes > 0
-        ? Math.min(Math.max(availableBytes, 256 * 1024), 2 * 1024 * 1024)
-        : 512 * 1024;
-      return {
-        start: 0,
-        end: Math.min(totalSize - 1, bootstrapBytes - 1),
-        partial: true,
-      };
-    }
+    const availableBytes = Number(metadata.progressiveTranscode?.availableBytes || 0);
+    const bootstrapBytes = availableBytes > 0
+      ? Math.min(Math.max(availableBytes, 256 * 1024), 2 * 1024 * 1024)
+      : 2 * 1024 * 1024;
     return {
       start: 0,
-      end: totalSize ? totalSize - 1 : 0,
-      partial: false,
+      end: Math.min(totalSize - 1, bootstrapBytes - 1),
+      partial: true,
     };
   }
 

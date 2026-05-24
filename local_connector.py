@@ -212,10 +212,13 @@ READ_AHEAD_SEQUENTIAL_GAP_BYTES = int(os.environ.get("FILE_PIPE_READ_AHEAD_SEQUE
 TRANSCODE_CACHE_VERSION = "v5"
 TRANSCODE_CACHE_DIR = Path(os.environ.get("FILE_PIPE_TRANSCODE_CACHE_DIR", "instance/transcodes"))
 HLS_SEGMENT_SECONDS = int(os.environ.get("FILE_PIPE_HLS_SEGMENT_SECONDS", "6"))
+HLS_PREFETCH_SEGMENTS = int(os.environ.get("FILE_PIPE_HLS_PREFETCH_SEGMENTS", "2"))
 PROGRESSIVE_TRANSCODE_START_PERCENT = int(os.environ.get("FILE_PIPE_PROGRESSIVE_TRANSCODE_START_PERCENT", "3"))
 PROGRESSIVE_TRANSCODE_MIN_BYTES = int(os.environ.get("FILE_PIPE_PROGRESSIVE_TRANSCODE_MIN_BYTES", str(2 * 1024 * 1024)))
 TRANSCODE_LOCKS: Dict[str, threading.Lock] = {}
 TRANSCODE_PROGRESS: Dict[str, Dict[str, object]] = {}
+HLS_PREFETCHING: set[str] = set()
+HLS_PREFETCH_LOCK = threading.Lock()
 MEDIA_TOOL_DIRS = [
     "/opt/homebrew/bin",
     "/usr/local/bin",
@@ -1253,6 +1256,12 @@ def hls_playlist(resource_id: str, media_info: Dict[str, object], access_token: 
 
 
 def ensure_hls_segment(resource_id: str, url: str, media_info: Dict[str, object], segment_index: int) -> Dict[str, object]:
+    artifact = create_hls_segment(resource_id, url, media_info, segment_index)
+    prefetch_hls_segments(resource_id, url, media_info, segment_index + 1)
+    return artifact
+
+
+def create_hls_segment(resource_id: str, url: str, media_info: Dict[str, object], segment_index: int) -> Dict[str, object]:
     ffmpeg_path = find_media_tool("ffmpeg")
     if not ffmpeg_path:
         raise RuntimeError("ffmpeg is not installed or is not on PATH.")
@@ -1294,6 +1303,38 @@ def ensure_hls_segment(resource_id: str, url: str, media_info: Dict[str, object]
         "segmentIndex": segment_index,
         **info,
     }
+
+
+def prefetch_hls_segments(resource_id: str, url: str, media_info: Dict[str, object], start_index: int) -> None:
+    if HLS_PREFETCH_SEGMENTS <= 0:
+        return
+    try:
+        segment_count = int(hls_duration_info(media_info)["segmentCount"])
+    except RuntimeError:
+        return
+    for segment_index in range(start_index, min(segment_count, start_index + HLS_PREFETCH_SEGMENTS)):
+        path = hls_segment_path(resource_id, url, segment_index)
+        try:
+            if path.exists() and path.stat().st_size > 0:
+                continue
+        except OSError:
+            continue
+        key = str(path)
+        with HLS_PREFETCH_LOCK:
+            if key in HLS_PREFETCHING:
+                continue
+            HLS_PREFETCHING.add(key)
+
+        def worker(index=segment_index, prefetch_key=key) -> None:
+            try:
+                create_hls_segment(resource_id, url, media_info, index)
+            except Exception:
+                pass
+            finally:
+                with HLS_PREFETCH_LOCK:
+                    HLS_PREFETCHING.discard(prefetch_key)
+
+        threading.Thread(target=worker, daemon=True, name="file-pipe-hls-prefetch").start()
 
 
 def lock_for_transcode(path: Path) -> threading.Lock:

@@ -887,7 +887,7 @@ document.addEventListener("alpine:init", () => {
     },
 
     async registerServiceWorker() {
-      const registration = await navigator.serviceWorker.register("/bigscreen-sw.js?v=6", { scope: "/" });
+      const registration = await navigator.serviceWorker.register("/bigscreen-sw.js?v=7", { scope: "/" });
       await navigator.serviceWorker.ready;
       if (!navigator.serviceWorker.controller) {
         await new Promise((resolve) => {
@@ -1350,7 +1350,8 @@ document.addEventListener("alpine:init", () => {
       const baseRate = message.playbackRate || 1;
       let targetTime = Number.isFinite(message.currentTime) ? Math.max(0, message.currentTime) : 0;
       if (!message.paused && Number.isFinite(message.sentAt)) {
-        targetTime += Math.max(0, Date.now() - message.sentAt) / 1000 * baseRate;
+        const apparentLatency = clamp(Date.now() - message.sentAt, 0, MAX_SYNC_LATENCY_COMPENSATION_MS);
+        targetTime += apparentLatency / 1000 * baseRate;
       }
       const driftSeconds = targetTime - (video.currentTime || 0);
       const drift = Math.abs(driftSeconds);
@@ -1542,6 +1543,7 @@ const SYNC_RELAX_AFTER_MS = 3500;
 const SYNC_FORCE_AFTER_MS = 7000;
 const SYNC_READY_POLL_MS = 250;
 const SEEK_CONTROL_DEBOUNCE_MS = 450;
+const MAX_SYNC_LATENCY_COMPENSATION_MS = 1500;
 
 async function readChannelMessage(data) {
   if (typeof data === "string") return JSON.parse(data);

@@ -139,7 +139,7 @@ document.addEventListener("alpine:init", () => {
     },
 
     async registerServiceWorker() {
-      const registration = await navigator.serviceWorker.register("/bigscreen-sw.js?v=6", { scope: "/" });
+      const registration = await navigator.serviceWorker.register("/bigscreen-sw.js?v=7", { scope: "/" });
       await navigator.serviceWorker.ready;
       if (!navigator.serviceWorker.controller) {
         await new Promise((resolve) => {
