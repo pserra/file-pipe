@@ -47,6 +47,7 @@ document.addEventListener("alpine:init", () => {
     playerCompatibilitySwitching: false,
     hostHls: null,
     hostXrPlayer: null,
+    hostProgressiveMse: null,
     playerRoomLink: "",
     playerRoomQrDataUrl: "",
     playerRoomId: "",
@@ -635,12 +636,13 @@ document.addEventListener("alpine:init", () => {
     },
 
     promoteCompletedStableMp4Player(resource) {
-      if (!resource?.proxyPath || !this.playerUrl || !this.playerUrl.includes("linear=1")) return;
+      if (!resource?.proxyPath || !this.playerUrl || !this.hostProgressiveMse) return;
       const video = document.getElementById("host-video-player");
       const currentTime = video?.currentTime || 0;
       const wasPaused = !video || video.paused;
       const playbackRate = video?.playbackRate || 1;
       this.suppressHostPlayerEvents = true;
+      this.teardownHostProgressiveMsePlayer();
       this.playerUrl = this.connectorDirectUrl(`${resource.proxyPath}/transcoded`);
       setTimeout(() => {
         const upgraded = document.getElementById("host-video-player");
@@ -668,6 +670,62 @@ document.addEventListener("alpine:init", () => {
       setTimeout(() => {
         this.suppressHostPlayerEvents = false;
       }, 5000);
+    },
+
+    startHostProgressiveMsePlayer(source, linearUrl) {
+      const mimeType = stableMp4MseMimeType(source?.mediaInfo);
+      if (!mimeType || !source?.openLinearStream) {
+        this.playerUrl = linearUrl;
+        return;
+      }
+      this.teardownHostProgressiveMsePlayer();
+      const MediaSourceClass = mediaSourceConstructor();
+      const mediaSource = new MediaSourceClass();
+      const objectUrl = URL.createObjectURL(mediaSource);
+      const abortController = new AbortController();
+      this.hostProgressiveMse = {
+        mediaSource,
+        objectUrl,
+        abortController,
+      };
+      this.playerUrl = objectUrl;
+      this.playerStatus = "Preparing linear Stable MP4 playback...";
+      setTimeout(() => {
+        const video = document.getElementById("host-video-player");
+        if (video) {
+          video.src = objectUrl;
+          video.load();
+          this.prepareHostPlayerMedia();
+        }
+        pipeFetchToMediaSource({
+          mediaSource,
+          mimeType,
+          signal: abortController.signal,
+          openStream: () => source.openLinearStream(abortController.signal),
+          onBytes: (bytesRead) => {
+            if (shouldUpdateChannelUi(source, 1000)) {
+              this.playerStatus = `Buffered linear Stable MP4 ${formatByteOffset(bytesRead)}.`;
+            }
+          },
+          onEnded: () => {
+            if (this.hostProgressiveMse?.mediaSource === mediaSource && !this.playerTranscodeComplete) {
+              this.playerStatus = "Stable MP4 linear stream ended before completion.";
+            }
+          },
+          onError: (error) => {
+            if (abortController.signal.aborted) return;
+            this.playerStatus = "";
+            this.error = error.message;
+          },
+        });
+      }, 0);
+    },
+
+    teardownHostProgressiveMsePlayer() {
+      if (!this.hostProgressiveMse) return;
+      this.hostProgressiveMse.abortController?.abort();
+      if (this.hostProgressiveMse.objectUrl) URL.revokeObjectURL(this.hostProgressiveMse.objectUrl);
+      this.hostProgressiveMse = null;
     },
 
     async setTranscodePlaybackMode(mode) {
@@ -997,9 +1055,10 @@ document.addEventListener("alpine:init", () => {
       const transcodeDuration = Number(transcodeInfo.duration || mediaInfo?.duration || 0);
       const estimatedFinalSize = Number(transcodeInfo.estimatedFinalSize || mediaInfo?.size || resource.size || transcodeSize || 0);
       this.teardownHostHlsPlayer();
-      this.playerUrl = this.connectorDirectUrl(
-        transcodeInfo.complete ? transcodePath : `${transcodePath}?progressive=1&linear=1`,
-      );
+      this.teardownHostProgressiveMsePlayer();
+      const stableMp4Url = this.connectorDirectUrl(transcodePath);
+      const linearMp4Url = this.connectorDirectUrl(`${transcodePath}?progressive=1&linear=1`);
+      this.playerUrl = transcodeInfo.complete ? stableMp4Url : "";
       this.playerType = "video/mp4";
       this.playerTitle = item.title;
       this.playerTranscodeComplete = Boolean(transcodeInfo.complete);
@@ -1015,8 +1074,17 @@ document.addEventListener("alpine:init", () => {
         transcodedAvailableBytes: transcodeSize,
         estimatedFinalSize,
         duration: transcodeDuration,
+        mseType: stableMp4MseMimeType(mediaInfo),
         shareDisabledReason: "",
         checksumPath: `${transcodePath}/checksum`,
+      };
+      source.openLinearStream = async (signal) => {
+        const response = await fetch(`${this.connectorUrl}${transcodePath}?progressive=1&linear=1`, {
+          headers: this.connectorHeaders(),
+          signal,
+        });
+        if (!response.ok) throw new Error(`Connector returned ${response.status} for linear Stable MP4.`);
+        return response.body;
       };
       source.readRange = async (start, endExclusive) => {
         const requestedStart = Math.max(0, Number(start || 0));
@@ -1067,6 +1135,9 @@ document.addEventListener("alpine:init", () => {
         };
       };
       this.playerSource = source;
+      if (!transcodeInfo.complete) {
+        this.startHostProgressiveMsePlayer(source, linearMp4Url);
+      }
       this.playerStatus = transcodeInfo.complete
         ? `Video ready with browser-safe ${transcodeParts.join(" and ")}.`
         : "Playing while transcoding continues. Scrubbing is limited to the transcoded portion.";
@@ -1326,6 +1397,7 @@ document.addEventListener("alpine:init", () => {
         this.hostXrPlayer = null;
       }
       this.teardownHostHlsPlayer();
+      this.teardownHostProgressiveMsePlayer();
       if (this.playerUrl && this.playerUrl.startsWith("blob:")) URL.revokeObjectURL(this.playerUrl);
       this.resetWatchRoom();
       if (this.bigscreenTransfer?.channel) this.bigscreenTransfer.channel.close();
@@ -1697,7 +1769,7 @@ document.addEventListener("alpine:init", () => {
       if (!video) return;
       if (video.paused) {
         this.playerStatus = "Starting linear playback as Stable MP4 bytes arrive...";
-        playVideoWhenReady(video, 20000).catch(() => {
+        playVideoWhenReady(video, 20000, { load: !this.hostProgressiveMse }).catch(() => {
           this.playerStatus = "Playback is still preparing. Try again once the first bytes are buffered.";
         });
       } else {
@@ -3807,13 +3879,13 @@ function seekVideoTo(video, targetTime) {
   }
 }
 
-function playVideoWhenReady(video, timeoutMs = 5000) {
+function playVideoWhenReady(video, timeoutMs = 5000, options = {}) {
   if (!video) return Promise.reject(new Error("Video element is unavailable."));
   const tryPlay = () => video.play();
   if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
     return tryPlay();
   }
-  video.load();
+  if (options.load !== false) video.load();
   return new Promise((resolve, reject) => {
     let settled = false;
     const cleanup = () => {
@@ -3852,6 +3924,108 @@ function hlsBufferConfig() {
     backBufferLength: 30,
     maxBufferHole: 0.75,
   };
+}
+
+function mediaSourceConstructor() {
+  return window.MediaSource || window.ManagedMediaSource || null;
+}
+
+function stableMp4MseMimeType(mediaInfo = {}) {
+  const MediaSourceClass = mediaSourceConstructor();
+  if (!MediaSourceClass?.isTypeSupported) return "";
+  const hasAudio = Boolean(mediaInfo?.defaultAudio || mediaInfo?.audio?.length || mediaInfo?.audioTracks?.length);
+  const candidates = hasAudio
+    ? [
+        'video/mp4; codecs="avc1.4d4029, mp4a.40.2"',
+        'video/mp4; codecs="avc1.4d401f, mp4a.40.2"',
+        'video/mp4; codecs="avc1.42e01e, mp4a.40.2"',
+      ]
+    : [
+        'video/mp4; codecs="avc1.4d4029"',
+        'video/mp4; codecs="avc1.4d401f"',
+        'video/mp4; codecs="avc1.42e01e"',
+      ];
+  candidates.push("video/mp4");
+  return candidates.find((candidate) => MediaSourceClass.isTypeSupported(candidate)) || "";
+}
+
+async function pipeFetchToMediaSource({ mediaSource, mimeType, signal, openStream, onBytes, onEnded, onError }) {
+  try {
+    const stream = await openStream();
+    if (!stream) throw new Error("Linear Stable MP4 stream is unavailable.");
+    const reader = stream.getReader();
+    const sourceBuffer = await addMediaSourceBuffer(mediaSource, mimeType, signal);
+    let bytesRead = 0;
+    while (!signal?.aborted) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value?.byteLength) continue;
+      await appendSourceBuffer(sourceBuffer, exactArrayBuffer(value), signal);
+      bytesRead += value.byteLength;
+      if (onBytes) onBytes(bytesRead);
+    }
+    if (!signal?.aborted && mediaSource.readyState === "open" && !sourceBuffer.updating) {
+      try {
+        mediaSource.endOfStream();
+      } catch {
+        // Some browsers close the media source themselves after final append.
+      }
+    }
+    if (!signal?.aborted && onEnded) onEnded();
+  } catch (error) {
+    if (!signal?.aborted && onError) onError(error);
+  }
+}
+
+function addMediaSourceBuffer(mediaSource, mimeType, signal) {
+  return new Promise((resolve, reject) => {
+    const create = () => {
+      if (signal?.aborted) {
+        reject(new DOMException("Aborted", "AbortError"));
+        return;
+      }
+      try {
+        resolve(mediaSource.addSourceBuffer(mimeType));
+      } catch (error) {
+        reject(error);
+      }
+    };
+    if (mediaSource.readyState === "open") {
+      create();
+      return;
+    }
+    mediaSource.addEventListener("sourceopen", create, { once: true });
+    signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+  });
+}
+
+function appendSourceBuffer(sourceBuffer, buffer, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException("Aborted", "AbortError"));
+      return;
+    }
+    const cleanup = () => {
+      sourceBuffer.removeEventListener("updateend", onUpdateEnd);
+      sourceBuffer.removeEventListener("error", onError);
+    };
+    const onUpdateEnd = () => {
+      cleanup();
+      resolve();
+    };
+    const onError = () => {
+      cleanup();
+      reject(new Error("Browser could not append Stable MP4 bytes."));
+    };
+    try {
+      sourceBuffer.addEventListener("updateend", onUpdateEnd, { once: true });
+      sourceBuffer.addEventListener("error", onError, { once: true });
+      sourceBuffer.appendBuffer(buffer);
+    } catch (error) {
+      cleanup();
+      reject(error);
+    }
+  });
 }
 
 async function requestAudioInputStream(deviceId) {

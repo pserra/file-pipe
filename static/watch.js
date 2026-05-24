@@ -26,6 +26,7 @@ document.addEventListener("alpine:init", () => {
     videoUrl: "",
     viewerHls: null,
     viewerXrPlayer: null,
+    viewerProgressiveMse: null,
     streamingReady: false,
     rangePlayerPromoted: false,
     videoAudioStatus: "",
@@ -356,6 +357,7 @@ document.addEventListener("alpine:init", () => {
       if (!selected || selected.disabled || this.selectedPlaybackMode === mode) return;
       this.selectedPlaybackMode = mode;
       this.teardownViewerHlsPlayer();
+      this.teardownViewerProgressiveMsePlayer();
       this.detachViewerXrPlayer();
       const video = document.getElementById("viewer-video-player");
       if (video) {
@@ -873,7 +875,7 @@ document.addEventListener("alpine:init", () => {
       if (!video) return;
       if (video.paused) {
         this.status = "Starting linear playback as Stable MP4 bytes arrive...";
-        playVideoWhenReady(video, 20000).catch(() => {
+        playVideoWhenReady(video, 20000, { load: !this.viewerProgressiveMse }).catch(() => {
           this.status = "Playback is still preparing. Try again once the first bytes are buffered.";
         });
       } else {
@@ -953,6 +955,20 @@ document.addEventListener("alpine:init", () => {
       if (this.viewerHls) {
         this.viewerHls.destroy();
         this.viewerHls = null;
+      }
+    },
+
+    teardownViewerProgressiveMsePlayer() {
+      if (!this.viewerProgressiveMse) return;
+      const requestId = this.viewerProgressiveMse.requestId;
+      this.viewerProgressiveMse.appender?.abort();
+      if (this.viewerProgressiveMse.objectUrl) URL.revokeObjectURL(this.viewerProgressiveMse.objectUrl);
+      this.viewerProgressiveMse = null;
+      if (requestId && this.channel?.readyState === "open") {
+        sendChannelJson(this.channel, {
+          type: "range-cancel",
+          requestId,
+        });
       }
     },
 
@@ -1051,6 +1067,10 @@ document.addEventListener("alpine:init", () => {
         this.pendingHlsBytes = {};
         this.rangePlayerPromoted = false;
         this.progress = 0;
+        if (this.shouldUseViewerProgressiveMse(playbackMetadata)) {
+          await this.startViewerProgressiveMsePlayer(playbackMetadata);
+          return;
+        }
         this.status = hlsStream ? "Preparing encrypted live stream player..." : "Preparing encrypted range player...";
         await this.registerServiceWorker();
         navigator.serviceWorker.controller.postMessage({
@@ -1085,6 +1105,61 @@ document.addEventListener("alpine:init", () => {
         this.receiving = false;
         this.logWatchEvent("range-player-error", this.error);
       }
+    },
+
+    shouldUseViewerProgressiveMse(playbackMetadata) {
+      return this.selectedPlaybackMode === "range"
+        && Boolean(playbackMetadata?.progressiveTranscode)
+        && !playbackMetadata.progressiveTranscode.complete
+        && Boolean(stableMp4MseMimeType(playbackMetadata.mediaInfo || this.metadata?.mediaInfo));
+    },
+
+    async startViewerProgressiveMsePlayer(playbackMetadata) {
+      if (!this.channel || this.channel.readyState !== "open") {
+        throw new Error("Host data channel is not connected.");
+      }
+      this.teardownViewerProgressiveMsePlayer();
+      const mimeType = stableMp4MseMimeType(playbackMetadata.mediaInfo || this.metadata?.mediaInfo);
+      if (!mimeType) throw new Error("This browser cannot play in-progress Stable MP4 streams.");
+      const MediaSourceClass = mediaSourceConstructor();
+      const mediaSource = new MediaSourceClass();
+      const objectUrl = URL.createObjectURL(mediaSource);
+      const requestId = createRequestId();
+      const appender = createMediaSourceAppender(mediaSource, mimeType, (error) => {
+        this.error = error.message;
+        this.receiving = false;
+        this.logWatchEvent("viewer-mse-error", error.message);
+      });
+      this.viewerProgressiveMse = {
+        mediaSource,
+        objectUrl,
+        requestId,
+        appender,
+      };
+      this.pendingRangeMd5[requestId] = new SparkMD5.ArrayBuffer();
+      this.pendingRangeBytes[requestId] = 0;
+      this.videoUrl = objectUrl;
+      this.streamingReady = true;
+      this.status = "Preparing linear Stable MP4 player...";
+      const video = await this.waitForViewerVideoElement();
+      if (!video) throw new Error("The video player did not initialize. Reload the watch page and try again.");
+      video.src = objectUrl;
+      video.load();
+      this.prepareViewerVideoMedia();
+      if (!sendChannelJson(this.channel, {
+        type: "range-request",
+        requestId,
+        start: 0,
+        end: null,
+        linear: true,
+        sourceVersion: this.sourceVersion,
+      })) {
+        throw new Error("Host data channel is not connected.");
+      }
+      this.status = "Linear Stable MP4 player ready. Playback will start as bytes arrive.";
+      this.logWatchEvent("viewer-mse-ready", "Linear Stable MP4 MSE player is ready.");
+      this.notifyViewerPlayerReady();
+      this.applyPendingPlaybackState(250);
     },
 
     async registerServiceWorker() {
@@ -1299,7 +1374,6 @@ document.addEventListener("alpine:init", () => {
           if (message.sourceVersion && Number(message.sourceVersion) !== this.sourceVersion) return;
           const ciphertext = message.binary || base64UrlDecode(message.data);
           const plaintext = exactArrayBuffer(await this.decryptPayload(message.iv, ciphertext));
-          const workerBytes = plaintext.slice(0);
           const rangeMd5 = this.pendingRangeMd5[message.requestId];
           if (rangeMd5) rangeMd5.append(plaintext);
           this.pendingRangeBytes[message.requestId] = (this.pendingRangeBytes[message.requestId] || 0) + plaintext.byteLength;
@@ -1308,6 +1382,11 @@ document.addEventListener("alpine:init", () => {
             this.status = `Buffered encrypted range ${formatByteOffset(message.start)}-${formatByteOffset(message.end)}.`;
             this.updateViewerPlaybackBuffer();
           }
+          if (this.viewerProgressiveMse?.requestId === message.requestId) {
+            await this.viewerProgressiveMse.appender.append(plaintext);
+            return;
+          }
+          const workerBytes = plaintext.slice(0);
           this.postWorkerMessage(
             {
               type: "range-chunk",
@@ -1331,6 +1410,12 @@ document.addEventListener("alpine:init", () => {
           if (message.md5 && md5 && message.md5 !== md5) {
             throw new Error(`Encrypted range ${message.requestId} failed MD5 verification. viewer=${md5} host=${message.md5} bytes=${rangeBytes}`);
           }
+          if (this.viewerProgressiveMse?.requestId === message.requestId) {
+            this.viewerProgressiveMse.appender.end();
+            this.receiving = false;
+            this.status = "Stable MP4 linear stream is complete.";
+            return;
+          }
           this.postWorkerMessage({
             type: "range-done",
             requestId: message.requestId,
@@ -1340,6 +1425,10 @@ document.addEventListener("alpine:init", () => {
         }
         if (message.type === "range-error") {
           if (message.sourceVersion && Number(message.sourceVersion) !== this.sourceVersion) return;
+          if (this.viewerProgressiveMse?.requestId === message.requestId) {
+            this.viewerProgressiveMse.appender.error(message.error || "Host range request failed.");
+            return;
+          }
           this.postWorkerMessage({
             type: "range-error",
             requestId: message.requestId,
@@ -1396,6 +1485,7 @@ document.addEventListener("alpine:init", () => {
         }
         if (message.type === "video-start") {
           this.teardownViewerHlsPlayer();
+          this.teardownViewerProgressiveMsePlayer();
           this.detachViewerXrPlayer();
           this.receivedParts = [];
           this.receivedBytes = 0;
@@ -1479,6 +1569,7 @@ document.addEventListener("alpine:init", () => {
       this.sourceVersion = Number(this.metadata?.sourceVersion || this.sourceVersion || 0);
       this.selectedPlaybackMode = this.defaultPlaybackMode();
       this.teardownViewerHlsPlayer();
+      this.teardownViewerProgressiveMsePlayer();
       this.detachViewerXrPlayer();
       const video = document.getElementById("viewer-video-player");
       if (video) {
@@ -1531,7 +1622,9 @@ document.addEventListener("alpine:init", () => {
       if (this.metadata.progressiveTranscode.complete && this.selectedPlaybackMode === "range" && this.videoUrl) {
         this.status = "Stable MP4 is complete. Scrubbing is unlocked.";
         this.refreshWatchServiceWorkerMetadata();
-        this.promoteCompletedViewerRangePlayer();
+        this.promoteCompletedViewerRangePlayer().catch((error) => {
+          this.error = error.message;
+        });
       }
       if (wasIncomplete && this.metadata.progressiveTranscode.complete && this.pendingVideoRequest && !this.videoUrl) {
         this.status = "Stable MP4 is ready. Starting playback...";
@@ -1775,7 +1868,7 @@ document.addEventListener("alpine:init", () => {
       });
     },
 
-    promoteCompletedViewerRangePlayer() {
+    async promoteCompletedViewerRangePlayer() {
       if (this.rangePlayerPromoted || this.selectedPlaybackMode !== "range" || !this.videoUrl) return;
       const video = document.getElementById("viewer-video-player");
       if (!video) return;
@@ -1784,8 +1877,13 @@ document.addEventListener("alpine:init", () => {
       const wasPaused = video.paused;
       const playbackRate = video.playbackRate || 1;
       this.suppressViewerControlsBriefly(2500);
-      const separator = this.videoUrl.includes("?") ? "&" : "?";
-      this.videoUrl = `${this.videoUrl}${separator}complete=${Date.now()}`;
+      this.teardownViewerProgressiveMsePlayer();
+      await this.registerServiceWorker();
+      this.refreshWatchServiceWorkerMetadata();
+      const playbackMetadata = this.playbackMetadata();
+      const fileName = encodeURIComponent(playbackMetadata.name || "video");
+      const sourceVersion = encodeURIComponent(String(playbackMetadata.sourceVersion || this.sourceVersion || 0));
+      this.videoUrl = `/watch-media/${this.roomId}/${fileName}?mode=range&v=${sourceVersion}&complete=${Date.now()}`;
       setTimeout(() => {
         const promoted = document.getElementById("viewer-video-player");
         if (!promoted) return;
@@ -1929,13 +2027,13 @@ function seekVideoTo(video, targetTime) {
   }
 }
 
-function playVideoWhenReady(video, timeoutMs = 5000) {
+function playVideoWhenReady(video, timeoutMs = 5000, options = {}) {
   if (!video) return Promise.reject(new Error("Video element is unavailable."));
   const tryPlay = () => video.play();
   if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
     return tryPlay();
   }
-  video.load();
+  if (options.load !== false) video.load();
   return new Promise((resolve, reject) => {
     let settled = false;
     const cleanup = () => {
@@ -1974,6 +2072,129 @@ function hlsBufferConfig() {
     backBufferLength: 30,
     maxBufferHole: 0.75,
   };
+}
+
+function mediaSourceConstructor() {
+  return window.MediaSource || window.ManagedMediaSource || null;
+}
+
+function stableMp4MseMimeType(mediaInfo = {}) {
+  const MediaSourceClass = mediaSourceConstructor();
+  if (!MediaSourceClass?.isTypeSupported) return "";
+  const hasAudio = Boolean(mediaInfo?.defaultAudio || mediaInfo?.audio?.length || mediaInfo?.audioTracks?.length);
+  const candidates = hasAudio
+    ? [
+        'video/mp4; codecs="avc1.4d4029, mp4a.40.2"',
+        'video/mp4; codecs="avc1.4d401f, mp4a.40.2"',
+        'video/mp4; codecs="avc1.42e01e, mp4a.40.2"',
+      ]
+    : [
+        'video/mp4; codecs="avc1.4d4029"',
+        'video/mp4; codecs="avc1.4d401f"',
+        'video/mp4; codecs="avc1.42e01e"',
+      ];
+  candidates.push("video/mp4");
+  return candidates.find((candidate) => MediaSourceClass.isTypeSupported(candidate)) || "";
+}
+
+function createMediaSourceAppender(mediaSource, mimeType, onError) {
+  let sourceBuffer = null;
+  let opening = true;
+  let closed = false;
+  let chain = Promise.resolve();
+
+  const openPromise = new Promise((resolve, reject) => {
+    const open = () => {
+      if (closed) {
+        reject(new DOMException("Aborted", "AbortError"));
+        return;
+      }
+      try {
+        sourceBuffer = mediaSource.addSourceBuffer(mimeType);
+        opening = false;
+        resolve(sourceBuffer);
+      } catch (error) {
+        reject(error);
+      }
+    };
+    if (mediaSource.readyState === "open") open();
+    else mediaSource.addEventListener("sourceopen", open, { once: true });
+  });
+
+  const enqueue = (task) => {
+    chain = chain.then(task).catch((error) => {
+      if (!closed && onError) onError(error);
+    });
+    return chain;
+  };
+
+  return {
+    append(buffer) {
+      const chunk = exactArrayBuffer(buffer);
+      return enqueue(async () => {
+        if (closed || !chunk.byteLength) return;
+        const bufferRef = sourceBuffer || await openPromise;
+        await appendSourceBuffer(bufferRef, chunk);
+      });
+    },
+    end() {
+      enqueue(async () => {
+        if (closed) return;
+        await openPromise;
+        if (mediaSource.readyState === "open" && !sourceBuffer?.updating) {
+          try {
+            mediaSource.endOfStream();
+          } catch {
+            // The media source may already be closing after the final append.
+          }
+        }
+      });
+    },
+    error(message) {
+      if (onError) onError(new Error(message));
+      this.abort();
+    },
+    abort() {
+      closed = true;
+      if (opening && mediaSource.readyState === "closed") return;
+      if (mediaSource.readyState === "open") {
+        try {
+          mediaSource.endOfStream("network");
+        } catch {
+          // Ignore abort races while the element is detaching.
+        }
+      }
+    },
+  };
+}
+
+function appendSourceBuffer(sourceBuffer, buffer) {
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      sourceBuffer.removeEventListener("updateend", onUpdateEnd);
+      sourceBuffer.removeEventListener("error", onError);
+    };
+    const onUpdateEnd = () => {
+      cleanup();
+      resolve();
+    };
+    const onError = () => {
+      cleanup();
+      reject(new Error("Browser could not append Stable MP4 bytes."));
+    };
+    try {
+      sourceBuffer.addEventListener("updateend", onUpdateEnd, { once: true });
+      sourceBuffer.addEventListener("error", onError, { once: true });
+      sourceBuffer.appendBuffer(buffer);
+    } catch (error) {
+      cleanup();
+      reject(error);
+    }
+  });
+}
+
+function createRequestId() {
+  return crypto.getRandomValues(new Uint32Array(4)).join("-");
 }
 
 function formatByteOffset(value) {
