@@ -60,6 +60,7 @@ document.addEventListener("alpine:init", () => {
     playerLoading: false,
     playerTranscodeAvailablePercent: 0,
     playerTranscodeComplete: false,
+    hostLinearPlaybackTime: 0,
     playerPeers: {},
     playerShareProgress: 0,
     playerMd5: "",
@@ -1639,9 +1640,38 @@ document.addEventListener("alpine:init", () => {
       if (!video) return;
       video.muted = false;
       video.volume = this.mediaVolume;
+      this.updateHostLinearPlaybackTime();
       this.attachHostXrPlayer(video);
       this.setHostAudioOutput();
       this.inspectHostPlayerAudio();
+    },
+
+    hostProgressivePlaybackLocked() {
+      return Boolean(this.playerSource?.progressiveTranscode) && !this.playerTranscodeComplete;
+    },
+
+    hostProgressivePlaybackLabel() {
+      const percent = Math.max(0, Math.min(99, Math.round(Number(this.playerTranscodeAvailablePercent || 0))));
+      if (percent > 0) return `Linear playback while Stable MP4 is ${percent}% ready. Scrubbing unlocks at 100%.`;
+      return "Linear playback is available while Stable MP4 prepares. Scrubbing unlocks at 100%.";
+    },
+
+    toggleHostLinearPlayback() {
+      const video = document.getElementById("host-video-player");
+      if (!video) return;
+      if (video.paused) {
+        video.play().catch(() => {
+          this.playerStatus = "Press play again if the browser blocked playback.";
+        });
+      } else {
+        video.pause();
+      }
+    },
+
+    updateHostLinearPlaybackTime() {
+      const video = document.getElementById("host-video-player");
+      if (!video || video.seeking) return;
+      this.hostLinearPlaybackTime = video.currentTime || 0;
     },
 
     attachHostXrPlayer(video) {
@@ -2824,7 +2854,19 @@ document.addEventListener("alpine:init", () => {
       }
       const video = document.getElementById("host-video-player");
       if (!video) return;
-      const currentTime = Number.isFinite(message.currentTime) ? Math.max(0, message.currentTime) : video.currentTime || 0;
+      if (this.hostProgressivePlaybackLocked() && message.action === "seek") {
+        if (record.channel?.readyState === "open") {
+          sendChannelJson(record.channel, {
+            type: "control-denied",
+            reason: "Scrubbing unlocks when Stable MP4 is complete.",
+          });
+        }
+        record.status = "Seek blocked";
+        return;
+      }
+      const currentTime = this.hostProgressivePlaybackLocked()
+        ? video.currentTime || 0
+        : (Number.isFinite(message.currentTime) ? Math.max(0, message.currentTime) : video.currentTime || 0);
       record.status = "Controlling playback";
       if (message.action === "pause") {
         this.hostSyncBarrier = null;
@@ -2863,6 +2905,10 @@ document.addEventListener("alpine:init", () => {
 
     handleHostPlayerSeeked() {
       if (this.suppressHostPlayerEvents) return;
+      if (this.hostProgressivePlaybackLocked()) {
+        this.playerStatus = "Scrubbing unlocks when Stable MP4 is complete.";
+        return;
+      }
       if (this.playerRoomId && this.connectedWatchPeers().length > 0) {
         const video = document.getElementById("host-video-player");
         this.scheduleSynchronizedResume("seek", video?.currentTime || 0);
@@ -2874,6 +2920,15 @@ document.addEventListener("alpine:init", () => {
     handleHostPlayerSeeking() {
       const video = document.getElementById("host-video-player");
       if (!video || !this.playerSource?.progressiveTranscode) return;
+      if (this.hostProgressivePlaybackLocked()) {
+        this.suppressHostPlayerEvents = true;
+        seekVideoTo(video, this.hostLinearPlaybackTime || 0);
+        this.playerStatus = "Scrubbing unlocks when Stable MP4 is complete.";
+        setTimeout(() => {
+          this.suppressHostPlayerEvents = false;
+        }, 300);
+        return;
+      }
       const percent = Number(this.playerTranscodeAvailablePercent || 0);
       if (!Number.isFinite(video.duration) || percent <= 0 || percent >= 100) return;
       const maxTime = Math.max(0, (video.duration * percent / 100) - 2);
@@ -3603,6 +3658,24 @@ function isMp4LikeContentType(contentType) {
 
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
+}
+
+function seekVideoTo(video, targetTime) {
+  if (!video) return;
+  const target = Math.max(0, Number(targetTime || 0));
+  const apply = () => {
+    try {
+      const duration = Number.isFinite(video.duration) ? video.duration : null;
+      video.currentTime = duration ? Math.min(target, Math.max(0, duration - 0.05)) : target;
+    } catch (error) {
+      // Some browsers reject seeks before metadata is ready; retry when it is.
+    }
+  };
+  if (video.readyState === HTMLMediaElement.HAVE_NOTHING) {
+    video.addEventListener("loadedmetadata", apply, { once: true });
+  } else {
+    apply();
+  }
 }
 
 async function requestAudioInputStream(deviceId) {

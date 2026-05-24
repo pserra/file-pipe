@@ -11,7 +11,7 @@
     <script defer src="{{ local_static_or_cdn('vendor/hls.js/hls.min.js', 'https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js') }}"></script>
     <script defer src="{{ local_static_or_cdn('vendor/three/three.min.js', 'https://cdn.jsdelivr.net/npm/three@0.160.1/build/three.min.js') }}"></script>
     <script defer src="{{ url_for('static', filename='xr-player.js', v='4') }}"></script>
-    <script defer src="{{ url_for('static', filename='watch.js', v='41') }}"></script>
+    <script defer src="{{ url_for('static', filename='watch.js', v='42') }}"></script>
     <script defer src="{{ local_static_or_cdn('vendor/alpinejs/cdn.min.js', 'https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js') }}"></script>
   </head>
   <body class="app-body" x-data="watchRoom('{{ room_id }}')" x-init="initWatchRoom()">
@@ -142,7 +142,16 @@
                       <div class="progress-bar" :style="`width: ${playbackBufferPercent}%`"></div>
                     </div>
                   </div>
-                  <video id="viewer-video-player" class="w-100 rounded border bg-black" :src="isHlsStream() ? '' : videoUrl" crossorigin="anonymous" controls preload="auto" playsinline @loadedmetadata="prepareViewerVideoMedia(); updateViewerPlaybackBuffer()" @progress="updateViewerPlaybackBuffer()" @timeupdate.throttle.500ms="updateViewerPlaybackBuffer()" @waiting="updateViewerPlaybackBuffer()" @canplay="checkPendingSegmentReadiness(); updateViewerPlaybackBuffer()" @playing="setTimeout(() => { inspectViewerVideoAudio(); updateViewerPlaybackBuffer(); }, 1000)" @play="sendViewerControl('play')" @pause="sendViewerControl('pause')" @seeking="clampViewerProgressiveSeek()" @seeked="sendViewerControl('seek'); updateViewerPlaybackBuffer()"></video>
+                  <video id="viewer-video-player" class="w-100 rounded border bg-black" :src="isHlsStream() ? '' : videoUrl" crossorigin="anonymous" :controls="!viewerProgressivePlaybackLocked()" preload="auto" playsinline @loadedmetadata="prepareViewerVideoMedia(); updateViewerPlaybackBuffer(); updateViewerLinearPlaybackTime()" @progress="updateViewerPlaybackBuffer()" @timeupdate.throttle.500ms="updateViewerPlaybackBuffer(); updateViewerLinearPlaybackTime()" @waiting="updateViewerPlaybackBuffer()" @canplay="checkPendingSegmentReadiness(); updateViewerPlaybackBuffer()" @playing="setTimeout(() => { inspectViewerVideoAudio(); updateViewerPlaybackBuffer(); updateViewerLinearPlaybackTime(); }, 1000)" @play="sendViewerControl('play')" @pause="sendViewerControl('pause')" @seeking="handleViewerSeeking()" @seeked="handleViewerSeeked()"></video>
+                  <template x-if="viewerProgressivePlaybackLocked()">
+                    <div class="d-flex flex-wrap align-items-center gap-2 mt-3">
+                      <button class="btn btn-primary" type="button" @click="toggleViewerLinearPlayback()">
+                        <i class="bi bi-play-fill"></i>
+                        <span>Play / Pause</span>
+                      </button>
+                      <span class="small text-secondary" x-text="progressivePlaybackLabel()"></span>
+                    </div>
+                  </template>
                   <template x-if="videoAudioStatus">
                     <div class="alert alert-secondary mt-3 mb-0" x-text="videoAudioStatus"></div>
                   </template>

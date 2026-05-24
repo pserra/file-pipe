@@ -27,6 +27,7 @@ document.addEventListener("alpine:init", () => {
     progress: 0,
     playbackBufferSeconds: 0,
     playbackBufferPercent: 0,
+    viewerLinearPlaybackTime: 0,
     mediaCapabilities: detectMediaPlaybackCapabilities(),
     status: "Loading room metadata...",
     lastSyncLabel: "",
@@ -147,11 +148,14 @@ document.addEventListener("alpine:init", () => {
     defaultPlaybackMode(metadata = this.metadata) {
       if (!metadata) return "range";
       const modes = metadata.availableModes || {};
-      const rangeProgress = modes.range?.progressiveTranscode || metadata.progressiveTranscode;
-      if (modes.hls && rangeProgress && !rangeProgress.complete) {
+      if (metadata.streamMode === "hls" || metadata.playbackProfile?.sourceKind === "hls-live" || String(metadata.type || "").includes("mpegurl")) {
         return "hls";
       }
-      if (metadata.streamMode === "hls" || metadata.playbackProfile?.sourceKind === "hls-live" || String(metadata.type || "").includes("mpegurl")) {
+      if (metadata.streamMode === "range") {
+        return "range";
+      }
+      const rangeProgress = modes.range?.progressiveTranscode || metadata.progressiveTranscode;
+      if (modes.hls && rangeProgress && !rangeProgress.complete) {
         return "hls";
       }
       return "range";
@@ -163,12 +167,11 @@ document.addEventListener("alpine:init", () => {
       const result = [];
       if (modes.range || this.defaultPlaybackMode(this.metadata) === "range") {
         const progress = modes.range?.progressiveTranscode || this.metadata.progressiveTranscode;
-        const disabled = Boolean(modes.hls && progress && !progress.complete);
         result.push({
           id: "range",
           label: "Watch",
-          description: disabled ? "Available when Stable MP4 finishes" : "More metadata and scrubbing",
-          disabled,
+          description: progress && !progress.complete ? "Linear playback until Stable MP4 finishes" : "More metadata and scrubbing",
+          disabled: false,
         });
       }
       if (modes.hls || this.defaultPlaybackMode(this.metadata) === "hls") {
@@ -191,6 +194,19 @@ document.addEventListener("alpine:init", () => {
       return this.selectedPlaybackMode === "hls"
         ? "Stream mode favors compatibility and steadier playback."
         : "Watch mode favors metadata, range requests, and scrubbing.";
+    },
+
+    viewerProgressivePlaybackLocked() {
+      const metadata = this.playbackMetadata();
+      return this.selectedPlaybackMode === "range"
+        && Boolean(metadata?.progressiveTranscode)
+        && !metadata.progressiveTranscode.complete;
+    },
+
+    progressivePlaybackLabel(progress = this.playbackMetadata()?.progressiveTranscode) {
+      const percent = Math.max(0, Math.min(99, Math.round(Number(progress?.percent || 0))));
+      if (percent > 0) return `Linear playback while Stable MP4 is ${percent}% ready. Scrubbing unlocks at 100%.`;
+      return "Linear playback is available while Stable MP4 prepares. Scrubbing unlocks at 100%.";
     },
 
     playbackMetadata() {
@@ -247,6 +263,7 @@ document.addEventListener("alpine:init", () => {
       this.pendingRangeMd5 = {};
       this.pendingRangeBytes = {};
       this.pendingHlsBytes = {};
+      this.viewerLinearPlaybackTime = 0;
       this.status = `${this.playbackModeLabel()} mode selected.`;
       if (this.acknowledgementAccepted && this.channelReady) {
         setTimeout(() => this.requestVideo(), 100);
@@ -651,7 +668,9 @@ document.addEventListener("alpine:init", () => {
       const video = document.getElementById("viewer-video-player");
       if (!video) return;
       if (!this.remoteControlAllowed) {
-        this.status = "Shared playback control is not enabled for you right now.";
+        if (!this.viewerProgressivePlaybackLocked() || action === "seek") {
+          this.status = "Shared playback control is not enabled for you right now.";
+        }
         return;
       }
       if (!this.channel || this.channel.readyState !== "open") {
@@ -677,6 +696,10 @@ document.addEventListener("alpine:init", () => {
     },
 
     scheduleViewerSeekControl(video) {
+      if (this.viewerProgressivePlaybackLocked()) {
+        this.status = "Scrubbing unlocks when Stable MP4 is complete.";
+        return;
+      }
       if (this.viewerSeekControlTimer) clearTimeout(this.viewerSeekControlTimer);
       const currentTime = video.currentTime || 0;
       const paused = video.paused;
@@ -701,6 +724,45 @@ document.addEventListener("alpine:init", () => {
         }
         this.status = "Sent scrub position to host.";
       }, SEEK_CONTROL_DEBOUNCE_MS);
+    },
+
+    toggleViewerLinearPlayback() {
+      const video = document.getElementById("viewer-video-player");
+      if (!video) return;
+      if (video.paused) {
+        video.play().catch(() => {
+          this.status = "Press play again if the browser blocked playback.";
+        });
+      } else {
+        video.pause();
+      }
+    },
+
+    updateViewerLinearPlaybackTime() {
+      const video = document.getElementById("viewer-video-player");
+      if (!video || video.seeking) return;
+      this.viewerLinearPlaybackTime = video.currentTime || 0;
+    },
+
+    handleViewerSeeking() {
+      if (!this.viewerProgressivePlaybackLocked()) {
+        this.clampViewerProgressiveSeek();
+        return;
+      }
+      const video = document.getElementById("viewer-video-player");
+      if (!video) return;
+      this.suppressViewerControlsBriefly();
+      seekVideoTo(video, this.viewerLinearPlaybackTime || 0);
+      this.status = "Scrubbing unlocks when Stable MP4 is complete.";
+    },
+
+    handleViewerSeeked() {
+      if (this.viewerProgressivePlaybackLocked()) {
+        this.updateViewerPlaybackBuffer();
+        return;
+      }
+      this.sendViewerControl("seek");
+      this.updateViewerPlaybackBuffer();
     },
 
     prepareViewerVideoMedia() {
@@ -814,15 +876,6 @@ document.addEventListener("alpine:init", () => {
       if (!hlsStream && !playbackMetadata?.md5 && playbackMetadata?.checksumKind !== "original-source") {
         this.error = "The host has not published an MD5 for this video yet.";
         this.logWatchEvent("video-request-blocked", "Missing MD5 metadata.");
-        return;
-      }
-      if (!hlsStream && playbackMetadata?.progressiveTranscode && !playbackMetadata.progressiveTranscode.complete) {
-        this.pendingVideoRequest = true;
-        this.error = "";
-        const percent = Math.round(Number(playbackMetadata.progressiveTranscode.percent || 0));
-        this.status = percent > 0
-          ? `Stable MP4 is still transcoding (${percent}%). Playback will start when it is ready.`
-          : "Stable MP4 is still transcoding. Playback will start when it is ready.";
         return;
       }
       if (!this.channel || this.channel.readyState !== "open") {
@@ -1029,18 +1082,19 @@ document.addEventListener("alpine:init", () => {
       const hlsStream = this.isHlsStream();
       const playbackMetadata = this.playbackMetadata();
       if (this.receiving) return hlsStream ? "Live stream ready" : "Range player ready";
-      if (!hlsStream && playbackMetadata?.progressiveTranscode && !playbackMetadata.progressiveTranscode.complete) return "Waiting for Stable MP4";
       if (this.pendingVideoRequest) return "Retry host connection";
       if (this.videoUrl) return "Video ready";
       if (!this.acknowledgementAccepted) return "Confirm acknowledgement";
-      return hlsStream ? "Acknowledge and start live stream" : "Acknowledge and start streaming";
+      if (hlsStream) return "Acknowledge and start live stream";
+      if (playbackMetadata?.progressiveTranscode && !playbackMetadata.progressiveTranscode.complete) return "Start linear playback";
+      return "Acknowledge and start streaming";
     },
 
     receiveDisabledReason() {
       const hlsStream = this.isHlsStream();
       const playbackMetadata = this.playbackMetadata();
       if (!hlsStream && !playbackMetadata?.md5 && playbackMetadata?.checksumKind !== "original-source") return "Waiting for the host to publish the required MD5 checksum.";
-      if (!hlsStream && playbackMetadata?.progressiveTranscode && !playbackMetadata.progressiveTranscode.complete) return "The host is still preparing the Stable MP4 stream. Playback will start automatically when it is ready.";
+      if (!hlsStream && playbackMetadata?.progressiveTranscode && !playbackMetadata.progressiveTranscode.complete) return "Stable MP4 is still preparing. Play/pause is available now; scrubbing unlocks when the file is complete.";
       if (hlsStream) return "Live stream segments transcode on demand, so the first play or a scrub may take a moment.";
       if (!this.acknowledgementAccepted) return "Check the acknowledgement box before starting the video.";
       if (this.pendingVideoRequest) return "Waiting for the host peer connection to open. File Pipe will retry automatically; click Retry to force it now.";
@@ -1295,6 +1349,7 @@ document.addEventListener("alpine:init", () => {
       this.progress = 0;
       this.playbackBufferSeconds = 0;
       this.playbackBufferPercent = 0;
+      this.viewerLinearPlaybackTime = 0;
       this.pendingRangeMd5 = {};
       this.pendingRangeBytes = {};
       this.pendingHlsBytes = {};
@@ -1324,11 +1379,10 @@ document.addEventListener("alpine:init", () => {
           this.metadata.availableModes.range.size = this.metadata.progressiveTranscode.estimatedFinalSize;
         }
       }
-      if (this.selectedPlaybackMode === "range" && !this.metadata.progressiveTranscode.complete && this.metadata.availableModes?.hls) {
-        this.selectedPlaybackMode = "hls";
-        this.status = "Stable MP4 is still preparing, so Stream mode will play first.";
-      }
       this.clampViewerProgressiveSeek();
+      if (this.metadata.progressiveTranscode.complete && this.selectedPlaybackMode === "range" && this.videoUrl) {
+        this.status = "Stable MP4 is complete. Scrubbing is unlocked.";
+      }
       if (wasIncomplete && this.metadata.progressiveTranscode.complete && this.pendingVideoRequest && !this.videoUrl) {
         this.status = "Stable MP4 is ready. Starting playback...";
         setTimeout(() => this.requestVideo(), 250);
