@@ -11,6 +11,10 @@ self.addEventListener("activate", (event) => {
 
 self.addEventListener("message", (event) => {
   const message = event.data || {};
+  if (message.type === "claim") {
+    event.waitUntil?.(self.clients.claim());
+    return;
+  }
   if ((message.type === "bigscreen-metadata" || message.type === "watch-metadata") && message.sessionId && message.metadata) {
     sessionMetadata.set(mediaKey(message.type === "watch-metadata" ? "watch" : "bigscreen", message.sessionId), message.metadata);
     return;
@@ -191,7 +195,14 @@ function isHlsMetadata(metadata) {
 }
 
 function parseRange(rangeHeader, totalSize, metadata = {}) {
-  if (!rangeHeader || !totalSize) {
+  if (!totalSize) {
+    return {
+      start: 0,
+      end: 0,
+      partial: false,
+    };
+  }
+  if (!rangeHeader) {
     const availableBytes = Number(metadata.progressiveTranscode?.availableBytes || 0);
     const bootstrapBytes = availableBytes > 0
       ? Math.min(Math.max(availableBytes, 256 * 1024), 2 * 1024 * 1024)

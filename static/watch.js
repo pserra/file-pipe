@@ -732,10 +732,12 @@ document.addEventListener("alpine:init", () => {
         this.viewerHls.on(Hls.Events.MANIFEST_PARSED, () => {
           this.prepareViewerVideoMedia();
           this.updateViewerPlaybackBuffer();
+          this.applyPendingPlaybackState(100);
         });
         return true;
       }
       if (video.canPlayType("application/vnd.apple.mpegurl")) {
+        video.addEventListener("loadedmetadata", () => this.applyPendingPlaybackState(100), { once: true });
         video.src = this.videoUrl;
         video.load();
         this.prepareViewerVideoMedia();
@@ -871,6 +873,7 @@ document.addEventListener("alpine:init", () => {
             return;
           }
         } else {
+          video.addEventListener("loadedmetadata", () => this.applyPendingPlaybackState(100), { once: true });
           video.src = this.videoUrl;
           video.load();
         }
@@ -878,7 +881,8 @@ document.addEventListener("alpine:init", () => {
           ? "Live stream player ready. Segments will transcode on demand."
           : "Range player ready. Playback will stay synced with the host.";
         this.logWatchEvent(hlsStream ? "hls-player-ready" : "range-player-ready", "Service worker player is ready.");
-        if (this.pendingSync) setTimeout(() => this.applySync(this.pendingSync), 250);
+        this.notifyViewerPlayerReady();
+        this.applyPendingPlaybackState(250);
       } catch (error) {
         this.error = serviceWorkerSetupMessage(error);
         this.receiving = false;
@@ -887,13 +891,13 @@ document.addEventListener("alpine:init", () => {
     },
 
     async registerServiceWorker() {
-      const registration = await navigator.serviceWorker.register("/bigscreen-sw.js?v=7", { scope: "/" });
+      const registration = await navigator.serviceWorker.register("/bigscreen-sw.js?v=8", { scope: "/" });
       await navigator.serviceWorker.ready;
       if (!navigator.serviceWorker.controller) {
         await new Promise((resolve) => {
           navigator.serviceWorker.addEventListener("controllerchange", resolve, { once: true });
           registration.active?.postMessage({ type: "claim" });
-          setTimeout(resolve, 1500);
+          setTimeout(resolve, 4000);
         });
       }
       if (!navigator.serviceWorker.controller) {
@@ -1238,7 +1242,8 @@ document.addEventListener("alpine:init", () => {
           setTimeout(() => {
             this.prepareViewerVideoMedia();
           }, 0);
-          if (this.pendingSync) setTimeout(() => this.applySync(this.pendingSync), 250);
+          this.notifyViewerPlayerReady();
+          this.applyPendingPlaybackState(250);
           return;
         }
         if (message.type === "video-error") {
@@ -1247,7 +1252,8 @@ document.addEventListener("alpine:init", () => {
         if (message.type === "sync") {
           this.pendingSync = message;
           this.lastSyncLabel = new Date().toLocaleTimeString();
-          if (this.videoUrl) this.applySync(message);
+          if (this.videoUrl) this.applyPendingPlaybackState();
+          else this.requestVideoIfAcknowledged();
         }
       } catch (error) {
         this.error = error.message;
@@ -1362,7 +1368,7 @@ document.addEventListener("alpine:init", () => {
       } else {
         const correctionThreshold = gentleTimeSync ? 3.5 : 0.5;
         if (drift > correctionThreshold || message.reason === "seek") {
-          video.currentTime = targetTime;
+          seekVideoTo(video, targetTime);
         }
         video.playbackRate = baseRate;
       }
@@ -1395,6 +1401,7 @@ document.addEventListener("alpine:init", () => {
       const video = document.getElementById("viewer-video-player");
       if (!video || !this.videoUrl) {
         this.pendingSync = message;
+        this.requestVideoIfAcknowledged();
         return;
       }
       this.pendingSegmentSync = message;
@@ -1402,7 +1409,7 @@ document.addEventListener("alpine:init", () => {
       this.suppressViewerControlsBriefly();
       video.pause();
       if (Number.isFinite(message.currentTime)) {
-        video.currentTime = Math.max(0, message.currentTime);
+        seekVideoTo(video, Math.max(0, message.currentTime));
       }
       const bufferSeconds = Number(message.bufferSeconds || SYNC_BUFFER_SECONDS);
       message.bufferStartedAt = Date.now();
@@ -1467,12 +1474,13 @@ document.addEventListener("alpine:init", () => {
       const video = document.getElementById("viewer-video-player");
       if (!video) {
         this.pendingSync = message;
+        this.requestVideoIfAcknowledged();
         return;
       }
       this.pendingSegmentSync = null;
       if (Number.isFinite(message.currentTime)) {
         this.suppressViewerControlsBriefly(1800);
-        video.currentTime = Math.max(0, message.currentTime);
+        seekVideoTo(video, Math.max(0, message.currentTime));
       }
       video.playbackRate = message.playbackRate || 1;
       this.updateViewerPlaybackBuffer();
@@ -1508,6 +1516,49 @@ document.addEventListener("alpine:init", () => {
         ...message,
         resumeDelayMs: 0,
         resumeAt: Date.now(),
+      });
+    },
+
+    applyPendingPlaybackState(delay = 0) {
+      const run = () => {
+        if (!this.pendingSync || !this.videoUrl) return;
+        const message = this.pendingSync;
+        this.pendingSync = null;
+        if (message.type === "sync-hold") {
+          this.applySyncHold(message);
+          return;
+        }
+        if (message.type === "resume-at") {
+          this.applyResumeAt(message);
+          return;
+        }
+        this.applySync(message);
+      };
+      if (delay > 0) {
+        setTimeout(run, delay);
+      } else {
+        run();
+      }
+    },
+
+    requestVideoIfAcknowledged() {
+      if (!this.acknowledgementAccepted || this.videoUrl || this.receiving || this.pendingVideoRequest) return;
+      if (!this.channel || this.channel.readyState !== "open") {
+        this.pendingVideoRequest = true;
+        this.schedulePendingVideoReconnect();
+        return;
+      }
+      this.pendingVideoRequest = true;
+      setTimeout(() => this.requestVideo(), 100);
+    },
+
+    notifyViewerPlayerReady() {
+      if (this.channel?.readyState !== "open") return;
+      this.suppressViewerControlsBriefly(1500);
+      sendChannelJson(this.channel, {
+        type: "viewer-player-ready",
+        mode: this.selectedPlaybackMode || this.defaultPlaybackMode(),
+        sourceVersion: this.sourceVersion,
       });
     },
 
@@ -1615,6 +1666,24 @@ function shouldUpdateChannelUi(target, intervalMs = CHANNEL_UI_UPDATE_INTERVAL_M
 
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
+}
+
+function seekVideoTo(video, targetTime) {
+  if (!video) return;
+  const target = Math.max(0, Number(targetTime || 0));
+  const apply = () => {
+    try {
+      const duration = Number.isFinite(video.duration) ? video.duration : null;
+      video.currentTime = duration ? Math.min(target, Math.max(0, duration - 0.05)) : target;
+    } catch (error) {
+      // Some mobile browsers reject seeks before metadata is ready; retry when it is.
+    }
+  };
+  if (video.readyState === HTMLMediaElement.HAVE_NOTHING) {
+    video.addEventListener("loadedmetadata", apply, { once: true });
+  } else {
+    apply();
+  }
 }
 
 function formatByteOffset(value) {

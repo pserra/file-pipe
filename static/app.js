@@ -2209,6 +2209,7 @@ document.addEventListener("alpine:init", () => {
         for (const peer of this.connectedWatchPeers()) {
           peer.videoComplete = false;
           peer.readySyncId = "";
+          peer.viewerHasPlayer = false;
           peer.cancelledRanges?.clear();
           sendChannelJson(peer.channel, {
             type: "source-update",
@@ -2253,6 +2254,8 @@ document.addEventListener("alpine:init", () => {
                   generation: participant.generation,
                   cancelledRanges: new Set(),
                   readySyncId: "",
+                  viewerHasPlayer: Boolean(existing?.viewerHasPlayer),
+                  viewerMode: existing?.viewerMode || "",
                   allowControl: Boolean(existing?.allowControl),
                   localVoiceMuted: Boolean(existing?.localVoiceMuted),
                   remoteMicMuted: Boolean(existing?.remoteMicMuted),
@@ -2320,6 +2323,8 @@ document.addEventListener("alpine:init", () => {
             return;
           }
           if (message.type === "range-request") {
+            record.viewerHasPlayer = true;
+            record.viewerMode = "range";
             if (!this.playerRoomRangeSource && this.playerRoomMetadata?.streamMode === "hls") {
               sendChannelJson(record.channel, {
                 type: "range-error",
@@ -2334,8 +2339,22 @@ document.addEventListener("alpine:init", () => {
             return;
           }
           if (message.type === "hls-segment-request") {
+            record.viewerHasPlayer = true;
+            record.viewerMode = "hls";
             record.status = "Live segment streaming";
             await this.streamWatchHlsSegment(message, record);
+            return;
+          }
+          if (message.type === "viewer-player-ready") {
+            record.viewerHasPlayer = true;
+            record.viewerMode = message.mode || record.viewerMode || "";
+            record.readySyncId = "";
+            record.status = "Player ready";
+            if (this.hostSyncBarrier) {
+              this.addPeerToSyncBarrier(record);
+            } else {
+              this.sendPlayerState(channel, "viewer-ready");
+            }
             return;
           }
           if (message.type === "range-cancel") {
@@ -2773,6 +2792,7 @@ document.addEventListener("alpine:init", () => {
         for (const peer of this.connectedWatchPeers()) {
           peer.videoComplete = false;
           peer.readySyncId = "";
+          peer.viewerHasPlayer = false;
           peer.cancelledRanges?.clear();
           sendChannelJson(peer.channel, {
             type: "source-update",
@@ -2878,6 +2898,10 @@ document.addEventListener("alpine:init", () => {
       return Object.values(this.playerPeers).filter((record) => record.channel?.readyState === "open");
     },
 
+    syncEligibleWatchPeers(peers = this.connectedWatchPeers()) {
+      return peers.filter((record) => record.viewerHasPlayer || record.videoComplete);
+    },
+
     scheduleSynchronizedResume(reason, currentTime = null) {
       this.clearPendingHostSeekSync();
       const video = document.getElementById("host-video-player");
@@ -2900,7 +2924,8 @@ document.addEventListener("alpine:init", () => {
       const video = document.getElementById("host-video-player");
       if (!video) return;
       const peers = this.connectedWatchPeers();
-      if (peers.length === 0) {
+      const syncPeers = this.syncEligibleWatchPeers(peers);
+      if (syncPeers.length === 0) {
         this.broadcastPlayerState(reason);
         return;
       }
@@ -2913,7 +2938,7 @@ document.addEventListener("alpine:init", () => {
         startedAt: Date.now(),
         bufferSeconds: SYNC_BUFFER_SECONDS,
         hostReady: false,
-        peerIds: new Set(peers.map((peer) => peer.id)),
+        peerIds: new Set(syncPeers.map((peer) => peer.id)),
       };
       const restoreHostEvents = !this.suppressHostPlayerEvents;
       this.suppressHostPlayerEvents = true;
@@ -2923,19 +2948,19 @@ document.addEventListener("alpine:init", () => {
           this.suppressHostPlayerEvents = false;
         }, 600);
       }
-      for (const record of peers) {
-        record.readySyncId = "";
-        record.status = "Buffering sync segment";
-        sendChannelJson(record.channel, {
-          type: "sync-hold",
-          syncId,
-          reason,
+      for (const record of peers.filter((peer) => !this.hostSyncBarrier.peerIds.has(peer.id))) {
+        this.sendPlayerStateSnapshot(record.channel, reason, {
           currentTime,
-          bufferSeconds: SYNC_BUFFER_SECONDS,
+          paused: false,
           playbackRate: video.playbackRate || 1,
         });
       }
-      this.playerStatus = `Waiting for host and viewers to buffer ${SYNC_BUFFER_SECONDS} seconds...`;
+      for (const record of syncPeers) {
+        record.readySyncId = "";
+        record.status = "Buffering sync segment";
+        this.sendSyncHoldToPeer(record);
+      }
+      this.playerStatus = `Waiting for host and ${syncPeers.length} viewer${syncPeers.length === 1 ? "" : "s"} to buffer ${SYNC_BUFFER_SECONDS} seconds...`;
       this.waitForHostResumeBuffer(syncId);
       setTimeout(() => {
         if (this.hostSyncBarrier?.syncId !== syncId) return;
@@ -2945,9 +2970,44 @@ document.addEventListener("alpine:init", () => {
       }, SYNC_FORCE_AFTER_MS);
       setTimeout(() => {
         if (this.hostSyncBarrier?.syncId === syncId) {
-          this.playerStatus = "Still waiting for a viewer to report the seek target is ready.";
+          this.releaseUnreadySyncViewers(syncId);
         }
       }, SYNC_READY_TIMEOUT_MS);
+    },
+
+    sendSyncHoldToPeer(record) {
+      if (!this.hostSyncBarrier || !record.channel || record.channel.readyState !== "open") return;
+      sendChannelJson(record.channel, {
+        type: "sync-hold",
+        syncId: this.hostSyncBarrier.syncId,
+        reason: this.hostSyncBarrier.reason,
+        currentTime: this.hostSyncBarrier.currentTime,
+        bufferSeconds: this.hostSyncBarrier.bufferSeconds,
+        playbackRate: document.getElementById("host-video-player")?.playbackRate || 1,
+      });
+    },
+
+    addPeerToSyncBarrier(record) {
+      if (!this.hostSyncBarrier || !record?.channel || record.channel.readyState !== "open") return;
+      if (this.hostSyncBarrier.peerIds.has(record.id)) return;
+      this.hostSyncBarrier.peerIds.add(record.id);
+      record.readySyncId = "";
+      record.status = "Buffering sync segment";
+      this.sendSyncHoldToPeer(record);
+    },
+
+    releaseUnreadySyncViewers(syncId) {
+      if (!this.hostSyncBarrier || this.hostSyncBarrier.syncId !== syncId) return;
+      const peers = this.connectedWatchPeers().filter((peer) => this.hostSyncBarrier.peerIds.has(peer.id));
+      const unready = peers.filter((peer) => peer.readySyncId !== syncId);
+      for (const peer of unready) {
+        peer.readySyncId = syncId;
+        peer.status = "Sync timed out";
+      }
+      if (unready.length > 0) {
+        this.playerStatus = `${unready.length} viewer${unready.length === 1 ? "" : "s"} did not report enough buffered data. Resuming playback anyway.`;
+      }
+      this.finishSynchronizedResumeIfReady(syncId);
     },
 
     async waitForHostResumeBuffer(syncId) {
@@ -3029,12 +3089,21 @@ document.addEventListener("alpine:init", () => {
     sendPlayerState(channel, reason) {
       const video = document.getElementById("host-video-player");
       if (!video || channel.readyState !== "open") return;
-      sendChannelJson(channel, {
-        type: "sync",
-        reason,
+      this.sendPlayerStateSnapshot(channel, reason, {
         currentTime: video.currentTime || 0,
         paused: video.paused,
         playbackRate: video.playbackRate || 1,
+      });
+    },
+
+    sendPlayerStateSnapshot(channel, reason, state = {}) {
+      if (!channel || channel.readyState !== "open") return;
+      sendChannelJson(channel, {
+        type: "sync",
+        reason,
+        currentTime: Math.max(0, Number(state.currentTime || 0)),
+        paused: Boolean(state.paused),
+        playbackRate: Number(state.playbackRate || 1),
         sentAt: Date.now(),
       });
     },
@@ -3212,7 +3281,7 @@ const SYNC_RELAXED_BUFFER_SECONDS = 1;
 const SYNC_RELAX_AFTER_MS = 3500;
 const SYNC_FORCE_AFTER_MS = 7000;
 const SYNC_READY_POLL_MS = 250;
-const SYNC_READY_TIMEOUT_MS = 20000;
+const SYNC_READY_TIMEOUT_MS = 9000;
 const SYNC_RESUME_DELAY_MS = 1200;
 const SEEK_SYNC_DEBOUNCE_MS = 450;
 

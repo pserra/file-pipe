@@ -139,13 +139,13 @@ document.addEventListener("alpine:init", () => {
     },
 
     async registerServiceWorker() {
-      const registration = await navigator.serviceWorker.register("/bigscreen-sw.js?v=7", { scope: "/" });
+      const registration = await navigator.serviceWorker.register("/bigscreen-sw.js?v=8", { scope: "/" });
       await navigator.serviceWorker.ready;
       if (!navigator.serviceWorker.controller) {
         await new Promise((resolve) => {
           navigator.serviceWorker.addEventListener("controllerchange", resolve, { once: true });
           registration.active?.postMessage({ type: "claim" });
-          setTimeout(resolve, 1500);
+          setTimeout(resolve, 4000);
         });
       }
       if (!navigator.serviceWorker.controller) {

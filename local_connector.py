@@ -213,6 +213,8 @@ TRANSCODE_CACHE_VERSION = "v5"
 TRANSCODE_CACHE_DIR = Path(os.environ.get("FILE_PIPE_TRANSCODE_CACHE_DIR", "instance/transcodes"))
 HLS_SEGMENT_SECONDS = int(os.environ.get("FILE_PIPE_HLS_SEGMENT_SECONDS", "6"))
 HLS_PREFETCH_SEGMENTS = int(os.environ.get("FILE_PIPE_HLS_PREFETCH_SEGMENTS", "2"))
+HLS_ACCURATE_SEEK_WINDOW_SECONDS = float(os.environ.get("FILE_PIPE_HLS_ACCURATE_SEEK_WINDOW_SECONDS", "8"))
+HLS_SEGMENT_CACHE_VERSION = "hls-v2"
 PROGRESSIVE_TRANSCODE_START_PERCENT = int(os.environ.get("FILE_PIPE_PROGRESSIVE_TRANSCODE_START_PERCENT", "3"))
 PROGRESSIVE_TRANSCODE_MIN_BYTES = int(os.environ.get("FILE_PIPE_PROGRESSIVE_TRANSCODE_MIN_BYTES", str(2 * 1024 * 1024)))
 TRANSCODE_LOCKS: Dict[str, threading.Lock] = {}
@@ -1143,18 +1145,20 @@ def build_hls_segment_command(
     ffmpeg_path: str = "ffmpeg",
 ) -> List[str]:
     video_index, audio_index = default_stream_indexes(probe)
+    input_seek = max(0.0, float(start_time) - max(0.0, HLS_ACCURATE_SEEK_WINDOW_SECONDS))
+    accurate_seek = max(0.0, float(start_time) - input_seek)
     command = [
         ffmpeg_path,
         "-hide_banner",
         "-loglevel",
         "error",
-        "-ss",
-        f"{start_time:.3f}",
-        "-i",
-        url,
-        "-t",
-        f"{duration:.3f}",
     ]
+    if input_seek > 0:
+        command.extend(["-ss", f"{input_seek:.3f}"])
+    command.extend(["-i", url])
+    if accurate_seek > 0:
+        command.extend(["-ss", f"{accurate_seek:.3f}"])
+    command.extend(["-t", f"{duration:.3f}"])
     if video_index is not None:
         command.extend(["-map", f"0:{video_index}"])
     if audio_index is not None:
@@ -1212,7 +1216,7 @@ def transcoded_file_cached(resource_id: str, url: str) -> bool:
 
 
 def hls_cache_dir(resource_id: str, url: str) -> Path:
-    url_hash = hashlib.sha256(f"{TRANSCODE_CACHE_VERSION}:hls:{HLS_SEGMENT_SECONDS}:{url}".encode("utf-8")).hexdigest()[:16]
+    url_hash = hashlib.sha256(f"{TRANSCODE_CACHE_VERSION}:{HLS_SEGMENT_CACHE_VERSION}:{HLS_SEGMENT_SECONDS}:{url}".encode("utf-8")).hexdigest()[:16]
     return TRANSCODE_CACHE_DIR / f"{resource_id}-{url_hash}-hls"
 
 
