@@ -27,6 +27,7 @@ document.addEventListener("alpine:init", () => {
     viewerHls: null,
     viewerXrPlayer: null,
     streamingReady: false,
+    rangePlayerPromoted: false,
     videoAudioStatus: "",
     progress: 0,
     playbackBufferSeconds: 0,
@@ -372,6 +373,7 @@ document.addEventListener("alpine:init", () => {
       this.pendingRangeBytes = {};
       this.pendingHlsBytes = {};
       this.viewerLinearPlaybackTime = 0;
+      this.rangePlayerPromoted = false;
       this.status = `${this.playbackModeLabel()} mode selected.`;
       this.saveWatchSession();
       if (this.acknowledgementAccepted && this.channelReady) {
@@ -870,7 +872,8 @@ document.addEventListener("alpine:init", () => {
       const video = document.getElementById("viewer-video-player");
       if (!video) return;
       if (video.paused) {
-        playVideoWhenReady(video).catch(() => {
+        this.status = "Starting linear playback as Stable MP4 bytes arrive...";
+        playVideoWhenReady(video, 20000).catch(() => {
           this.status = "Playback is still preparing. Try again once the first bytes are buffered.";
         });
       } else {
@@ -1046,6 +1049,7 @@ document.addEventListener("alpine:init", () => {
         this.pendingRangeMd5 = {};
         this.pendingRangeBytes = {};
         this.pendingHlsBytes = {};
+        this.rangePlayerPromoted = false;
         this.progress = 0;
         this.status = hlsStream ? "Preparing encrypted live stream player..." : "Preparing encrypted range player...";
         await this.registerServiceWorker();
@@ -1084,7 +1088,7 @@ document.addEventListener("alpine:init", () => {
     },
 
     async registerServiceWorker() {
-      const registration = await navigator.serviceWorker.register("/bigscreen-sw.js?v=8", { scope: "/" });
+      const registration = await navigator.serviceWorker.register("/bigscreen-sw.js?v=9", { scope: "/" });
       await navigator.serviceWorker.ready;
       if (!navigator.serviceWorker.controller) {
         await new Promise((resolve) => {
@@ -1154,6 +1158,7 @@ document.addEventListener("alpine:init", () => {
         requestId: message.requestId,
         start: message.start,
         end: message.end,
+        linear: Boolean(message.linear),
         sourceVersion: this.sourceVersion,
       })) {
         this.postWorkerMessage({
@@ -1497,6 +1502,7 @@ document.addEventListener("alpine:init", () => {
       this.pendingHlsBytes = {};
       this.pendingSegmentSync = null;
       this.pendingSync = null;
+      this.rangePlayerPromoted = false;
       this.status = message.reason || "Host switched video source for compatibility.";
       if (this.acknowledgementAccepted) {
         this.pendingVideoRequest = true;
@@ -1524,6 +1530,8 @@ document.addEventListener("alpine:init", () => {
       this.clampViewerProgressiveSeek();
       if (this.metadata.progressiveTranscode.complete && this.selectedPlaybackMode === "range" && this.videoUrl) {
         this.status = "Stable MP4 is complete. Scrubbing is unlocked.";
+        this.refreshWatchServiceWorkerMetadata();
+        this.promoteCompletedViewerRangePlayer();
       }
       if (wasIncomplete && this.metadata.progressiveTranscode.complete && this.pendingVideoRequest && !this.videoUrl) {
         this.status = "Stable MP4 is ready. Starting playback...";
@@ -1756,6 +1764,45 @@ document.addEventListener("alpine:init", () => {
         mode: this.selectedPlaybackMode || this.defaultPlaybackMode(),
         sourceVersion: this.sourceVersion,
       });
+    },
+
+    refreshWatchServiceWorkerMetadata() {
+      if (!navigator.serviceWorker?.controller || !this.metadata) return;
+      navigator.serviceWorker.controller.postMessage({
+        type: "watch-metadata",
+        sessionId: this.roomId,
+        metadata: plainData(this.playbackMetadata()),
+      });
+    },
+
+    promoteCompletedViewerRangePlayer() {
+      if (this.rangePlayerPromoted || this.selectedPlaybackMode !== "range" || !this.videoUrl) return;
+      const video = document.getElementById("viewer-video-player");
+      if (!video) return;
+      this.rangePlayerPromoted = true;
+      const currentTime = video.currentTime || 0;
+      const wasPaused = video.paused;
+      const playbackRate = video.playbackRate || 1;
+      this.suppressViewerControlsBriefly(2500);
+      const separator = this.videoUrl.includes("?") ? "&" : "?";
+      this.videoUrl = `${this.videoUrl}${separator}complete=${Date.now()}`;
+      setTimeout(() => {
+        const promoted = document.getElementById("viewer-video-player");
+        if (!promoted) return;
+        promoted.playbackRate = playbackRate;
+        const restorePosition = () => {
+          seekVideoTo(promoted, currentTime);
+          if (!wasPaused) {
+            playVideoWhenReady(promoted, 10000).catch(() => {});
+          }
+        };
+        if (promoted.readyState === HTMLMediaElement.HAVE_NOTHING) {
+          promoted.addEventListener("loadedmetadata", restorePosition, { once: true });
+          promoted.load();
+        } else {
+          restorePosition();
+        }
+      }, 0);
     },
 
     async decryptPayload(ivText, ciphertext) {

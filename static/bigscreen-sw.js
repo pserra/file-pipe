@@ -64,6 +64,10 @@ async function handleBigscreenMedia(event, url) {
     return handleWatchHlsMedia(event, url, client, sessionId, metadata);
   }
 
+  if (kind === "watch" && isLinearProgressiveMetadata(metadata)) {
+    return handleWatchLinearMedia(event, url, client, sessionId, metadata);
+  }
+
   const totalSize = Number(metadata.size || 0);
   const range = parseRange(event.request.headers.get("Range"), totalSize, metadata);
   const requestId = createRequestId();
@@ -156,6 +160,45 @@ function handleWatchHlsMedia(event, url, client, sessionId, metadata) {
   });
 }
 
+function handleWatchLinearMedia(event, url, client, sessionId, metadata) {
+  const requestId = createRequestId();
+  const stream = new ReadableStream({
+    start(controller) {
+      pendingRanges.set(requestId, { controller, clientId: client.id });
+      client.postMessage({
+        type: "range-request",
+        requestId,
+        sessionId,
+        mediaKind: "watch",
+        start: 0,
+        end: null,
+        linear: true,
+      });
+    },
+    cancel() {
+      pendingRanges.delete(requestId);
+      client.postMessage({ type: "range-cancel", requestId, sessionId, mediaKind: "watch" });
+    },
+  });
+
+  event.request.signal?.addEventListener("abort", () => {
+    pendingRanges.delete(requestId);
+    client.postMessage({ type: "range-cancel", requestId, sessionId, mediaKind: "watch" });
+  });
+
+  const headers = {
+    "Cache-Control": "no-store",
+    "Content-Type": metadata.type || "video/mp4",
+  };
+  const duration = Number(metadata.progressiveTranscode?.duration || metadata.mediaInfo?.duration || 0);
+  if (duration > 0) headers["X-Content-Duration"] = duration.toFixed(3);
+
+  return new Response(stream, {
+    status: 200,
+    headers,
+  });
+}
+
 function buildHlsPlaylist(metadata) {
   const hls = metadata.hls || {};
   const duration = Math.max(0, Number(hls.duration || 0));
@@ -176,6 +219,7 @@ function buildHlsPlaylist(metadata) {
     const segmentLength = duration > 0
       ? Math.max(0.1, Math.min(segmentDuration, duration - startTime))
       : segmentDuration;
+    if (index > 0) lines.push("#EXT-X-DISCONTINUITY");
     lines.push(`#EXTINF:${segmentLength.toFixed(3)},`);
     lines.push(`segments/${index}.ts${segmentQuery}`);
   }
@@ -192,6 +236,11 @@ function isHlsMetadata(metadata) {
   return metadata?.streamMode === "hls"
     || metadata?.playbackProfile?.sourceKind === "hls-live"
     || String(metadata?.type || "").toLowerCase().includes("mpegurl");
+}
+
+function isLinearProgressiveMetadata(metadata) {
+  const progress = metadata?.progressiveTranscode || metadata?.availableModes?.range?.progressiveTranscode;
+  return metadata?.streamMode === "range" && progress && !progress.complete;
 }
 
 function parseRange(rangeHeader, totalSize, metadata = {}) {

@@ -613,6 +613,7 @@ document.addEventListener("alpine:init", () => {
                   }
                   this.broadcastTranscodeProgress(100, Number(progress.size || this.playerSource?.size || 0));
                   this.finalizeProgressiveWatchRoomMetadata();
+                  this.promoteCompletedStableMp4Player(resource);
                   setTimeout(() => {
                     if (this.playerStatus === `${title} is fully transcoded.`) this.playerStatus = "";
                   }, 10000);
@@ -631,6 +632,42 @@ document.addEventListener("alpine:init", () => {
       };
       run();
       return { stop: () => { stopped = true; } };
+    },
+
+    promoteCompletedStableMp4Player(resource) {
+      if (!resource?.proxyPath || !this.playerUrl || !this.playerUrl.includes("linear=1")) return;
+      const video = document.getElementById("host-video-player");
+      const currentTime = video?.currentTime || 0;
+      const wasPaused = !video || video.paused;
+      const playbackRate = video?.playbackRate || 1;
+      this.suppressHostPlayerEvents = true;
+      this.playerUrl = this.connectorDirectUrl(`${resource.proxyPath}/transcoded`);
+      setTimeout(() => {
+        const upgraded = document.getElementById("host-video-player");
+        if (!upgraded) {
+          this.suppressHostPlayerEvents = false;
+          return;
+        }
+        upgraded.playbackRate = playbackRate;
+        const restorePosition = () => {
+          seekVideoTo(upgraded, currentTime);
+          if (!wasPaused) {
+            playVideoWhenReady(upgraded, 10000).catch(() => {});
+          }
+          setTimeout(() => {
+            this.suppressHostPlayerEvents = false;
+          }, 600);
+        };
+        if (upgraded.readyState === HTMLMediaElement.HAVE_NOTHING) {
+          upgraded.addEventListener("loadedmetadata", restorePosition, { once: true });
+          upgraded.load();
+        } else {
+          restorePosition();
+        }
+      }, 0);
+      setTimeout(() => {
+        this.suppressHostPlayerEvents = false;
+      }, 5000);
     },
 
     async setTranscodePlaybackMode(mode) {
@@ -960,7 +997,9 @@ document.addEventListener("alpine:init", () => {
       const transcodeDuration = Number(transcodeInfo.duration || mediaInfo?.duration || 0);
       const estimatedFinalSize = Number(transcodeInfo.estimatedFinalSize || mediaInfo?.size || resource.size || transcodeSize || 0);
       this.teardownHostHlsPlayer();
-      this.playerUrl = this.connectorDirectUrl(`${transcodePath}?progressive=1`);
+      this.playerUrl = this.connectorDirectUrl(
+        transcodeInfo.complete ? transcodePath : `${transcodePath}?progressive=1&linear=1`,
+      );
       this.playerType = "video/mp4";
       this.playerTitle = item.title;
       this.playerTranscodeComplete = Boolean(transcodeInfo.complete);
@@ -1657,7 +1696,8 @@ document.addEventListener("alpine:init", () => {
       const video = document.getElementById("host-video-player");
       if (!video) return;
       if (video.paused) {
-        playVideoWhenReady(video).catch(() => {
+        this.playerStatus = "Starting linear playback as Stable MP4 bytes arrive...";
+        playVideoWhenReady(video, 20000).catch(() => {
           this.playerStatus = "Playback is still preparing. Try again once the first bytes are buffered.";
         });
       } else {
@@ -2629,6 +2669,10 @@ document.addEventListener("alpine:init", () => {
         return;
       }
       const source = this.playerRoomRangeSource || (this.playerRoomSource?.readRange ? this.playerRoomSource : null);
+      if (message.linear && source?.progressiveTranscode) {
+        await this.streamWatchLinearProgressive(message, record, source, sourceVersion);
+        return;
+      }
       const totalSize = Number(
         (!source?.progressiveTranscode && source?.size)
         || this.playerRoomMetadata?.availableModes?.range?.size
@@ -2696,6 +2740,94 @@ document.addEventListener("alpine:init", () => {
           record.status = "Disconnected";
         } else {
           record.status = "Range failed";
+          this.error = error.message;
+        }
+        if (!isDataChannelClosedError(error) && isDataChannelOpen(channel)) {
+          sendChannelJson(channel, {
+            type: "range-error",
+            requestId,
+            sourceVersion,
+            error: error.message,
+          });
+        }
+      } finally {
+        record.cancelledRanges?.delete(requestId);
+      }
+    },
+
+    async streamWatchLinearProgressive(message, record, source, sourceVersion) {
+      const channel = record.channel;
+      const requestId = message.requestId;
+      const chunkSize = RANGE_STREAM_CHUNK_SIZE;
+      const rangeMd5 = new SparkMD5.ArrayBuffer();
+      let offset = 0;
+      let sentBytes = 0;
+      try {
+        if (!source?.readRange) {
+          throw new Error("The current watch room source does not support linear Stable MP4 playback.");
+        }
+        record.cancelledRanges?.delete(requestId);
+        while (!record.cancelledRanges?.has(requestId)) {
+          if (!isDataChannelOpen(channel)) throw dataChannelDisconnectedError();
+          const progress = this.playerRoomMetadata?.availableModes?.range?.progressiveTranscode
+            || this.playerRoomMetadata?.progressiveTranscode
+            || {};
+          const complete = !source.progressiveTranscode || this.playerTranscodeComplete || Boolean(progress.complete);
+          const availableBytes = Math.max(
+            Number(source.transcodedAvailableBytes || 0),
+            Number(progress.availableBytes || 0),
+            complete ? Number(source.size || 0) : 0,
+          );
+          if (offset >= availableBytes) {
+            if (complete) break;
+            record.status = `Waiting for Stable MP4 byte ${formatByteOffset(offset)}`;
+            await sleep(250);
+            continue;
+          }
+          const nextEndExclusive = Math.min(offset + chunkSize, availableBytes);
+          const plainChunk = exactArrayBuffer(await source.readRange(offset, nextEndExclusive));
+          if (!plainChunk.byteLength) {
+            if (complete) break;
+            await sleep(250);
+            continue;
+          }
+          rangeMd5.append(plainChunk);
+          const iv = crypto.getRandomValues(new Uint8Array(12));
+          const ciphertext = await crypto.subtle.encrypt(
+            { name: "AES-GCM", iv },
+            this.playerRoomKey,
+            plainChunk,
+          );
+          if (!sendChannelBinaryJson(channel, {
+            type: "range-chunk",
+            requestId,
+            start: offset,
+            end: offset + plainChunk.byteLength - 1,
+            sourceVersion,
+            iv: base64UrlEncode(iv),
+          }, ciphertext)) throw dataChannelDisconnectedError();
+          if (!(await waitForDataChannelBuffer(channel))) throw dataChannelDisconnectedError();
+          offset += plainChunk.byteLength;
+          sentBytes += plainChunk.byteLength;
+          record.sentBytes = (record.sentBytes || 0) + plainChunk.byteLength;
+          if (shouldUpdateChannelUi(record)) {
+            record.status = `Linear Stable MP4 ${formatByteOffset(sentBytes)}`;
+          }
+        }
+        if (!record.cancelledRanges?.has(requestId)) {
+          if (!sendChannelJson(channel, {
+            type: "range-done",
+            requestId,
+            sourceVersion,
+            md5: rangeMd5.end(),
+            sentBytes,
+          })) throw dataChannelDisconnectedError();
+        }
+      } catch (error) {
+        if (isDataChannelClosedError(error)) {
+          record.status = "Disconnected";
+        } else {
+          record.status = "Linear playback failed";
           this.error = error.message;
         }
         if (!isDataChannelClosedError(error) && isDataChannelOpen(channel)) {

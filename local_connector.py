@@ -1253,6 +1253,8 @@ def hls_playlist(resource_id: str, media_info: Dict[str, object], access_token: 
     for index in range(segment_count):
         start_time = index * segment_duration
         segment_length = max(0.1, min(segment_duration, duration - start_time))
+        if index > 0:
+            lines.append("#EXT-X-DISCONTINUITY")
         lines.append(f"#EXTINF:{segment_length:.3f},")
         lines.append(f"segments/{index}.ts{token_query}")
     lines.append("#EXT-X-ENDLIST")
@@ -1818,6 +1820,16 @@ def serve_growing_file_with_range(
     def current_file_size() -> int:
         return path.stat().st_size if path.exists() else 0
 
+    def wait_for_size(min_size: int, timeout: float = 30.0) -> bool:
+        started = time.monotonic()
+        while time.monotonic() - started < timeout:
+            if current_file_size() >= min_size:
+                return True
+            if not transcode_running(resource_id):
+                return current_file_size() >= min_size
+            time.sleep(0.1)
+        return False
+
     def content_range_total(current_size: int) -> str:
         if total_size > 0 and transcode_running(resource_id):
             return str(max(total_size, current_size))
@@ -1845,6 +1857,40 @@ def serve_growing_file_with_range(
             content_type=content_type,
         )
 
+    if request.args.get("linear") == "1":
+        if not wait_for_size(1):
+            return range_not_ready_response(current_file_size())
+
+        def generate_linear():
+            position = 0
+            with path.open("rb") as file:
+                while True:
+                    current_size = current_file_size()
+                    available = current_size - position
+                    if available > 0:
+                        file.seek(position)
+                        chunk = file.read(min(chunk_size, available))
+                        if chunk:
+                            position += len(chunk)
+                            yield chunk
+                            continue
+                    if not transcode_running(resource_id):
+                        break
+                    time.sleep(0.1)
+
+        headers = {
+            "Cache-Control": "no-store",
+            "X-Available-Bytes": str(current_file_size()),
+        }
+        if duration and duration > 0:
+            headers["X-Content-Duration"] = f"{duration:.3f}"
+        return Response(
+            stream_with_context(generate_linear()),
+            status=200,
+            headers=headers,
+            content_type=content_type,
+        )
+
     if open_range is None and request.headers.get("Range"):
         return Response("", status=416, headers={"Accept-Ranges": "bytes"}, content_type=content_type)
 
@@ -1866,16 +1912,6 @@ def serve_growing_file_with_range(
             },
             content_type=content_type,
         )
-
-    def wait_for_size(min_size: int, timeout: float = 30.0) -> bool:
-        started = time.monotonic()
-        while time.monotonic() - started < timeout:
-            if current_file_size() >= min_size:
-                return True
-            if not transcode_running(resource_id):
-                return current_file_size() >= min_size
-            time.sleep(0.1)
-        return False
 
     if not wait_for_size(start + 1):
         current_size = current_file_size()
