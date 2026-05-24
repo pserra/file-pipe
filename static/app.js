@@ -2430,9 +2430,14 @@ document.addEventListener("alpine:init", () => {
               action: "mute",
             });
           }
+          this.startPeerClockSync(record);
         };
         channel.onmessage = async (event) => {
           const message = JSON.parse(event.data);
+          if (message.type === "clock-pong") {
+            this.handlePeerClockPong(record, message);
+            return;
+          }
           if (message.type === "voice-state") {
             this.updateParticipantVoiceState(record, message);
             return;
@@ -2504,6 +2509,7 @@ document.addEventListener("alpine:init", () => {
           }
         };
         channel.onclose = () => {
+          this.stopPeerClockSync(record);
           if (record.status !== "Complete") record.status = "Disconnected";
         };
         channel.onerror = () => {
@@ -2534,6 +2540,47 @@ document.addEventListener("alpine:init", () => {
       } catch (error) {
         record.status = "Failed";
         this.error = error.message;
+      }
+    },
+
+    startPeerClockSync(record) {
+      this.stopPeerClockSync(record);
+      this.sendPeerClockPing(record);
+      record.clockSyncTimer = setInterval(() => this.sendPeerClockPing(record), CLOCK_SYNC_INTERVAL_MS);
+    },
+
+    stopPeerClockSync(record) {
+      if (record?.clockSyncTimer) {
+        clearInterval(record.clockSyncTimer);
+        record.clockSyncTimer = null;
+      }
+    },
+
+    sendPeerClockPing(record) {
+      if (!record?.channel || record.channel.readyState !== "open") return;
+      sendChannelJson(record.channel, {
+        type: "clock-ping",
+        sentAt: Date.now(),
+      });
+    },
+
+    handlePeerClockPong(record, message) {
+      const hostReceivedAt = Date.now();
+      const hostSentAt = Number(message.hostSentAt || 0);
+      const viewerReceivedAt = Number(message.viewerReceivedAt || 0);
+      const viewerSentAt = Number(message.viewerSentAt || 0);
+      if (!hostSentAt || !viewerReceivedAt || !viewerSentAt) return;
+      const rttMs = Math.max(0, (hostReceivedAt - hostSentAt) - Math.max(0, viewerSentAt - viewerReceivedAt));
+      const viewerClockOffsetMs = ((viewerReceivedAt - hostSentAt) + (viewerSentAt - hostReceivedAt)) / 2;
+      record.viewerClockOffsetMs = viewerClockOffsetMs;
+      record.clockRttMs = rttMs;
+      if (record.channel?.readyState === "open") {
+        sendChannelJson(record.channel, {
+          type: "clock-sync",
+          viewerClockOffsetMs,
+          rttMs,
+          sentAt: hostReceivedAt,
+        });
       }
     },
 
@@ -3515,6 +3562,7 @@ const P2P_CONFIG = {
 const DATA_CHANNEL_BUFFER_LOW_THRESHOLD = 2 * 1024 * 1024;
 const RANGE_STREAM_CHUNK_SIZE = 96 * 1024;
 const CHANNEL_UI_UPDATE_INTERVAL_MS = 500;
+const CLOCK_SYNC_INTERVAL_MS = 5000;
 const MSE_MAX_BUFFER_AHEAD_SECONDS = 24;
 const MSE_BACK_BUFFER_SECONDS = 8;
 const SYNC_BUFFER_SECONDS = 3;

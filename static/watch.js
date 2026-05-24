@@ -20,6 +20,9 @@ document.addEventListener("alpine:init", () => {
     pendingViewerControlAction: "",
     pendingViewerControlSentAt: 0,
     pendingViewerControlUntil: 0,
+    hostClockOffsetMs: 0,
+    hostClockRttMs: 0,
+    hostClockSynced: false,
     acknowledgementAccepted: false,
     pendingVideoRequest: false,
     pendingVideoRequestTimer: null,
@@ -1530,6 +1533,16 @@ document.addEventListener("alpine:init", () => {
           this.status = message.reason || "The host has not enabled playback control for you.";
           return;
         }
+        if (message.type === "clock-ping") {
+          this.handleClockPing(message);
+          return;
+        }
+        if (message.type === "clock-sync") {
+          this.hostClockOffsetMs = Number(message.viewerClockOffsetMs || 0);
+          this.hostClockRttMs = Math.max(0, Number(message.rttMs || 0));
+          this.hostClockSynced = true;
+          return;
+        }
         if (message.type === "voice-state" && message.role === "host") {
           this.handleHostVoiceState(message);
           return;
@@ -1630,6 +1643,21 @@ document.addEventListener("alpine:init", () => {
         });
     },
 
+    handleClockPing(message) {
+      if (!this.channel || this.channel.readyState !== "open") return;
+      const viewerReceivedAt = Date.now();
+      sendChannelJson(this.channel, {
+        type: "clock-pong",
+        hostSentAt: Number(message.sentAt || 0),
+        viewerReceivedAt,
+        viewerSentAt: Date.now(),
+      });
+    },
+
+    estimatedHostNow() {
+      return this.hostClockSynced ? Date.now() - this.hostClockOffsetMs : Date.now();
+    },
+
     applySourceUpdate(message) {
       this.metadata = message.metadata || this.metadata;
       this.sourceVersion = Number(this.metadata?.sourceVersion || this.sourceVersion || 0);
@@ -1721,29 +1749,33 @@ document.addEventListener("alpine:init", () => {
       const baseRate = message.playbackRate || 1;
       let targetTime = Number.isFinite(message.currentTime) ? Math.max(0, message.currentTime) : 0;
       if (!message.paused && Number.isFinite(message.sentAt)) {
-        const apparentLatency = clamp(Date.now() - message.sentAt, 0, MAX_SYNC_LATENCY_COMPENSATION_MS);
+        const apparentLatency = clamp(this.estimatedHostNow() - message.sentAt, 0, MAX_SYNC_LATENCY_COMPENSATION_MS);
         targetTime += apparentLatency / 1000 * baseRate;
       }
       const driftSeconds = targetTime - (video.currentTime || 0);
       const drift = Math.abs(driftSeconds);
+      if (message.paused) {
+        video.pause();
+        video.playbackRate = baseRate;
+        if (drift > PAUSE_SYNC_SEEK_THRESHOLD_SECONDS || message.reason === "seek" || String(message.reason || "").includes("pause")) {
+          seekVideoTo(video, targetTime);
+        }
+        return;
+      }
       const gentleTimeSync = message.reason === "time" && !message.paused;
-      if (gentleTimeSync && drift > 0.35 && drift <= 2.25) {
-        const nudge = Math.min(0.18, Math.max(0.04, drift * 0.08));
-        video.playbackRate = clamp(baseRate + Math.sign(driftSeconds) * nudge, 0.82, 1.18);
+      if (gentleTimeSync && drift > 0.25 && drift <= 1.25) {
+        const nudge = Math.min(0.1, Math.max(0.025, drift * 0.06));
+        video.playbackRate = clamp(baseRate + Math.sign(driftSeconds) * nudge, 0.9, 1.1);
       } else {
-        const correctionThreshold = gentleTimeSync ? 2.25 : 0.5;
+        const correctionThreshold = gentleTimeSync ? 1.25 : 0.35;
         if (drift > correctionThreshold || message.reason === "seek") {
           seekVideoTo(video, targetTime);
         }
         video.playbackRate = baseRate;
       }
-      if (message.paused) {
-        video.pause();
-      } else {
-        video.play().catch(() => {
-          this.status = "Host is playing. Press play if browser autoplay is blocked.";
-        });
-      }
+      video.play().catch(() => {
+        this.status = "Host is playing. Press play if browser autoplay is blocked.";
+      });
     },
 
     updateViewerPlaybackBuffer() {
@@ -1858,7 +1890,7 @@ document.addEventListener("alpine:init", () => {
       }
       const absoluteResumeAt = Number(message.resumeAt);
       const relativeDelay = Number(message.resumeDelayMs);
-      const absoluteDelay = Number.isFinite(absoluteResumeAt) ? absoluteResumeAt - Date.now() : NaN;
+      const absoluteDelay = Number.isFinite(absoluteResumeAt) ? absoluteResumeAt - this.estimatedHostNow() : NaN;
       const delay = Number.isFinite(absoluteDelay) && absoluteDelay >= -250 && absoluteDelay <= Math.max(500, relativeDelay + 750)
         ? Math.max(0, absoluteDelay)
         : Math.max(0, Number.isFinite(relativeDelay) ? relativeDelay - 350 : 0);
@@ -2016,6 +2048,7 @@ const SYNC_FORCE_AFTER_MS = 7000;
 const SYNC_READY_POLL_MS = 250;
 const SEEK_CONTROL_DEBOUNCE_MS = 450;
 const MAX_SYNC_LATENCY_COMPENSATION_MS = 1500;
+const PAUSE_SYNC_SEEK_THRESHOLD_SECONDS = 0.04;
 
 async function readChannelMessage(data) {
   if (typeof data === "string") return JSON.parse(data);
