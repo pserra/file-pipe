@@ -212,7 +212,7 @@ READ_AHEAD_SEQUENTIAL_GAP_BYTES = int(os.environ.get("FILE_PIPE_READ_AHEAD_SEQUE
 TRANSCODE_CACHE_VERSION = "v5"
 TRANSCODE_CACHE_DIR = Path(os.environ.get("FILE_PIPE_TRANSCODE_CACHE_DIR", "instance/transcodes"))
 HLS_SEGMENT_SECONDS = int(os.environ.get("FILE_PIPE_HLS_SEGMENT_SECONDS", "6"))
-HLS_PREFETCH_SEGMENTS = int(os.environ.get("FILE_PIPE_HLS_PREFETCH_SEGMENTS", "2"))
+HLS_PREFETCH_SEGMENTS = int(os.environ.get("FILE_PIPE_HLS_PREFETCH_SEGMENTS", "4"))
 HLS_ACCURATE_SEEK_WINDOW_SECONDS = float(os.environ.get("FILE_PIPE_HLS_ACCURATE_SEEK_WINDOW_SECONDS", "8"))
 HLS_SEGMENT_CACHE_VERSION = "hls-v2"
 PROGRESSIVE_TRANSCODE_START_PERCENT = int(os.environ.get("FILE_PIPE_PROGRESSIVE_TRANSCODE_START_PERCENT", "3"))
@@ -2221,6 +2221,7 @@ def create_connector_app(security: Optional[ConnectorSecurity] = None):
         try:
             media_info = cached_probe_media(url)
             info = hls_duration_info(media_info)
+            prefetch_hls_segments(resource_id, url, media_info, 0)
         except subprocess.TimeoutExpired:
             return jsonify({"error": "Timed out while probing media tracks."}), 504
         except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
@@ -2248,6 +2249,7 @@ def create_connector_app(security: Optional[ConnectorSecurity] = None):
         try:
             media_info = cached_probe_media(url)
             playlist = hls_playlist(resource_id, media_info, request.args.get("access_token", ""))
+            prefetch_hls_segments(resource_id, url, media_info, 0)
         except subprocess.TimeoutExpired:
             return jsonify({"error": "Timed out while probing media tracks."}), 504
         except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:

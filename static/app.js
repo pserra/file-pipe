@@ -1139,10 +1139,7 @@ document.addEventListener("alpine:init", () => {
         return;
       }
       if (window.Hls?.isSupported()) {
-        this.hostHls = new Hls({
-          enableWorker: true,
-          lowLatencyMode: false,
-        });
+        this.hostHls = new Hls(hlsBufferConfig());
         this.hostHls.on(Hls.Events.ERROR, (_event, data) => {
           if (data?.fatal) {
             this.error = data.details || "The segmented media player failed.";
@@ -1660,8 +1657,8 @@ document.addEventListener("alpine:init", () => {
       const video = document.getElementById("host-video-player");
       if (!video) return;
       if (video.paused) {
-        video.play().catch(() => {
-          this.playerStatus = "Press play again if the browser blocked playback.";
+        playVideoWhenReady(video).catch(() => {
+          this.playerStatus = "Playback is still preparing. Try again once the first bytes are buffered.";
         });
       } else {
         video.pause();
@@ -3676,6 +3673,53 @@ function seekVideoTo(video, targetTime) {
   } else {
     apply();
   }
+}
+
+function playVideoWhenReady(video, timeoutMs = 5000) {
+  if (!video) return Promise.reject(new Error("Video element is unavailable."));
+  const tryPlay = () => video.play();
+  if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+    return tryPlay();
+  }
+  video.load();
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => {
+      video.removeEventListener("canplay", onReady);
+      video.removeEventListener("loadeddata", onReady);
+      video.removeEventListener("error", onError);
+      clearTimeout(timer);
+    };
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      callback(value);
+    };
+    const onReady = () => {
+      tryPlay().then(
+        () => finish(resolve),
+        (error) => finish(reject, error),
+      );
+    };
+    const onError = () => finish(reject, new Error("Video failed while loading."));
+    const timer = setTimeout(() => finish(reject, new Error("Timed out waiting for video data.")), timeoutMs);
+    video.addEventListener("canplay", onReady, { once: true });
+    video.addEventListener("loadeddata", onReady, { once: true });
+    video.addEventListener("error", onError, { once: true });
+  });
+}
+
+function hlsBufferConfig() {
+  return {
+    enableWorker: true,
+    lowLatencyMode: false,
+    startFragPrefetch: true,
+    maxBufferLength: 60,
+    maxMaxBufferLength: 120,
+    backBufferLength: 30,
+    maxBufferHole: 0.75,
+  };
 }
 
 async function requestAudioInputStream(deviceId) {
