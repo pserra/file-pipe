@@ -1,8 +1,12 @@
+const WATCH_SESSION_TTL_MS = 8 * 60 * 60 * 1000;
+const WATCH_SESSION_STORAGE_PREFIX = "filePipeWatchSession:";
+
 document.addEventListener("alpine:init", () => {
   Alpine.data("watchRoom", (roomId) => ({
     roomId,
     viewerName: "",
     participantId: "",
+    sessionRestoreAttempted: false,
     key: null,
     metadata: null,
     selectedPlaybackMode: "",
@@ -63,6 +67,8 @@ document.addEventListener("alpine:init", () => {
     error: "",
 
     initWatchRoom() {
+      this.loadStoredWatchSession();
+      this.registerWatchSessionPersistence();
       navigator.serviceWorker?.addEventListener("message", (event) => this.handleWorkerMessage(event));
       window.addEventListener("offline", () => {
         this.networkOnline = false;
@@ -77,6 +83,86 @@ document.addEventListener("alpine:init", () => {
       this.refreshAudioDevices();
       this.startReceiveControlUnlocker();
       this.loadRoom();
+    },
+
+    registerWatchSessionPersistence() {
+      if (!this.$watch) return;
+      [
+        "viewerName",
+        "selectedPlaybackMode",
+        "acknowledgementAccepted",
+        "mediaVolume",
+        "participantVolume",
+        "voiceInputId",
+        "voiceOutputId",
+        "hostVoiceMuted",
+      ].forEach((property) => this.$watch(property, () => this.saveWatchSession()));
+    },
+
+    watchSessionStorageKey() {
+      return `${WATCH_SESSION_STORAGE_PREFIX}${this.roomId}`;
+    },
+
+    loadStoredWatchSession() {
+      try {
+        const raw = window.localStorage?.getItem(this.watchSessionStorageKey());
+        if (!raw) return;
+        const session = JSON.parse(raw);
+        if (!session || Number(session.expiresAt || 0) <= Date.now()) {
+          this.clearStoredWatchSession();
+          return;
+        }
+        this.applyStoredWatchSession(session);
+      } catch {
+        this.clearStoredWatchSession();
+      }
+    },
+
+    applyStoredWatchSession(session) {
+      if (typeof session.viewerName === "string") this.viewerName = session.viewerName.slice(0, 80);
+      if (typeof session.participantId === "string") this.participantId = session.participantId;
+      if (["range", "hls"].includes(session.selectedPlaybackMode)) {
+        this.selectedPlaybackMode = session.selectedPlaybackMode;
+      }
+      this.acknowledgementAccepted = Boolean(session.acknowledgementAccepted);
+      const mediaVolume = Number(session.mediaVolume);
+      const participantVolume = Number(session.participantVolume);
+      if (Number.isFinite(mediaVolume)) this.mediaVolume = clamp(mediaVolume, 0, 1);
+      if (Number.isFinite(participantVolume)) this.participantVolume = clamp(participantVolume, 0, 1);
+      if (typeof session.voiceInputId === "string") this.voiceInputId = session.voiceInputId;
+      if (typeof session.voiceOutputId === "string") this.voiceOutputId = session.voiceOutputId;
+      this.hostVoiceMuted = Boolean(session.hostVoiceMuted);
+      this.sessionRestoreAttempted = false;
+    },
+
+    saveWatchSession() {
+      try {
+        if (!this.viewerName && !this.participantId) return;
+        window.localStorage?.setItem(this.watchSessionStorageKey(), JSON.stringify({
+          version: 1,
+          savedAt: Date.now(),
+          expiresAt: Date.now() + WATCH_SESSION_TTL_MS,
+          participantId: this.participantId,
+          viewerName: this.viewerName,
+          selectedPlaybackMode: this.selectedPlaybackMode,
+          acknowledgementAccepted: this.acknowledgementAccepted,
+          mediaVolume: this.mediaVolume,
+          participantVolume: this.participantVolume,
+          voiceInputId: this.voiceInputId,
+          voiceOutputId: this.voiceOutputId,
+          hostVoiceMuted: this.hostVoiceMuted,
+        }));
+      } catch {
+        // Storage can be unavailable in private browsing or locked-down embeds.
+      }
+    },
+
+    clearStoredWatchSession() {
+      try {
+        window.localStorage?.removeItem(this.watchSessionStorageKey());
+      } catch {
+        // Ignore storage failures; reconnect can still proceed without persistence.
+      }
     },
 
     startReceiveControlUnlocker() {
@@ -107,7 +193,9 @@ document.addEventListener("alpine:init", () => {
         const message = response.status === 401
           ? "Authentication expired. Reload the watch page and sign in again."
           : payload.error || `Request failed with ${response.status}.`;
-        throw new Error(message);
+        const error = new Error(message);
+        error.status = response.status;
+        throw error;
       }
       if (!contentType.includes("application/json")) {
         throw new Error(`Expected JSON from ${path}, but received ${contentType || "a non-JSON response"}.`);
@@ -137,7 +225,23 @@ document.addEventListener("alpine:init", () => {
         );
         this.metadata = JSON.parse(new TextDecoder().decode(metadataBytes));
         this.sourceVersion = Number(this.metadata.sourceVersion || 0);
-        this.selectedPlaybackMode = this.defaultPlaybackMode();
+        if (!this.isPlaybackModeAvailable(this.selectedPlaybackMode)) {
+          this.selectedPlaybackMode = this.defaultPlaybackMode();
+        }
+        if (this.participantId) {
+          this.status = "Restoring your watch session...";
+          this.saveWatchSession();
+          if (!this.sessionRestoreAttempted) {
+            this.sessionRestoreAttempted = true;
+            setTimeout(() => {
+              this.reconnectToHost({
+                preservePendingRequest: this.pendingVideoRequest,
+                restoringSession: true,
+              });
+            }, 0);
+          }
+          return;
+        }
         this.status = "Enter your name to join the room.";
       } catch (error) {
         this.error = error.message;
@@ -182,6 +286,10 @@ document.addEventListener("alpine:init", () => {
 
     canSwitchPlaybackModes() {
       return this.availablePlaybackModes().length > 1;
+    },
+
+    isPlaybackModeAvailable(mode) {
+      return Boolean(this.availablePlaybackModes().find((item) => item.id === mode && !item.disabled));
     },
 
     playbackModeLabel() {
@@ -265,6 +373,7 @@ document.addEventListener("alpine:init", () => {
       this.pendingHlsBytes = {};
       this.viewerLinearPlaybackTime = 0;
       this.status = `${this.playbackModeLabel()} mode selected.`;
+      this.saveWatchSession();
       if (this.acknowledgementAccepted && this.channelReady) {
         setTimeout(() => this.requestVideo(), 100);
       }
@@ -281,6 +390,8 @@ document.addEventListener("alpine:init", () => {
         const payload = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(payload.error || `Could not join room: ${response.status}`);
         this.participantId = payload.participantId;
+        this.sessionRestoreAttempted = true;
+        this.saveWatchSession();
         this.logWatchEvent("joined", "Participant joined room.");
         this.status = "Waiting for host connection offer...";
         await this.waitForOfferAndAnswer();
@@ -292,7 +403,13 @@ document.addEventListener("alpine:init", () => {
     async waitForOfferAndAnswer() {
       for (let attempt = 0; attempt < 300; attempt += 1) {
         const participant = await this.appJson(`/api/watch/rooms/${this.roomId}/participants/${this.participantId}`);
-        if (participant.kicked) throw new Error("The host removed you from this watch room.");
+        if (participant.kicked) {
+          this.clearStoredWatchSession();
+          this.participantId = "";
+          const kickedError = new Error("The host removed you from this watch room.");
+          kickedError.status = 410;
+          throw kickedError;
+        }
         if (participant.offer) {
           await this.answerOffer(participant.offer);
           return;
@@ -357,6 +474,7 @@ document.addEventListener("alpine:init", () => {
       }
       this.channelReady = false;
       this.status = "Answer sent. You can acknowledge the video while the peer connection finishes.";
+      this.saveWatchSession();
       this.logWatchEvent("answer-sent", "Published WebRTC answer.");
       if (this.pendingVideoRequest) this.schedulePendingVideoReconnect();
     },
@@ -385,13 +503,30 @@ document.addEventListener("alpine:init", () => {
           headers: { Accept: "application/json" },
         });
         const payload = await response.json().catch(() => ({}));
-        if (!response.ok) throw new Error(payload.error || `Reconnect failed: ${response.status}`);
+        if (!response.ok) {
+          const reconnectError = new Error(payload.error || `Reconnect failed: ${response.status}`);
+          reconnectError.status = response.status;
+          throw reconnectError;
+        }
         this.status = "Reconnect requested. Waiting for host offer...";
         await this.waitForOfferAndAnswer();
         this.recoveryStatus = "Reconnected to signaling. Waiting for peer connection.";
         this.logWatchEvent("reconnect-complete", "Fresh answer published.");
         if (this.pendingVideoRequest) this.schedulePendingVideoReconnect();
       } catch (error) {
+        if (options.restoringSession && [404, 410].includes(error.status)) {
+          this.clearStoredWatchSession();
+          this.participantId = "";
+          this.channelReady = false;
+          this.pendingVideoRequest = false;
+          this.clearPendingVideoReconnect();
+          this.status = "Enter your name to join the room.";
+          this.error = error.status === 410
+            ? "The host removed your previous session. Enter a name to rejoin."
+            : "";
+          this.logWatchEvent("session-restore-missing", error.message);
+          return;
+        }
         this.error = error.message;
         this.logWatchEvent("reconnect-error", error.message);
       } finally {
@@ -451,6 +586,7 @@ document.addEventListener("alpine:init", () => {
           ? "Selected microphone was unavailable, so voice is using the default microphone. Reconnecting..."
           : "Voice is enabled. Reconnecting to include your microphone...";
         await this.refreshAudioDevices();
+        this.saveWatchSession();
         if (this.participantId) await this.reconnectToHost();
       } catch (error) {
         this.voiceEnabled = false;
@@ -463,6 +599,7 @@ document.addEventListener("alpine:init", () => {
     },
 
     async changeViewerVoiceInput() {
+      this.saveWatchSession();
       if (this.micStream) {
         await this.enableViewerVoice();
       }
@@ -495,6 +632,7 @@ document.addEventListener("alpine:init", () => {
       const audio = document.getElementById("viewer-voice-audio");
       await this.setMediaSink(video, this.voiceOutputId);
       await this.setMediaSink(audio, this.voiceOutputId);
+      this.saveWatchSession();
     },
 
     async setMediaSink(element, deviceId) {
@@ -529,6 +667,7 @@ document.addEventListener("alpine:init", () => {
         audio.muted = this.hostVoiceMuted;
       }
       if (this.hostVoiceMuted) this.hostVoiceLevel = 0;
+      this.saveWatchSession();
     },
 
     setViewerSelfMuted(muted) {
@@ -603,6 +742,7 @@ document.addEventListener("alpine:init", () => {
       this.voiceStatus = this.hostVoiceMuted
         ? "Host voice muted locally."
         : "Host voice unmuted locally.";
+      this.saveWatchSession();
     },
 
     publishViewerVoiceState(reason = "") {
@@ -867,7 +1007,10 @@ document.addEventListener("alpine:init", () => {
         this.status = this.isHlsStream() ? "Live stream player is already ready." : "Range player is already ready.";
         return;
       }
-      if (!this.acknowledgementAccepted) this.acknowledgementAccepted = true;
+      if (!this.acknowledgementAccepted) {
+        this.acknowledgementAccepted = true;
+        this.saveWatchSession();
+      }
       const hlsStream = this.isHlsStream();
       const playbackMetadata = this.playbackMetadata();
       if (!hlsStream && !playbackMetadata?.md5 && playbackMetadata?.checksumKind !== "original-source") {
@@ -1242,6 +1385,8 @@ document.addEventListener("alpine:init", () => {
           if (this.channel) this.channel.close();
           if (this.peer) this.peer.close();
           this.stopHostVoiceMeter();
+          this.clearStoredWatchSession();
+          this.participantId = "";
           return;
         }
         if (message.type === "video-start") {
