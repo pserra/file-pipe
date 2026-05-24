@@ -481,6 +481,13 @@ document.addEventListener("alpine:init", () => {
       this.status = "Answer sent. You can acknowledge the video while the peer connection finishes.";
       this.saveWatchSession();
       this.logWatchEvent("answer-sent", "Published WebRTC answer.");
+      const answeredPeer = this.peer;
+      setTimeout(() => {
+        if (this.peer !== answeredPeer || this.channelReady) return;
+        this.status = p2pConfigHasTurn()
+          ? "Still connecting to the host through the relay. Keep this page open."
+          : "Still connecting to the host. Cellular and strict networks usually need a TURN relay configured.";
+      }, 10000);
       if (this.pendingVideoRequest) this.schedulePendingVideoReconnect();
     },
 
@@ -1941,8 +1948,16 @@ document.addEventListener("alpine:init", () => {
 });
 
 const P2P_CONFIG = {
-  iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+  ...(window.FILE_PIPE_P2P_CONFIG || { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] }),
 };
+
+function p2pConfigHasTurn(config = P2P_CONFIG) {
+  return (config.iceServers || []).some((server) => {
+    const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
+    return urls.some((url) => String(url || "").startsWith("turn:") || String(url || "").startsWith("turns:"));
+  });
+}
+
 const CHANNEL_UI_UPDATE_INTERVAL_MS = 500;
 const MSE_MAX_BUFFER_AHEAD_SECONDS = 24;
 const MSE_BACK_BUFFER_SECONDS = 8;

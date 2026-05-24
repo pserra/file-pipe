@@ -262,7 +262,7 @@ document.addEventListener("alpine:init", () => {
 });
 
 const P2P_CONFIG = {
-  iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+  ...(window.FILE_PIPE_P2P_CONFIG || { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] }),
 };
 
 async function readChannelMessage(data) {

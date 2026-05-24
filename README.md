@@ -230,8 +230,9 @@ Important details:
 - The reusable development certificate and private key live under `ssl/` for source runs, or under the standalone app-data folder for packaged connector runs.
 - Generated certificates, virtualenvs, local share data, logs, dotenv files, and credentials are ignored by Git.
 - The Flask signaling state is in memory. Restarting the Flask process loses active share, watch room, and Bigscreen sessions.
+- Internet-to-home and cellular watch-room sessions may require a TURN relay. Configure one with `FILE_PIPE_TURN_URLS`, `FILE_PIPE_TURN_USERNAME`, and `FILE_PIPE_TURN_CREDENTIAL`.
 
-This is still development software. Before production use, add lifecycle cleanup, rate limits, request size limits, TURN relay support, and a deployment-specific authentication model if the Flask app is public.
+This is still development software. Before production use, add lifecycle cleanup, request size limits, and a deployment-specific authentication model if the Flask app is public.
 
 ## TLS notes
 
@@ -272,7 +273,24 @@ If DLNA discovery finds no servers:
 - Check local firewall rules for UDP multicast discovery and HTTP access to the DLNA server.
 - Run discovery again from the Local Connector tab.
 
-If WebRTC peers cannot connect, the network may require a TURN relay. STUN is configured, but TURN support is not implemented yet.
+If WebRTC peers cannot connect after the answer is sent, the network likely needs a TURN relay. This is common when a phone is on cellular and the host is behind a home router.
+
+Configure TURN with simple environment variables:
+
+```bash
+FILE_PIPE_STUN_URLS=stun:stun.l.google.com:19302
+FILE_PIPE_TURN_URLS=turn:turn.example.com:3478,turns:turn.example.com:5349
+FILE_PIPE_TURN_USERNAME=file-pipe
+FILE_PIPE_TURN_CREDENTIAL=replace-with-turn-password
+```
+
+For advanced providers that return a complete WebRTC config, use `FILE_PIPE_ICE_SERVERS_JSON` instead:
+
+```bash
+FILE_PIPE_ICE_SERVERS_JSON='[{"urls":"stun:stun.l.google.com:19302"},{"urls":["turn:turn.example.com:3478","turns:turn.example.com:5349"],"username":"file-pipe","credential":"replace-with-turn-password"}]'
+```
+
+Set `FILE_PIPE_ICE_TRANSPORT_POLICY=relay` temporarily if you want to force all WebRTC media/data through TURN while testing.
 
 ## Deployment
 

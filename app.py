@@ -1,5 +1,6 @@
 import argparse
 import hmac
+import json
 import os
 import secrets
 import time
@@ -62,6 +63,45 @@ def env_int(name: str, default: int) -> int:
         return int(value)
     except ValueError:
         return default
+
+
+def env_csv(name: str, default: str = "") -> list[str]:
+    value = os.environ.get(name, default)
+    return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def rtc_peer_config_from_env() -> dict:
+    raw_config = os.environ.get("FILE_PIPE_ICE_SERVERS_JSON", "").strip()
+    if raw_config:
+        try:
+            parsed = json.loads(raw_config)
+            if isinstance(parsed, dict):
+                return parsed
+            if isinstance(parsed, list):
+                return {"iceServers": parsed}
+        except json.JSONDecodeError:
+            pass
+
+    ice_servers = [{"urls": url} for url in env_csv("FILE_PIPE_STUN_URLS", "stun:stun.l.google.com:19302")]
+    turn_urls = env_csv("FILE_PIPE_TURN_URLS")
+    if turn_urls:
+        turn_server = {"urls": turn_urls if len(turn_urls) > 1 else turn_urls[0]}
+        turn_username = os.environ.get("FILE_PIPE_TURN_USERNAME", "").strip()
+        turn_credential = os.environ.get("FILE_PIPE_TURN_CREDENTIAL", "").strip()
+        if turn_username:
+            turn_server["username"] = turn_username
+        if turn_credential:
+            turn_server["credential"] = turn_credential
+        ice_servers.append(turn_server)
+
+    config = {"iceServers": ice_servers}
+    ice_policy = os.environ.get("FILE_PIPE_ICE_TRANSPORT_POLICY", "all").strip().lower()
+    if ice_policy in {"all", "relay"}:
+        config["iceTransportPolicy"] = ice_policy
+    pool_size = env_int("FILE_PIPE_ICE_CANDIDATE_POOL_SIZE", 0)
+    if pool_size > 0:
+        config["iceCandidatePoolSize"] = min(pool_size, 255)
+    return config
 
 
 @dataclass(frozen=True)
@@ -219,6 +259,10 @@ def create_app():
         if (static_root / filename).is_file():
             return url_for("static", filename=filename)
         return cdn_url
+
+    @app.template_global()
+    def p2p_config() -> dict:
+        return rtc_peer_config_from_env()
 
     @app.before_request
     def require_site_auth():

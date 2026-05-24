@@ -3508,7 +3508,7 @@ const TAB_ID_ROUTES = {
 };
 
 const P2P_CONFIG = {
-  iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+  ...(window.FILE_PIPE_P2P_CONFIG || { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] }),
 };
 const DATA_CHANNEL_BUFFER_LOW_THRESHOLD = 2 * 1024 * 1024;
 const RANGE_STREAM_CHUNK_SIZE = 96 * 1024;

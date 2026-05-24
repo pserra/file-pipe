@@ -31,7 +31,11 @@ ssh dokku@milkyway.place config:set file-pipe \
   FILE_PIPE_PUBLIC_ACCESS_RATE_LIMIT='120' \
   FILE_PIPE_PUBLIC_ACCESS_RATE_WINDOW_SECONDS='60' \
   FILE_PIPE_PUBLIC_ACCESS_RATE_LIMIT_DISABLED='false' \
-  FILE_PIPE_SESSION_COOKIE_SECURE='true'
+  FILE_PIPE_SESSION_COOKIE_SECURE='true' \
+  FILE_PIPE_STUN_URLS='stun:stun.l.google.com:19302' \
+  FILE_PIPE_TURN_URLS='turn:turn.example.com:3478,turns:turn.example.com:5349' \
+  FILE_PIPE_TURN_USERNAME='file-pipe' \
+  FILE_PIPE_TURN_CREDENTIAL='replace-with-turn-password'
 ```
 
 Generate values locally:
