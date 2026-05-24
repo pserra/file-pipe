@@ -3285,6 +3285,7 @@ document.addEventListener("alpine:init", () => {
       const video = document.getElementById("host-video-player");
       if (!video) return;
       const resumeDelayMs = SYNC_RESUME_DELAY_MS;
+      const sentAt = Date.now();
       const payload = {
         type: "resume-at",
         syncId,
@@ -3292,7 +3293,8 @@ document.addEventListener("alpine:init", () => {
         bufferSeconds: this.hostSyncBarrier.bufferSeconds,
         playbackRate: video.playbackRate || 1,
         resumeDelayMs,
-        resumeAt: Date.now() + resumeDelayMs,
+        resumeAt: sentAt + resumeDelayMs,
+        sentAt,
       };
       const resumePeers = this.connectedWatchPeers().filter((peer) => this.hostSyncBarrier.peerIds.has(peer.id));
       for (const record of resumePeers) {
@@ -3521,7 +3523,7 @@ const SYNC_RELAX_AFTER_MS = 3500;
 const SYNC_FORCE_AFTER_MS = 7000;
 const SYNC_READY_POLL_MS = 250;
 const SYNC_READY_TIMEOUT_MS = 9000;
-const SYNC_RESUME_DELAY_MS = 1200;
+const SYNC_RESUME_DELAY_MS = 700;
 const SEEK_SYNC_DEBOUNCE_MS = 450;
 
 function base64UrlEncode(bytes) {

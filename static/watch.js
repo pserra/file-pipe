@@ -1727,11 +1727,11 @@ document.addEventListener("alpine:init", () => {
       const driftSeconds = targetTime - (video.currentTime || 0);
       const drift = Math.abs(driftSeconds);
       const gentleTimeSync = message.reason === "time" && !message.paused;
-      if (gentleTimeSync && drift > 0.75 && drift <= 3.5) {
-        const nudge = Math.min(0.08, Math.max(0.025, drift * 0.035));
-        video.playbackRate = clamp(baseRate + Math.sign(driftSeconds) * nudge, 0.92, 1.08);
+      if (gentleTimeSync && drift > 0.35 && drift <= 2.25) {
+        const nudge = Math.min(0.18, Math.max(0.04, drift * 0.08));
+        video.playbackRate = clamp(baseRate + Math.sign(driftSeconds) * nudge, 0.82, 1.18);
       } else {
-        const correctionThreshold = gentleTimeSync ? 3.5 : 0.5;
+        const correctionThreshold = gentleTimeSync ? 2.25 : 0.5;
         if (drift > correctionThreshold || message.reason === "seek") {
           seekVideoTo(video, targetTime);
         }
@@ -1856,10 +1856,12 @@ document.addEventListener("alpine:init", () => {
         this.waitForLocalResumeBuffer(message, targetTime, bufferSeconds, Date.now());
         return;
       }
+      const absoluteResumeAt = Number(message.resumeAt);
       const relativeDelay = Number(message.resumeDelayMs);
-      const delay = Number.isFinite(relativeDelay)
-        ? Math.max(0, relativeDelay)
-        : Math.max(0, Number(message.resumeAt || Date.now()) - Date.now());
+      const absoluteDelay = Number.isFinite(absoluteResumeAt) ? absoluteResumeAt - Date.now() : NaN;
+      const delay = Number.isFinite(absoluteDelay) && absoluteDelay >= -250 && absoluteDelay <= Math.max(500, relativeDelay + 750)
+        ? Math.max(0, absoluteDelay)
+        : Math.max(0, Number.isFinite(relativeDelay) ? relativeDelay - 350 : 0);
       this.lastSyncLabel = new Date().toLocaleTimeString();
       this.status = "Synchronized resume scheduled.";
       setTimeout(() => {

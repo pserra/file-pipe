@@ -12,7 +12,7 @@
     <script defer src="{{ local_static_or_cdn('vendor/three/three.min.js', 'https://cdn.jsdelivr.net/npm/three@0.160.1/build/three.min.js') }}"></script>
     <script defer src="{{ url_for('static', filename='xr-player.js', v='4') }}"></script>
     <script>window.FILE_PIPE_P2P_CONFIG = {{ p2p_config()|tojson }};</script>
-    <script defer src="{{ url_for('static', filename='watch.js', v='50') }}"></script>
+    <script defer src="{{ url_for('static', filename='watch.js', v='51') }}"></script>
     <script defer src="{{ local_static_or_cdn('vendor/alpinejs/cdn.min.js', 'https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js') }}"></script>
   </head>
   <body class="app-body" x-data="watchRoom('{{ room_id }}')" x-init="initWatchRoom()">
