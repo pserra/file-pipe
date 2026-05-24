@@ -202,6 +202,7 @@ RESOURCE_CACHE: Dict[str, object] = {}
 RESOURCE_METADATA_CACHE: Dict[str, Dict[str, object]] = {}
 CHECKSUM_CACHE: Dict[str, Dict[str, object]] = {}
 MEDIA_INFO_CACHE: Dict[str, Dict[str, object]] = {}
+RESOURCE_CHECKSUM_CACHE: Dict[str, Dict[str, object]] = {}
 LOCAL_DIRECTORY_FILE = Path(os.environ.get("FILE_PIPE_DIRECTORIES_FILE", "instance/served_directories.json"))
 PLAYABLE_BROWSER_AUDIO_CODECS = {"aac", "mp3", "opus", "vorbis", "flac", "alac"}
 PLAYABLE_BROWSER_VIDEO_CODECS = {"h264"}
@@ -1201,27 +1202,110 @@ def build_hls_segment_command(
     return command
 
 
-def transcode_cache_path(resource_id: str, url: str) -> Path:
+def source_transcode_cache_path(resource_id: str, url: str) -> Path:
     url_hash = hashlib.sha256(f"{TRANSCODE_CACHE_VERSION}:{url}".encode("utf-8")).hexdigest()[:16]
     return TRANSCODE_CACHE_DIR / f"{resource_id}-{url_hash}.mp4"
 
 
-def transcode_part_path(resource_id: str, url: str) -> Path:
-    return transcode_cache_path(resource_id, url).with_suffix(".part.mp4")
-
-
-def transcoded_file_cached(resource_id: str, url: str) -> bool:
-    path = transcode_cache_path(resource_id, url)
-    return path.exists() and path.stat().st_size > 0
-
-
-def hls_cache_dir(resource_id: str, url: str) -> Path:
+def source_hls_cache_dir(resource_id: str, url: str) -> Path:
     url_hash = hashlib.sha256(f"{TRANSCODE_CACHE_VERSION}:{HLS_SEGMENT_CACHE_VERSION}:{HLS_SEGMENT_SECONDS}:{url}".encode("utf-8")).hexdigest()[:16]
     return TRANSCODE_CACHE_DIR / f"{resource_id}-{url_hash}-hls"
 
 
+def cached_resource_md5(resource_id: str) -> str:
+    cached = RESOURCE_CHECKSUM_CACHE.get(resource_id) or RESOURCE_METADATA_CACHE.get(resource_id, {})
+    return str(cached.get("md5") or "").strip().lower()
+
+
+def md5_transcode_cache_path(md5: str) -> Path:
+    return TRANSCODE_CACHE_DIR / f"md5-{TRANSCODE_CACHE_VERSION}-{md5}.mp4"
+
+
+def md5_hls_cache_dir(md5: str) -> Path:
+    return TRANSCODE_CACHE_DIR / f"md5-{TRANSCODE_CACHE_VERSION}-{HLS_SEGMENT_CACHE_VERSION}-{HLS_SEGMENT_SECONDS}s-{md5}-hls"
+
+
+def transcode_cache_candidates(resource_id: str, url: str) -> List[Path]:
+    candidates: List[Path] = []
+    md5 = cached_resource_md5(resource_id)
+    if md5:
+        candidates.append(md5_transcode_cache_path(md5))
+    candidates.append(source_transcode_cache_path(resource_id, url))
+    return candidates
+
+
+def hls_cache_candidates(resource_id: str, url: str) -> List[Path]:
+    candidates: List[Path] = []
+    md5 = cached_resource_md5(resource_id)
+    if md5:
+        candidates.append(md5_hls_cache_dir(md5))
+    candidates.append(source_hls_cache_dir(resource_id, url))
+    return candidates
+
+
+def transcode_cache_path(resource_id: str, url: str) -> Path:
+    for path in transcode_cache_candidates(resource_id, url):
+        if path.exists() and path.stat().st_size > 0:
+            return path
+    return transcode_cache_candidates(resource_id, url)[0]
+
+
+def transcode_part_candidates(resource_id: str, url: str) -> List[Path]:
+    return [path.with_suffix(".part.mp4") for path in transcode_cache_candidates(resource_id, url)]
+
+
+def transcode_part_path(resource_id: str, url: str) -> Path:
+    for path in transcode_part_candidates(resource_id, url):
+        if path.exists() and path.stat().st_size > 0:
+            return path
+    return transcode_part_candidates(resource_id, url)[0]
+
+
+def transcoded_file_cached(resource_id: str, url: str) -> bool:
+    return any(path.exists() and path.stat().st_size > 0 for path in transcode_cache_candidates(resource_id, url))
+
+
+def hls_cache_dir(resource_id: str, url: str) -> Path:
+    for path in hls_cache_candidates(resource_id, url):
+        if path.exists():
+            return path
+    return hls_cache_candidates(resource_id, url)[0]
+
+
 def hls_segment_path(resource_id: str, url: str, segment_index: int) -> Path:
     return hls_cache_dir(resource_id, url) / f"segment-{segment_index:06d}.ts"
+
+
+def remember_resource_checksum(resource_id: str, checksum: Dict[str, object]) -> None:
+    md5 = str(checksum.get("md5") or "").strip().lower()
+    if not md5:
+        return
+    RESOURCE_CHECKSUM_CACHE[resource_id] = {**checksum, "md5": md5}
+    RESOURCE_METADATA_CACHE.setdefault(resource_id, {})["md5"] = md5
+    descriptor = resource_descriptor(resource_id)
+    if descriptor:
+        alias_transcode_cache_by_md5(resource_id, resource_probe_target(resource_id) or "", md5)
+
+
+def link_or_copy_file(source: Path, destination: Path) -> None:
+    if destination.exists() or not source.exists():
+        return
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.link(source, destination)
+    except OSError:
+        shutil.copy2(source, destination)
+
+
+def alias_transcode_cache_by_md5(resource_id: str, url: str, md5: str) -> None:
+    if not url or not md5:
+        return
+    source_path = source_transcode_cache_path(resource_id, url)
+    md5_path = md5_transcode_cache_path(md5)
+    if source_path.exists() and source_path.stat().st_size > 0:
+        link_or_copy_file(source_path, md5_path)
+    elif md5_path.exists() and md5_path.stat().st_size > 0:
+        link_or_copy_file(md5_path, source_path)
 
 
 def hls_duration_info(media_info: Dict[str, object]) -> Dict[str, object]:
@@ -1383,8 +1467,9 @@ def progressive_transcode_details(resource_id: str, fallback_size: Optional[int]
 
 
 def transcode_artifact(resource_id: str, url: str) -> Optional[Dict[str, object]]:
-    path = transcode_cache_path(resource_id, url)
-    if path.exists() and path.stat().st_size > 0:
+    for path in transcode_cache_candidates(resource_id, url):
+        if not path.exists() or path.stat().st_size <= 0:
+            continue
         stat = path.stat()
         return {
             "path": str(path),
@@ -1393,8 +1478,9 @@ def transcode_artifact(resource_id: str, url: str) -> Optional[Dict[str, object]
             "cached": True,
             "complete": True,
         }
-    part_path = transcode_part_path(resource_id, url)
-    if part_path.exists() and part_path.stat().st_size > 0:
+    for part_path in transcode_part_candidates(resource_id, url):
+        if not part_path.exists() or part_path.stat().st_size <= 0:
+            continue
         stat = part_path.stat()
         return {
             "path": str(part_path),
@@ -1538,6 +1624,7 @@ def start_transcoded_file(resource_id: str, url: str, media_info: Dict[str, obje
                 remux_fragmented_mp4_to_faststart(part_path, path, ffmpeg_path)
                 if part_path.exists():
                     part_path.unlink()
+                alias_transcode_cache_by_md5(resource_id, url, cached_resource_md5(resource_id))
                 stat = path.stat()
                 update_transcode_progress(resource_id, status="complete", percent=100, size=stat.st_size, progressive=False)
             except Exception:
@@ -1580,6 +1667,7 @@ def ensure_transcoded_file(resource_id: str, url: str, media_info: Dict[str, obj
     with lock:
         if path.exists() and path.stat().st_size > 0:
             stat = path.stat()
+            alias_transcode_cache_by_md5(resource_id, url, cached_resource_md5(resource_id))
             update_transcode_progress(resource_id, status="cached", percent=100, size=stat.st_size)
             return {
                 "path": str(path),
@@ -1606,6 +1694,7 @@ def ensure_transcoded_file(resource_id: str, url: str, media_info: Dict[str, obj
             try:
                 run_transcode_command(command, temp_path, resource_id, parse_float(media_info.get("duration")))
                 temp_path.replace(path)
+                alias_transcode_cache_by_md5(resource_id, url, cached_resource_md5(resource_id))
             except Exception:
                 if temp_path.exists():
                     temp_path.unlink()
@@ -1681,9 +1770,13 @@ def checksum_resource(resource_id: str) -> Optional[Dict[str, object]]:
         path = Path(str(descriptor["path"]))
         if not path.exists() or not path.is_file():
             raise FileNotFoundError("Local file is no longer available.")
-        return checksum_file(path)
+        result = checksum_file(path)
+        remember_resource_checksum(resource_id, result)
+        return result
     metadata = RESOURCE_METADATA_CACHE.get(resource_id, {})
-    return checksum_url(str(descriptor["url"]), metadata.get("size"))
+    result = checksum_url(str(descriptor["url"]), metadata.get("size"))
+    remember_resource_checksum(resource_id, result)
+    return result
 
 
 def parse_range_header(range_header: str, file_size: int) -> Optional[Tuple[int, int]]:

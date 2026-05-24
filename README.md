@@ -214,7 +214,7 @@ For file shares and watch rooms:
 
 The sender tab must stay open until transfers complete.
 
-When a DLNA video's default audio track is not browser-playable, the local connector can transcode it once to a cached MP4/AAC file under `instance/transcodes/`. The player, watch rooms, and Bigscreen links then use that stable cached file for checksum and range-based streaming.
+When a DLNA video's default audio track is not browser-playable, the local connector can transcode it once to a cached MP4/AAC file under `instance/transcodes/`. The standalone connector uses its configured cache folder instead. Completed transcodes keep a stable source-key cache path and, once the source MD5 is known, an MD5-keyed cache alias so the same cached file can be reused across connector restarts. The player, watch rooms, and Bigscreen links then use that stable cached file for checksum and range-based streaming.
 
 ## Security model
 
