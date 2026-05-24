@@ -5,6 +5,7 @@ document.addEventListener("alpine:init", () => {
     participantId: "",
     key: null,
     metadata: null,
+    selectedPlaybackMode: "",
     sourceVersion: 0,
     peer: null,
     channel: null,
@@ -135,10 +136,99 @@ document.addEventListener("alpine:init", () => {
         );
         this.metadata = JSON.parse(new TextDecoder().decode(metadataBytes));
         this.sourceVersion = Number(this.metadata.sourceVersion || 0);
+        this.selectedPlaybackMode = this.defaultPlaybackMode();
         this.status = "Enter your name to join the room.";
       } catch (error) {
         this.error = error.message;
         this.status = "";
+      }
+    },
+
+    defaultPlaybackMode(metadata = this.metadata) {
+      if (!metadata) return "range";
+      if (metadata.streamMode === "hls" || metadata.playbackProfile?.sourceKind === "hls-live" || String(metadata.type || "").includes("mpegurl")) {
+        return "hls";
+      }
+      return "range";
+    },
+
+    availablePlaybackModes() {
+      if (!this.metadata) return [];
+      const modes = this.metadata.availableModes || {};
+      const result = [];
+      if (modes.range || this.defaultPlaybackMode(this.metadata) === "range") {
+        result.push({ id: "range", label: "Watch", description: "More metadata and scrubbing" });
+      }
+      if (modes.hls || this.defaultPlaybackMode(this.metadata) === "hls") {
+        result.push({ id: "hls", label: "Stream", description: "More compatible playback" });
+      }
+      return result;
+    },
+
+    canSwitchPlaybackModes() {
+      return this.availablePlaybackModes().length > 1;
+    },
+
+    playbackModeLabel() {
+      return this.selectedPlaybackMode === "hls" ? "Stream" : "Watch";
+    },
+
+    playbackMetadata() {
+      const metadata = this.metadata || {};
+      const mode = this.selectedPlaybackMode || this.defaultPlaybackMode(metadata);
+      const modes = metadata.availableModes || {};
+      if (mode === "hls" && modes.hls) {
+        return {
+          ...metadata,
+          ...modes.hls,
+          name: metadata.name,
+          md5: "",
+          checksumKind: "hls-segments",
+          streamMode: "hls",
+          hls: modes.hls.hls || metadata.hls,
+          progressiveTranscode: null,
+          availableModes: modes,
+          sourceVersion: metadata.sourceVersion,
+        };
+      }
+      if (mode === "range" && modes.range) {
+        return {
+          ...metadata,
+          ...modes.range,
+          name: metadata.name,
+          streamMode: "range",
+          hls: null,
+          progressiveTranscode: modes.range.progressiveTranscode || metadata.progressiveTranscode,
+          availableModes: modes,
+          sourceVersion: metadata.sourceVersion,
+        };
+      }
+      return metadata;
+    },
+
+    setPlaybackMode(mode) {
+      if (!this.availablePlaybackModes().some((item) => item.id === mode) || this.selectedPlaybackMode === mode) return;
+      this.selectedPlaybackMode = mode;
+      this.teardownViewerHlsPlayer();
+      this.detachViewerXrPlayer();
+      const video = document.getElementById("viewer-video-player");
+      if (video) {
+        video.pause();
+        video.removeAttribute("src");
+        video.load();
+      }
+      if (this.videoUrl && this.videoUrl.startsWith("blob:")) URL.revokeObjectURL(this.videoUrl);
+      this.videoUrl = "";
+      this.streamingReady = false;
+      this.receiving = false;
+      this.receivedBytes = 0;
+      this.progress = 0;
+      this.pendingRangeMd5 = {};
+      this.pendingRangeBytes = {};
+      this.pendingHlsBytes = {};
+      this.status = `${this.playbackModeLabel()} mode selected.`;
+      if (this.acknowledgementAccepted && this.channelReady) {
+        setTimeout(() => this.requestVideo(), 100);
       }
     },
 
@@ -656,9 +746,10 @@ document.addEventListener("alpine:init", () => {
     },
 
     isHlsStream() {
-      return this.metadata?.streamMode === "hls"
-        || this.metadata?.playbackProfile?.sourceKind === "hls-live"
-        || String(this.metadata?.type || "").includes("mpegurl");
+      const metadata = this.playbackMetadata();
+      return metadata?.streamMode === "hls"
+        || metadata?.playbackProfile?.sourceKind === "hls-live"
+        || String(metadata?.type || "").includes("mpegurl");
     },
 
     async waitForViewerVideoElement(timeoutMs = 2000) {
@@ -696,15 +787,16 @@ document.addEventListener("alpine:init", () => {
       }
       if (!this.acknowledgementAccepted) this.acknowledgementAccepted = true;
       const hlsStream = this.isHlsStream();
-      if (!hlsStream && !this.metadata?.md5 && this.metadata?.checksumKind !== "original-source") {
+      const playbackMetadata = this.playbackMetadata();
+      if (!hlsStream && !playbackMetadata?.md5 && playbackMetadata?.checksumKind !== "original-source") {
         this.error = "The host has not published an MD5 for this video yet.";
         this.logWatchEvent("video-request-blocked", "Missing MD5 metadata.");
         return;
       }
-      if (!hlsStream && this.metadata?.progressiveTranscode && !this.metadata.progressiveTranscode.complete) {
+      if (!hlsStream && playbackMetadata?.progressiveTranscode && !playbackMetadata.progressiveTranscode.complete) {
         this.pendingVideoRequest = true;
         this.error = "";
-        const percent = Math.round(Number(this.metadata.progressiveTranscode.percent || 0));
+        const percent = Math.round(Number(playbackMetadata.progressiveTranscode.percent || 0));
         this.status = percent > 0
           ? `Stable MP4 is still transcoding (${percent}%). Playback will start when it is ready.`
           : "Stable MP4 is still transcoding. Playback will start when it is ready.";
@@ -744,9 +836,9 @@ document.addEventListener("alpine:init", () => {
         navigator.serviceWorker.controller.postMessage({
           type: "watch-metadata",
           sessionId: this.roomId,
-          metadata: plainData(this.metadata),
+          metadata: plainData(playbackMetadata),
         });
-        const fileName = hlsStream ? "playlist.m3u8" : encodeURIComponent(this.metadata.name || "video");
+        const fileName = hlsStream ? "playlist.m3u8" : encodeURIComponent(playbackMetadata.name || "video");
         this.videoUrl = `/watch-media/${this.roomId}/${fileName}`;
         this.streamingReady = true;
         const video = await this.waitForViewerVideoElement();
@@ -1152,6 +1244,7 @@ document.addEventListener("alpine:init", () => {
     applySourceUpdate(message) {
       this.metadata = message.metadata || this.metadata;
       this.sourceVersion = Number(this.metadata?.sourceVersion || this.sourceVersion || 0);
+      this.selectedPlaybackMode = this.defaultPlaybackMode();
       this.teardownViewerHlsPlayer();
       this.detachViewerXrPlayer();
       const video = document.getElementById("viewer-video-player");
@@ -1189,8 +1282,16 @@ document.addEventListener("alpine:init", () => {
       this.metadata.progressiveTranscode = {
         percent,
         availableBytes: Math.max(0, Number(message.availableBytes || 0)),
+        estimatedFinalSize: Math.max(0, Number(message.estimatedFinalSize || this.metadata.progressiveTranscode?.estimatedFinalSize || this.metadata.size || 0)),
+        duration: Math.max(0, Number(message.duration || this.metadata.progressiveTranscode?.duration || this.metadata.mediaInfo?.duration || 0)),
         complete: Boolean(message.complete) || percent >= 100,
       };
+      if (this.metadata.availableModes?.range) {
+        this.metadata.availableModes.range.progressiveTranscode = this.metadata.progressiveTranscode;
+        if (this.metadata.progressiveTranscode.estimatedFinalSize) {
+          this.metadata.availableModes.range.size = this.metadata.progressiveTranscode.estimatedFinalSize;
+        }
+      }
       this.clampViewerProgressiveSeek();
       if (wasIncomplete && this.metadata.progressiveTranscode.complete && this.pendingVideoRequest && !this.videoUrl) {
         this.status = "Stable MP4 is ready. Starting playback...";

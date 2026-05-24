@@ -67,6 +67,8 @@ document.addEventListener("alpine:init", () => {
     playerRoomKeyText: "",
     playerRoomMetadata: null,
     playerRoomSource: null,
+    playerRoomRangeSource: null,
+    playerRoomHlsSource: null,
     playerPollActive: false,
     playerPollToken: 0,
     playerRoomCreating: false,
@@ -595,6 +597,7 @@ document.addEventListener("alpine:init", () => {
                 this.playerStatus = `${status} ${title}... ${percent}%`;
                 this.playerTranscodeAvailablePercent = percent;
                 if (this.playerSource && progress.size) this.playerSource.transcodedAvailableBytes = Number(progress.size);
+                if (this.playerSource && progress.estimatedFinalSize) this.playerSource.estimatedFinalSize = Number(progress.estimatedFinalSize);
                 this.broadcastTranscodeProgress(percent, Number(progress.size || 0));
                 if (progress.cached || progress.complete || percent >= 100) {
                   this.playerStatus = `${title} is fully transcoded.`;
@@ -952,6 +955,8 @@ document.addEventListener("alpine:init", () => {
       const progress = transcodeInfo.progress || {};
       this.playerTranscodeAvailablePercent = transcodeInfo.complete ? 100 : Number(progress.percent || 0);
       const transcodeSize = Number(transcodeInfo.size || 0);
+      const transcodeDuration = Number(transcodeInfo.duration || mediaInfo?.duration || 0);
+      const estimatedFinalSize = Number(transcodeInfo.estimatedFinalSize || mediaInfo?.size || resource.size || transcodeSize || 0);
       this.teardownHostHlsPlayer();
       this.playerUrl = this.connectorDirectUrl(`${transcodePath}?progressive=1`);
       this.playerType = "video/mp4";
@@ -967,7 +972,8 @@ document.addEventListener("alpine:init", () => {
         progressiveTranscode: !transcodeInfo.complete,
         progressiveTranscodePercent: this.playerTranscodeAvailablePercent,
         transcodedAvailableBytes: transcodeSize,
-        estimatedFinalSize: Number(mediaInfo?.size || resource.size || transcodeSize || 0),
+        estimatedFinalSize,
+        duration: transcodeDuration,
         shareDisabledReason: "",
         checksumPath: `${transcodePath}/checksum`,
         readRange: async (start, endExclusive) => {
@@ -991,7 +997,7 @@ document.addEventListener("alpine:init", () => {
             headers: this.connectorHeaders(),
           });
           if (!response.ok) throw new Error(`Connector returned ${response.status} for transcoded video.`);
-          const totalBytes = Number(response.headers.get("Content-Length") || transcodeSize || 0);
+          const totalBytes = Number(response.headers.get("Content-Length") || estimatedFinalSize || transcodeSize || 0);
           return {
             totalBytes,
             stream: response.body,
@@ -1303,6 +1309,8 @@ document.addEventListener("alpine:init", () => {
       this.playerRoomKeyText = "";
       this.playerRoomMetadata = null;
       this.playerRoomSource = null;
+      this.playerRoomRangeSource = null;
+      this.playerRoomHlsSource = null;
       if (this.qrModalUrl) this.closeQrModal();
     },
 
@@ -1708,6 +1716,17 @@ document.addEventListener("alpine:init", () => {
         throw new Error("Create a watch room before publishing source metadata.");
       }
       const isHlsLive = Boolean(source.hlsLive && source.readHlsSegment);
+      const rangeSource = source.readRange ? source : (this.playerSource?.readRange ? this.playerSource : null);
+      let hlsSource = isHlsLive ? source : null;
+      if (!hlsSource && this.canCreateLiveWatchRoom()) {
+        try {
+          hlsSource = await this.liveWatchSourceForCurrentPlayer();
+        } catch (error) {
+          hlsSource = null;
+        }
+      }
+      this.playerRoomRangeSource = rangeSource;
+      this.playerRoomHlsSource = hlsSource;
       const hashResult = isHlsLive
         ? {
             md5: "",
@@ -1720,6 +1739,13 @@ document.addEventListener("alpine:init", () => {
           }, source);
       this.playerSourceVersion += 1;
       this.playerRoomSource = source;
+      const rangeProgressive = rangeSource?.progressiveTranscode ? {
+        percent: Number(this.playerTranscodeAvailablePercent || 0),
+        availableBytes: Number(rangeSource.transcodedAvailableBytes || rangeSource.size || 0),
+        estimatedFinalSize: Number(rangeSource.estimatedFinalSize || rangeSource.size || 0),
+        duration: Number(rangeSource.duration || rangeSource.mediaInfo?.duration || 0),
+        complete: false,
+      } : null;
       this.playerRoomMetadata = {
         name: source.title,
         type: source.type || "video/mp4",
@@ -1742,11 +1768,31 @@ document.addEventListener("alpine:init", () => {
           segmentDuration: Number(source.hlsInfo?.segmentDuration || 8),
           segmentCount: Number(source.hlsInfo?.segmentCount || 0),
         } : null,
-        progressiveTranscode: source.progressiveTranscode ? {
-          percent: Number(this.playerTranscodeAvailablePercent || 0),
-          availableBytes: Number(source.transcodedAvailableBytes || source.size || 0),
-          complete: false,
-        } : null,
+        progressiveTranscode: rangeProgressive,
+        availableModes: {
+          range: rangeSource ? {
+            label: "Watch",
+            streamMode: "range",
+            type: rangeSource.type || "video/mp4",
+            size: Number(rangeSource.estimatedFinalSize || rangeSource.size || hashResult.totalBytes || 0),
+            playbackProfile: rangeSource.playbackProfile || null,
+            mediaInfo: mediaInfoSummary(rangeSource.mediaInfo),
+            progressiveTranscode: rangeProgressive,
+          } : null,
+          hls: hlsSource ? {
+            label: "Stream",
+            streamMode: "hls",
+            type: "application/vnd.apple.mpegurl",
+            size: Number(hlsSource.size || 0),
+            playbackProfile: hlsSource.playbackProfile || null,
+            mediaInfo: mediaInfoSummary(hlsSource.mediaInfo),
+            hls: {
+              duration: Number(hlsSource.hlsInfo?.duration || hlsSource.mediaInfo?.duration || 0),
+              segmentDuration: Number(hlsSource.hlsInfo?.segmentDuration || 8),
+              segmentCount: Number(hlsSource.hlsInfo?.segmentCount || 0),
+            },
+          } : null,
+        },
       };
       const metadataIv = crypto.getRandomValues(new Uint8Array(12));
       const encryptedMetadata = await crypto.subtle.encrypt(
@@ -1940,6 +1986,8 @@ document.addEventListener("alpine:init", () => {
           progressiveTranscode: this.playerSource.progressiveTranscode ? {
             percent: Number(this.playerTranscodeAvailablePercent || 0),
             availableBytes: Number(this.playerSource.transcodedAvailableBytes || this.playerSource.size || 0),
+            estimatedFinalSize: Number(this.playerSource.estimatedFinalSize || this.playerSource.size || 0),
+            duration: Number(this.playerSource.duration || this.playerSource.mediaInfo?.duration || 0),
             complete: false,
           } : null,
         };
@@ -2099,13 +2147,23 @@ document.addEventListener("alpine:init", () => {
       this.playerRoomMetadata.progressiveTranscode = {
         percent: normalizedPercent,
         availableBytes: normalizedBytes,
+        estimatedFinalSize: Number(this.playerSource?.estimatedFinalSize || this.playerRoomMetadata?.size || 0),
+        duration: Number(this.playerSource?.duration || this.playerRoomMetadata?.mediaInfo?.duration || 0),
         complete: normalizedPercent >= 100,
       };
+      if (this.playerRoomMetadata.availableModes?.range) {
+        this.playerRoomMetadata.availableModes.range.progressiveTranscode = this.playerRoomMetadata.progressiveTranscode;
+        if (this.playerRoomMetadata.progressiveTranscode.estimatedFinalSize) {
+          this.playerRoomMetadata.availableModes.range.size = this.playerRoomMetadata.progressiveTranscode.estimatedFinalSize;
+        }
+      }
       for (const record of this.connectedWatchPeers()) {
         sendChannelJson(record.channel, {
           type: "transcode-progress",
           percent: normalizedPercent,
           availableBytes: normalizedBytes,
+          estimatedFinalSize: Number(this.playerSource?.estimatedFinalSize || this.playerRoomMetadata?.size || 0),
+          duration: Number(this.playerSource?.duration || this.playerRoomMetadata?.mediaInfo?.duration || 0),
           complete: normalizedPercent >= 100,
         });
       }
@@ -2230,12 +2288,12 @@ document.addEventListener("alpine:init", () => {
             return;
           }
           if (message.type === "range-request") {
-            if (this.playerRoomMetadata?.streamMode === "hls") {
+            if (!this.playerRoomRangeSource && this.playerRoomMetadata?.streamMode === "hls") {
               sendChannelJson(record.channel, {
                 type: "range-error",
                 requestId: message.requestId,
                 sourceVersion: Number(this.playerRoomMetadata?.sourceVersion || 0),
-                error: "This watch room is using live HLS segments. Reload the watch page to use the latest stream player.",
+                error: "This watch room is using stream mode and does not have a range source.",
               });
               return;
             }
@@ -2403,7 +2461,7 @@ document.addEventListener("alpine:init", () => {
         });
         return;
       }
-      const source = this.playerRoomSource || this.playerSource;
+      const source = this.playerRoomHlsSource || (this.playerRoomSource?.readHlsSegment ? this.playerRoomSource : this.playerSource);
       const requestId = message.requestId;
       const segmentIndex = Math.max(0, Number(message.segmentIndex || 0));
       const chunkSize = RANGE_STREAM_CHUNK_SIZE;
@@ -2490,8 +2548,14 @@ document.addEventListener("alpine:init", () => {
         });
         return;
       }
-      const source = this.playerRoomSource || this.playerSource;
-      const totalSize = Number(this.playerRoomMetadata?.size || source?.size || 0);
+      const source = this.playerRoomRangeSource || (this.playerRoomSource?.readRange ? this.playerRoomSource : this.playerSource);
+      const totalSize = Number(
+        this.playerRoomMetadata?.availableModes?.range?.size
+        || this.playerRoomMetadata?.size
+        || source?.estimatedFinalSize
+        || source?.size
+        || 0,
+      );
       const start = Math.max(0, Number(message.start || 0));
       const end = Math.min(totalSize - 1, Number(message.end ?? totalSize - 1));
       const requestId = message.requestId;

@@ -11,7 +11,7 @@
     <script defer src="{{ local_static_or_cdn('vendor/hls.js/hls.min.js', 'https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js') }}"></script>
     <script defer src="{{ local_static_or_cdn('vendor/three/three.min.js', 'https://cdn.jsdelivr.net/npm/three@0.160.1/build/three.min.js') }}"></script>
     <script defer src="{{ url_for('static', filename='xr-player.js', v='3') }}"></script>
-    <script defer src="{{ url_for('static', filename='watch.js', v='37') }}"></script>
+    <script defer src="{{ url_for('static', filename='watch.js', v='38') }}"></script>
     <script defer src="{{ local_static_or_cdn('vendor/alpinejs/cdn.min.js', 'https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js') }}"></script>
   </head>
   <body class="app-body" x-data="watchRoom('{{ room_id }}')" x-init="initWatchRoom()">
@@ -79,6 +79,19 @@
                       <dt class="col-sm-3">MD5</dt>
                       <dd class="col-sm-9 font-monospace text-break" x-text="metadata.md5 || (metadata.checksumKind === 'hls-segments' ? 'Live HLS stream; segments are encrypted in transit' : (metadata.checksumKind === 'original-source' ? 'Progressive transcode; ranges are verified during playback' : 'Unavailable'))"></dd>
                     </dl>
+                    <template x-if="canSwitchPlaybackModes()">
+                      <div class="mb-3">
+                        <label class="form-label">Playback mode</label>
+                        <div class="btn-group w-100" role="group" aria-label="Playback mode">
+                          <template x-for="mode in availablePlaybackModes()" :key="mode.id">
+                            <button class="btn" type="button" :class="selectedPlaybackMode === mode.id ? 'btn-primary' : 'btn-outline-primary'" @click="setPlaybackMode(mode.id)">
+                              <span x-text="mode.label"></span>
+                            </button>
+                          </template>
+                        </div>
+                        <div class="form-text" x-text="selectedPlaybackMode === 'hls' ? 'Stream mode favors compatibility and steadier playback.' : 'Watch mode favors metadata, range requests, and scrubbing.'"></div>
+                      </div>
+                    </template>
                     <button class="btn btn-primary mt-3" type="button" @click="requestVideo()">
                       <i class="bi bi-broadcast"></i>
                       <span x-text="receiveButtonLabel()"></span>
@@ -111,6 +124,15 @@
 
               <template x-if="videoUrl">
                 <div class="xr-video-window">
+                  <template x-if="canSwitchPlaybackModes()">
+                    <div class="btn-group btn-group-sm mb-3" role="group" aria-label="Playback mode">
+                      <template x-for="mode in availablePlaybackModes()" :key="mode.id">
+                        <button class="btn" type="button" :class="selectedPlaybackMode === mode.id ? 'btn-primary' : 'btn-outline-primary'" @click="setPlaybackMode(mode.id)">
+                          <span x-text="mode.label"></span>
+                        </button>
+                      </template>
+                    </div>
+                  </template>
                   <div class="mb-3">
                     <div class="d-flex justify-content-between small text-secondary">
                       <span>Playback buffer</span>

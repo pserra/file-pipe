@@ -1117,6 +1117,9 @@ def build_transcode_command(
             )
     if audio_index is not None:
         command.extend(["-c:a", "aac", "-ac", "2", "-b:a", "192k"])
+    duration = parse_float(probe.get("duration"))
+    if fragmented and duration and duration > 0:
+        command.extend(["-t", f"{duration:.3f}"])
     movflags = "+frag_keyframe+empty_moov+default_base_moof" if fragmented else "+faststart"
     command.extend(["-movflags", movflags, "-f", "mp4", output_path])
     return command
@@ -1307,6 +1310,31 @@ def update_transcode_progress(resource_id: str, **values) -> None:
     TRANSCODE_PROGRESS[resource_id] = current
 
 
+def estimate_transcode_final_size(resource_id: str, fallback_size: Optional[int] = None) -> int:
+    status = TRANSCODE_PROGRESS.get(resource_id, {})
+    current_size = parse_int(status.get("size")) or 0
+    estimated_size = parse_int(status.get("estimatedFinalSize")) or 0
+    duration = parse_float(status.get("duration"))
+    seconds = parse_float(status.get("seconds"))
+    if duration and duration > 0 and seconds and seconds > 0 and current_size > 0:
+        estimated_size = max(estimated_size, int(math.ceil(current_size * duration / seconds)))
+    if fallback_size:
+        estimated_size = max(estimated_size, int(fallback_size))
+    return max(estimated_size, current_size)
+
+
+def progressive_transcode_details(resource_id: str, fallback_size: Optional[int] = None) -> Dict[str, object]:
+    status = TRANSCODE_PROGRESS.get(resource_id, {})
+    estimated_size = estimate_transcode_final_size(resource_id, fallback_size)
+    details = {
+        "duration": parse_float(status.get("duration")),
+        "estimatedFinalSize": estimated_size,
+    }
+    if status:
+        details["progress"] = status
+    return details
+
+
 def transcode_artifact(resource_id: str, url: str) -> Optional[Dict[str, object]]:
     path = transcode_cache_path(resource_id, url)
     if path.exists() and path.stat().st_size > 0:
@@ -1356,7 +1384,15 @@ def run_transcode_command(command: List[str], temp_path: Path, resource_id: str,
                 if duration and duration > 0:
                     percent = max(0, min(99, int((seconds / duration) * 100)))
                 size = temp_path.stat().st_size if temp_path.exists() else 0
-                update_transcode_progress(resource_id, status="running", seconds=seconds, percent=percent, size=size)
+                progress = {
+                    "status": "running",
+                    "seconds": seconds,
+                    "percent": percent,
+                    "size": size,
+                }
+                if duration and duration > 0 and seconds > 0 and size > 0:
+                    progress["estimatedFinalSize"] = int(math.ceil(size * duration / seconds))
+                update_transcode_progress(resource_id, **progress)
             elif key == "progress" and value == "end":
                 update_transcode_progress(resource_id, status="finalizing", percent=99)
         assert process.stderr is not None
@@ -1441,6 +1477,7 @@ def start_transcoded_file(resource_id: str, url: str, media_info: Dict[str, obje
         seconds=0,
         duration=parse_float(media_info.get("duration")),
         size=0,
+        estimatedFinalSize=parse_int(media_info.get("size")) or 0,
         error="",
         progressive=True,
     )
@@ -1721,15 +1758,43 @@ def parse_open_range_header(range_header: str) -> Optional[Tuple[int, Optional[i
     return start, end
 
 
-def serve_growing_file_with_range(path: Path, content_type: str, resource_id: str):
+def serve_growing_file_with_range(
+    path: Path,
+    content_type: str,
+    resource_id: str,
+    total_size: Optional[int] = None,
+    duration: Optional[float] = None,
+):
     open_range = parse_open_range_header(request.headers.get("Range", ""))
     chunk_size = 1024 * 256
+    total_size = int(total_size or 0)
+    duration = parse_float(duration)
+
+    def content_range_total(current_size: int) -> str:
+        if total_size > 0:
+            return str(max(total_size, current_size))
+        return "*"
 
     if open_range is None and request.headers.get("Range"):
         return Response("", status=416, headers={"Accept-Ranges": "bytes"}, content_type=content_type)
 
+    synthetic_range = open_range is None and total_size > 0
     start = open_range[0] if open_range else 0
     requested_end = open_range[1] if open_range else None
+    running = transcode_running(resource_id)
+    if total_size > 0 and requested_end is not None and not running:
+        requested_end = min(requested_end, total_size - 1)
+    if total_size > 0 and start >= total_size and not running:
+        return Response(
+            "",
+            status=416,
+            headers={
+                "Accept-Ranges": "bytes",
+                "Content-Range": f"bytes */{total_size}",
+                "Cache-Control": "no-store",
+            },
+            content_type=content_type,
+        )
 
     def wait_for_size(min_size: int, timeout: float = 30.0) -> bool:
         started = time.monotonic()
@@ -1743,12 +1808,16 @@ def serve_growing_file_with_range(path: Path, content_type: str, resource_id: st
 
     if not wait_for_size(start + 1):
         current_size = path.stat().st_size if path.exists() else 0
-        status = 503 if transcode_running(resource_id) else 416
+        pending_known_range = total_size > 0 and start < total_size and transcode_running(resource_id)
+        status = 503 if pending_known_range or (total_size <= 0 and transcode_running(resource_id)) else 416
         headers = {
             "Accept-Ranges": "bytes",
-            "Content-Range": f"bytes */{current_size}",
+            "Content-Range": f"bytes */{content_range_total(current_size)}",
             "Cache-Control": "no-store",
+            "X-Available-Bytes": str(current_size),
         }
+        if duration and duration > 0:
+            headers["X-Content-Duration"] = f"{duration:.3f}"
         if status == 503:
             headers["Retry-After"] = "1"
         return Response(
@@ -1757,6 +1826,9 @@ def serve_growing_file_with_range(path: Path, content_type: str, resource_id: st
             headers=headers,
             content_type=content_type,
         )
+
+    if synthetic_range and requested_end is None:
+        requested_end = max(start, path.stat().st_size - 1)
 
     def generate():
         position = start
@@ -1783,13 +1855,18 @@ def serve_growing_file_with_range(path: Path, content_type: str, resource_id: st
     headers = {
         "Accept-Ranges": "bytes",
         "Cache-Control": "no-store",
+        "X-Available-Bytes": str(path.stat().st_size if path.exists() else 0),
     }
+    if duration and duration > 0:
+        headers["X-Content-Duration"] = f"{duration:.3f}"
     status = 200
-    if open_range is not None:
+    if open_range is not None or synthetic_range:
         status = 206
         current_size = path.stat().st_size
         end = requested_end if requested_end is not None else max(start, current_size - 1)
-        headers["Content-Range"] = f"bytes {start}-{end}/*"
+        headers["Content-Range"] = f"bytes {start}-{end}/{content_range_total(current_size)}"
+        if end >= start:
+            headers["Content-Length"] = str(end - start + 1)
     return Response(stream_with_context(generate()), status=status, headers=headers, content_type=content_type)
 
 
@@ -2041,7 +2118,12 @@ def create_connector_app(security: Optional[ConnectorSecurity] = None):
             return jsonify({"ok": True, "status": "cached", "cached": True, "percent": 100, "size": stat.st_size})
         artifact = transcode_artifact(resource_id, url)
         if artifact:
-            status = {**status, "size": artifact["size"], "complete": artifact["complete"]}
+            status = {
+                **status,
+                "size": artifact["size"],
+                "complete": artifact["complete"],
+                **progressive_transcode_details(resource_id, RESOURCE_METADATA_CACHE.get(resource_id, {}).get("size")),
+            }
         return jsonify({"ok": True, "status": status.get("status", "idle"), "cached": False, **status})
 
     @app.get("/resources/<resource_id>/checksum")
@@ -2161,6 +2243,7 @@ def create_connector_app(security: Optional[ConnectorSecurity] = None):
                 "cached": artifact["cached"],
                 "complete": artifact.get("complete", artifact["cached"]),
                 "progress": TRANSCODE_PROGRESS.get(resource_id, {}),
+                **progressive_transcode_details(resource_id, media_info.get("size")),
                 "mediaInfo": media_info,
             }
         )
@@ -2222,7 +2305,15 @@ def create_connector_app(security: Optional[ConnectorSecurity] = None):
 
         artifact_path = Path(artifact["path"])
         if request.args.get("progressive") == "1" and not artifact.get("complete", artifact.get("cached", False)):
-            return serve_growing_file_with_range(artifact_path, artifact["contentType"], resource_id)
+            media_info = cached_probe_media(url)
+            details = progressive_transcode_details(resource_id, media_info.get("size"))
+            return serve_growing_file_with_range(
+                artifact_path,
+                artifact["contentType"],
+                resource_id,
+                total_size=parse_int(details.get("estimatedFinalSize")),
+                duration=parse_float(details.get("duration")) or parse_float(media_info.get("duration")),
+            )
         return serve_file_with_range(artifact_path, artifact["contentType"])
 
     @app.get("/resources/<resource_id>/transcoded/checksum")
