@@ -285,6 +285,11 @@ def create_admin_blueprint(security, runtime):
             for key in ("host", "port", "useTls")
         )
         cache_changed = updated["cacheDir"] != current.get("cacheDir")
+        if cache_changed:
+            try:
+                Path(updated["cacheDir"]).expanduser().mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                return jsonify({"error": f"Cache folder is unavailable: {exc}"}), 400
         security.allow_insecure_password = bool(updated["allowInsecurePassword"])
         runtime.save_config(updated)
         if cache_changed:

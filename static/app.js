@@ -28,6 +28,8 @@ document.addEventListener("alpine:init", () => {
     shareProgress: 0,
     shareStatus: "",
     shareLink: "",
+    shareQrDataUrl: "",
+    shareQrStatus: "",
     localFile: null,
     localFileName: "",
     localFileSize: 0,
@@ -193,6 +195,25 @@ document.addEventListener("alpine:init", () => {
         return qr.createDataURL(cellSize, 1);
       }
       return "";
+    },
+
+    async updateShareQrCode(url) {
+      this.shareQrDataUrl = "";
+      if (!url) {
+        this.shareQrStatus = "";
+        return;
+      }
+      if (!this.hasQrGenerator()) {
+        this.shareQrStatus = "QR code generation is unavailable.";
+        return;
+      }
+      this.shareQrStatus = "Generating QR code...";
+      try {
+        this.shareQrDataUrl = await this.renderQrCode(url, 260);
+        this.shareQrStatus = "";
+      } catch (error) {
+        this.shareQrStatus = "Could not generate the QR code.";
+      }
     },
 
     saveConnectorUrl() {
@@ -773,6 +794,7 @@ document.addEventListener("alpine:init", () => {
       this.localFileSize = file ? file.size : 0;
       this.localFileType = file ? file.type || "application/octet-stream" : "";
       this.shareLink = "";
+      this.updateShareQrCode("");
       this.shareStatus = "";
     },
 
@@ -799,6 +821,7 @@ document.addEventListener("alpine:init", () => {
     async createPeerShare(source) {
       this.error = "";
       this.shareLink = "";
+      this.updateShareQrCode("");
       this.shareProgress = 0;
       this.shareStatus = "Preparing peer-to-peer share...";
       const transfer = {
@@ -860,69 +883,33 @@ document.addEventListener("alpine:init", () => {
           metadataBytes,
         );
 
-        const peer = new RTCPeerConnection(P2P_CONFIG);
-        const channel = peer.createDataChannel("file-pipe", { ordered: true });
-        channel.binaryType = "arraybuffer";
-        channel.bufferedAmountLowThreshold = DATA_CHANNEL_BUFFER_LOW_THRESHOLD;
-        transfer.peer = peer;
-        transfer.channel = channel;
-        transfer.key = key;
-        transfer.status = "Creating offer";
-        transfer.progress = 0;
-        transfer.bytesSent = 0;
-        this.shareProgress = 0;
-
-        let startedSending = false;
-        channel.onopen = () => {
-          transfer.status = "Recipient connected";
-          this.shareStatus = "Recipient connected. Waiting for their acknowledgement...";
-        };
-        channel.onmessage = async (event) => {
-          const message = JSON.parse(event.data);
-          if (message.type !== "ready" || startedSending) return;
-          startedSending = true;
-          await this.streamPeerShare(source, key, channel, transfer, metadata);
-        };
-        channel.onclose = () => {
-          if (!["Complete", "Failed"].includes(transfer.status)) {
-            transfer.status = "Disconnected";
-          }
-        };
-        channel.onerror = () => {
-          transfer.status = "Failed";
-          this.error = "Peer data channel failed.";
-        };
-
-        const offer = await peer.createOffer();
-        await peer.setLocalDescription(offer);
-        await waitForIceGatheringComplete(peer);
-
-        const offered = await fetch(`/api/p2p/shares/${created.shareId}/offer`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            offer: peer.localDescription,
-            metadata: {
-              iv: base64UrlEncode(metadataIv),
-              ciphertext: base64UrlEncode(new Uint8Array(encryptedMetadata)),
-            },
-          }),
-        });
-        if (!offered.ok) {
-          const payload = await offered.json().catch(() => ({}));
-          throw new Error(payload.error || `Share signaling failed with ${offered.status}.`);
-        }
-
-        this.shareProgress = 0;
-        this.shareStatus = "P2P link ready. Keep this tab open while the recipient downloads.";
         this.shareLink = `${window.location.origin}/share/${created.shareId}#key=${keyText}`;
+        const shareSession = {
+          shareId: created.shareId,
+          source,
+          key,
+          keyText,
+          metadata,
+          encryptedMetadata: {
+            iv: base64UrlEncode(metadataIv),
+            ciphertext: base64UrlEncode(new Uint8Array(encryptedMetadata)),
+          },
+          transfer,
+          expiresAt: Number(created.expiresAt || 0) * 1000 || Date.now() + 12 * 60 * 60 * 1000,
+          peer: null,
+          channel: null,
+          generation: 0,
+          offerToken: "",
+          reofferTimer: null,
+        };
         transfer.status = "Waiting for recipient";
+        await this.updateShareQrCode(this.shareLink);
         transfer.progress = 0;
         transfer.bytesSent = 0;
         transfer.totalBytes = hashResult.totalBytes;
         transfer.shareLink = this.shareLink;
         transfer.md5 = metadata.md5;
-        this.waitForPeerAnswer(created.shareId, peer, transfer);
+        await this.publishPeerShareOffer(shareSession);
       } catch (error) {
         this.error = error.message;
         this.shareStatus = "";
@@ -930,25 +917,140 @@ document.addEventListener("alpine:init", () => {
       }
     },
 
-    async waitForPeerAnswer(shareId, peer, transfer) {
+    async publishPeerShareOffer(shareSession) {
+      const { transfer } = shareSession;
+      if (this.peerShareExpired(shareSession)) {
+        transfer.status = "Expired";
+        this.shareStatus = "Encrypted link expired. Create a new share link.";
+        return;
+      }
+      if (shareSession.reofferTimer) {
+        window.clearTimeout(shareSession.reofferTimer);
+        shareSession.reofferTimer = null;
+      }
       try {
-        for (let attempt = 0; attempt < 900; attempt += 1) {
-          const signal = await this.appJson(`/api/p2p/shares/${shareId}`);
-          if (signal.answer) {
+        shareSession.peer?.close?.();
+      } catch (error) {
+        // The old peer may already be closed.
+      }
+
+      const offerToken = globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
+      shareSession.offerToken = offerToken;
+      const peer = new RTCPeerConnection(P2P_CONFIG);
+      const channel = peer.createDataChannel("file-pipe", { ordered: true });
+      channel.binaryType = "arraybuffer";
+      channel.bufferedAmountLowThreshold = DATA_CHANNEL_BUFFER_LOW_THRESHOLD;
+      shareSession.peer = peer;
+      shareSession.channel = channel;
+      transfer.peer = peer;
+      transfer.channel = channel;
+      transfer.key = shareSession.key;
+      transfer.status = "Creating offer";
+      transfer.progress = 0;
+      transfer.bytesSent = 0;
+      this.shareProgress = 0;
+
+      let startedSending = false;
+      channel.onopen = () => {
+        if (shareSession.offerToken !== offerToken) return;
+        transfer.status = "Recipient connected";
+        this.shareStatus = "Recipient connected. Waiting for their acknowledgement...";
+      };
+      channel.onmessage = async (event) => {
+        const message = JSON.parse(event.data);
+        if (message.type !== "ready" || startedSending || shareSession.offerToken !== offerToken) return;
+        startedSending = true;
+        await this.streamPeerShare(shareSession, channel, offerToken);
+      };
+      channel.onclose = () => {
+        if (shareSession.offerToken !== offerToken) return;
+        if (!startedSending && !["Complete", "Failed", "Expired", "Ready for another download"].includes(transfer.status)) {
+          transfer.status = "Disconnected";
+          this.scheduleNextPeerShareOffer(shareSession, "Recipient disconnected. Preparing the link for another download...");
+        }
+      };
+      channel.onerror = () => {
+        if (shareSession.offerToken !== offerToken) return;
+        transfer.status = "Failed";
+        this.error = "Peer data channel failed.";
+      };
+
+      const offer = await peer.createOffer();
+      await peer.setLocalDescription(offer);
+      await waitForIceGatheringComplete(peer);
+
+      const offered = await fetch(`/api/p2p/shares/${shareSession.shareId}/offer`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          offer: peer.localDescription,
+          metadata: shareSession.encryptedMetadata,
+        }),
+      });
+      const payload = await offered.json().catch(() => ({}));
+      if (!offered.ok) {
+        throw new Error(payload.error || `Share signaling failed with ${offered.status}.`);
+      }
+
+      shareSession.generation = payload.generation || 0;
+      transfer.status = "Waiting for recipient";
+      transfer.progress = 0;
+      transfer.bytesSent = 0;
+      this.shareProgress = 0;
+      this.shareStatus = `P2P link ready for multiple downloads until ${this.formatShareExpiry(shareSession.expiresAt)}. Keep this tab open; refreshing stops hosting.`;
+      this.waitForPeerAnswer(shareSession, peer, shareSession.generation, offerToken);
+    },
+
+    scheduleNextPeerShareOffer(shareSession, status, delay = 0) {
+      if (this.peerShareExpired(shareSession)) {
+        shareSession.transfer.status = "Expired";
+        this.shareStatus = "Encrypted link expired. Create a new share link.";
+        return;
+      }
+      this.shareStatus = status;
+      if (shareSession.reofferTimer) window.clearTimeout(shareSession.reofferTimer);
+      shareSession.reofferTimer = window.setTimeout(() => {
+        this.publishPeerShareOffer(shareSession).catch((error) => {
+          shareSession.transfer.status = "Failed";
+          this.error = error.message;
+        });
+      }, delay);
+    },
+
+    peerShareExpired(shareSession) {
+      return Date.now() >= Number(shareSession.expiresAt || 0);
+    },
+
+    formatShareExpiry(expiresAt) {
+      if (!expiresAt) return "the 12 hour limit";
+      return new Date(expiresAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    },
+
+    async waitForPeerAnswer(shareSession, peer, generation, offerToken) {
+      const { transfer } = shareSession;
+      try {
+        while (!this.peerShareExpired(shareSession) && shareSession.offerToken === offerToken) {
+          const signal = await this.appJson(`/api/p2p/shares/${shareSession.shareId}`);
+          if (signal.generation === generation && signal.answer) {
             await peer.setRemoteDescription(signal.answer);
             transfer.status = "Waiting for acknowledgement";
             return;
           }
           await sleep(1000);
         }
-        transfer.status = "Expired";
+        if (shareSession.offerToken === offerToken) {
+          transfer.status = "Expired";
+          this.shareStatus = "Encrypted link expired. Create a new share link.";
+        }
       } catch (error) {
+        if (shareSession.offerToken !== offerToken) return;
         transfer.status = "Failed";
         this.error = error.message;
       }
     },
 
-    async streamPeerShare(source, key, channel, transfer, metadata) {
+    async streamPeerShare(shareSession, channel, offerToken) {
+      const { source, key, transfer, metadata } = shareSession;
       try {
         transfer.status = "Sending";
         this.shareStatus = "Streaming encrypted file peer-to-peer...";
@@ -1000,11 +1102,13 @@ document.addEventListener("alpine:init", () => {
         transfer.bytesSent = totalBytes || sentBytes;
         transfer.finishedAt = new Date().toISOString();
         this.shareProgress = 100;
-        this.shareStatus = "Peer-to-peer transfer complete.";
+        transfer.status = "Ready for another download";
+        this.scheduleNextPeerShareOffer(shareSession, "Transfer complete. Preparing the same link for another download...");
       } catch (error) {
+        if (shareSession.offerToken !== offerToken) return;
         if (isDataChannelClosedError(error)) {
           transfer.status = "Disconnected";
-          this.shareStatus = "Peer disconnected before the transfer completed.";
+          this.scheduleNextPeerShareOffer(shareSession, "Peer disconnected before the transfer completed. Preparing the link for another download...");
         } else {
           transfer.status = "Failed";
           this.error = error.message;

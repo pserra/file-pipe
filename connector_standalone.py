@@ -10,7 +10,7 @@ import webbrowser
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
-from standalone_config import config_path, default_ssl_dir, load_config, normalize_config, save_config
+from standalone_config import config_path, default_cache_dir, default_ssl_dir, load_config, normalize_config, save_config
 
 
 class StandaloneRuntime:
@@ -82,6 +82,23 @@ def apply_cli_overrides(config: Dict[str, object], args) -> Dict[str, object]:
     if args.no_browser:
         updated["openBrowser"] = False
     return normalize_config(updated)
+
+
+def prepare_cache_dir(config: Dict[str, object]) -> Path:
+    updated = normalize_config(config)
+    cache_dir = Path(str(updated["cacheDir"])).expanduser()
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        return cache_dir
+    except OSError as exc:
+        fallback = default_cache_dir()
+        fallback.mkdir(parents=True, exist_ok=True)
+        print(
+            f"Configured cache folder {cache_dir} is unavailable ({exc}); using {fallback} instead.",
+            file=sys.stderr,
+            flush=True,
+        )
+        return fallback
 
 
 def build_server(host: str, port: int, app, ssl_context) -> Tuple[int, object]:
@@ -202,17 +219,17 @@ def run_foreground(runtime: StandaloneRuntime) -> int:
 def main() -> int:
     args = parse_args()
     config = apply_cli_overrides(load_config(), args)
+    active_cache_dir = prepare_cache_dir(config)
 
     os.environ.setdefault("FILE_PIPE_SSL_DIR", str(default_ssl_dir()))
-    os.environ["FILE_PIPE_TRANSCODE_CACHE_DIR"] = str(Path(config["cacheDir"]).expanduser())
+    os.environ["FILE_PIPE_TRANSCODE_CACHE_DIR"] = str(active_cache_dir)
 
     import local_connector
     from local_connector import ConnectorSecurity, create_connector_app
     from local_tls import ensure_local_certificate
     from standalone_admin import create_admin_blueprint
 
-    local_connector.TRANSCODE_CACHE_DIR = Path(config["cacheDir"]).expanduser()
-    local_connector.TRANSCODE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    local_connector.TRANSCODE_CACHE_DIR = active_cache_dir
 
     ssl_context = ensure_local_certificate(str(config["host"])) if config["useTls"] else None
     scheme = "https" if ssl_context else "http"

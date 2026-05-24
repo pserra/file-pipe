@@ -36,7 +36,7 @@ document.addEventListener("alpine:init", () => {
           base64UrlDecode(signal.metadata.ciphertext),
         );
         this.metadata = JSON.parse(new TextDecoder().decode(metadataBytes));
-        await this.answerPeer(signal.offer);
+        await this.answerPeer(signal.offer, signal.generation);
         this.status = "Waiting for sender connection. Keep this page open.";
       } catch (error) {
         this.error = error.message;
@@ -57,7 +57,7 @@ document.addEventListener("alpine:init", () => {
       throw new Error("The sender has not published a peer-to-peer offer yet.");
     },
 
-    async answerPeer(offer) {
+    async answerPeer(offer, generation) {
       this.peer = new RTCPeerConnection(P2P_CONFIG);
       this.peer.ondatachannel = (event) => {
         this.channel = event.channel;
@@ -83,7 +83,7 @@ document.addEventListener("alpine:init", () => {
       const response = await fetch(`/api/p2p/shares/${this.shareId}/answer`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ answer: this.peer.localDescription }),
+        body: JSON.stringify({ answer: this.peer.localDescription, generation }),
       });
       if (!response.ok) {
         const payload = await response.json().catch(() => ({}));

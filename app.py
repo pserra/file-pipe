@@ -15,14 +15,18 @@ from local_tls import ensure_local_certificate
 
 
 SHARE_ID_BYTES = 18
+P2P_SHARE_TTL_SECONDS = 12 * 60 * 60
 P2P_SHARES: Dict[str, dict] = {}
 WATCH_ROOMS: Dict[str, dict] = {}
 BIGSCREEN_SESSIONS: Dict[str, dict] = {}
 LOGIN_ATTEMPTS: Dict[str, list] = {}
 PUBLIC_ACCESS_ATTEMPTS: Dict[str, list] = {}
 PUBLIC_WATCH_ENDPOINTS = {
+    "share",
     "watch",
     "bigscreen_service_worker",
+    "put_p2p_answer",
+    "get_p2p_signal",
     "watch_media_fallback",
     "get_watch_room_state",
     "join_watch_room",
@@ -135,6 +139,9 @@ def get_p2p_share(share_id: str) -> dict:
         abort(404)
     share = P2P_SHARES.get(share_id)
     if share is None:
+        abort(404)
+    if int(share.get("expiresAt") or 0) <= int(time.time()):
+        P2P_SHARES.pop(share_id, None)
         abort(404)
     return share
 
@@ -541,15 +548,18 @@ def create_app():
 
     @app.post("/api/p2p/shares")
     def create_p2p_share():
+        now = int(time.time())
         share_id = secrets.token_urlsafe(SHARE_ID_BYTES)
         P2P_SHARES[share_id] = {
             "id": share_id,
-            "createdAt": int(time.time()),
+            "createdAt": now,
+            "expiresAt": now + P2P_SHARE_TTL_SECONDS,
+            "generation": 0,
             "offer": None,
             "answer": None,
             "metadata": None,
         }
-        return jsonify({"shareId": share_id})
+        return jsonify({"shareId": share_id, "expiresAt": P2P_SHARES[share_id]["expiresAt"]})
 
     @app.put("/api/p2p/shares/<share_id>/offer")
     def put_p2p_offer(share_id: str):
@@ -559,9 +569,11 @@ def create_app():
         metadata = payload.get("metadata")
         if not offer or not metadata:
             return jsonify({"error": "Missing offer or encrypted metadata."}), 400
+        share["generation"] = int(share.get("generation") or 0) + 1
         share["offer"] = offer
+        share["answer"] = None
         share["metadata"] = metadata
-        return jsonify({"ok": True})
+        return jsonify({"ok": True, "generation": share["generation"], "expiresAt": share["expiresAt"]})
 
     @app.put("/api/p2p/shares/<share_id>/answer")
     def put_p2p_answer(share_id: str):
@@ -570,8 +582,16 @@ def create_app():
         answer = payload.get("answer")
         if not answer:
             return jsonify({"error": "Missing answer."}), 400
+        generation = payload.get("generation")
+        if generation is not None:
+            try:
+                requested_generation = int(generation)
+            except (TypeError, ValueError):
+                return jsonify({"error": "Invalid share offer generation."}), 400
+            if requested_generation != int(share.get("generation") or 0):
+                return jsonify({"error": "This share offer has already rotated. Reload the link and try again."}), 409
         share["answer"] = answer
-        return jsonify({"ok": True})
+        return jsonify({"ok": True, "generation": share.get("generation")})
 
     @app.get("/api/p2p/shares/<share_id>")
     def get_p2p_signal(share_id: str):
@@ -580,6 +600,8 @@ def create_app():
             {
                 "id": share["id"],
                 "createdAt": share["createdAt"],
+                "expiresAt": share.get("expiresAt"),
+                "generation": share.get("generation", 0),
                 "offer": share["offer"],
                 "answer": share["answer"],
                 "metadata": share["metadata"],

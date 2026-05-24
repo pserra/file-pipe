@@ -674,6 +674,23 @@ body {
   padding: 0.85rem;
 }
 
+.share-link-qr {
+  align-items: flex-start;
+  display: flex;
+  margin-top: 0.85rem;
+}
+
+.share-link-qr img {
+  background: #ffffff;
+  border: 1px solid var(--fp-border-soft);
+  border-radius: 8px;
+  height: min(16rem, 70vw);
+  max-height: 16rem;
+  max-width: 100%;
+  padding: 0.5rem;
+  width: min(16rem, 70vw);
+}
+
 .share-status div {
   display: flex;
   justify-content: space-between;
