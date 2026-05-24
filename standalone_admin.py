@@ -198,6 +198,7 @@ def create_admin_blueprint(security, runtime):
                     "serverCount": len(local_connector.SERVER_CACHE),
                     "resourceCount": len(local_connector.RESOURCE_CACHE),
                 },
+                "readAhead": local_connector.READ_AHEAD_CACHE.stats(),
                 "config": public_config(runtime.config),
             }
         )
@@ -575,7 +576,7 @@ ADMIN_HTML = r"""<!doctype html>
       .grid {
         display: grid;
         gap: 1rem;
-        grid-template-columns: repeat(4, minmax(0, 1fr));
+        grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
       }
 
       .columns {
@@ -828,6 +829,11 @@ ADMIN_HTML = r"""<!doctype html>
           <strong id="ffmpeg-state">Unknown</strong>
           <span id="ffprobe-state" class="muted">Checking tools</span>
         </div>
+        <div class="stat">
+          <span class="muted">Read-ahead</span>
+          <strong id="read-ahead-state">Off</strong>
+          <span id="read-ahead-size" class="muted">0 B buffered</span>
+        </div>
       </section>
 
       <section class="columns">
@@ -1046,6 +1052,8 @@ ADMIN_HTML = r"""<!doctype html>
         document.getElementById("session-count").textContent = `${payload.activeSessions || 0} sessions`;
         document.getElementById("ffmpeg-state").textContent = payload.ffmpegAvailable ? "Ready" : "Missing";
         document.getElementById("ffprobe-state").textContent = payload.ffprobeAvailable ? "ffprobe ready" : "ffprobe missing";
+        document.getElementById("read-ahead-state").textContent = payload.readAhead?.enabled ? "On" : "Off";
+        document.getElementById("read-ahead-size").textContent = `${formatBytes(payload.readAhead?.cachedBytes || 0)} buffered`;
         renderConfig(payload.config, payload.configPath);
         renderServers(payload.connections.servers || []);
         renderCache(payload.cache);

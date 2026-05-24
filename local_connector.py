@@ -47,6 +47,156 @@ class DlnaServer:
     content_directory: ContentDirectory
 
 
+@dataclass
+class ReadAheadEntry:
+    signature: Tuple[int, int]
+    start: int
+    data: bytes
+    last_access: float
+
+    @property
+    def end(self) -> int:
+        return self.start + len(self.data)
+
+
+@dataclass
+class ReadAheadRequestState:
+    last_end: Optional[int] = None
+    last_seen: float = 0.0
+
+
+class ReadAheadFileCache:
+    def __init__(
+        self,
+        window_bytes: int,
+        max_bytes: int,
+        min_trigger_bytes: int,
+        sequential_gap_bytes: int,
+    ):
+        self.window_bytes = max(0, window_bytes)
+        self.max_bytes = max(0, max_bytes)
+        self.min_trigger_bytes = max(0, min_trigger_bytes)
+        self.sequential_gap_bytes = max(0, sequential_gap_bytes)
+        self.entries: Dict[str, ReadAheadEntry] = {}
+        self.inflight: Dict[str, Tuple[Tuple[int, int], int]] = {}
+        self.request_state: Dict[str, ReadAheadRequestState] = {}
+        self.lock = threading.Lock()
+
+    @property
+    def enabled(self) -> bool:
+        return self.window_bytes > 0 and self.max_bytes > 0
+
+    def cache_key(self, path: Path) -> str:
+        return str(path.resolve())
+
+    def signature(self, path: Path, file_size: Optional[int] = None) -> Tuple[int, int]:
+        stat = path.stat()
+        return stat.st_mtime_ns, file_size if file_size is not None else stat.st_size
+
+    def read(self, key: str, signature: Tuple[int, int], start: int, length: int) -> bytes:
+        if not self.enabled or length <= 0:
+            return b""
+        with self.lock:
+            entry = self.entries.get(key)
+            if not entry or entry.signature != signature:
+                return b""
+            if start < entry.start or start >= entry.end:
+                return b""
+            offset = start - entry.start
+            entry.last_access = time.monotonic()
+            return entry.data[offset : offset + length]
+
+    def should_prefetch(self, key: str, start: int, end: int, content_length: int, ranged: bool) -> bool:
+        if not self.enabled or not ranged or content_length <= 0:
+            return False
+        now = time.monotonic()
+        with self.lock:
+            state = self.request_state.setdefault(key, ReadAheadRequestState())
+            previous_end = state.last_end
+            state.last_end = end
+            state.last_seen = now
+
+        starts_stream = start == 0 and content_length >= self.min_trigger_bytes
+        follows_previous = (
+            previous_end is not None
+            and start <= previous_end + 1 + self.sequential_gap_bytes
+            and end >= previous_end
+        )
+        return starts_stream or follows_previous
+
+    def prefetch(self, path: Path, key: str, signature: Tuple[int, int], start: int, file_size: int) -> None:
+        if not self.enabled or start >= file_size:
+            return
+        start = max(0, start)
+        length = min(self.window_bytes, file_size - start, self.max_bytes)
+        if length <= 0:
+            return
+
+        with self.lock:
+            existing = self.entries.get(key)
+            if existing and existing.signature == signature and start >= existing.start and start < existing.end:
+                return
+            inflight = self.inflight.get(key)
+            if inflight and inflight == (signature, start):
+                return
+            self.inflight[key] = (signature, start)
+
+        thread = threading.Thread(
+            target=self._prefetch_worker,
+            args=(path, key, signature, start, length),
+            daemon=True,
+            name="file-pipe-read-ahead",
+        )
+        thread.start()
+
+    def stats(self) -> Dict[str, object]:
+        with self.lock:
+            cached_bytes = sum(len(entry.data) for entry in self.entries.values())
+            return {
+                "enabled": self.enabled,
+                "windowBytes": self.window_bytes,
+                "maxBytes": self.max_bytes,
+                "cachedBytes": cached_bytes,
+                "entryCount": len(self.entries),
+                "inflightCount": len(self.inflight),
+            }
+
+    def _prefetch_worker(self, path: Path, key: str, signature: Tuple[int, int], start: int, length: int) -> None:
+        try:
+            with path.open("rb") as file:
+                file.seek(start)
+                data = file.read(length)
+        except OSError:
+            data = b""
+
+        with self.lock:
+            if self.inflight.get(key) != (signature, start):
+                return
+            self.inflight.pop(key, None)
+            if not data:
+                return
+            try:
+                current_signature = self.signature(path)
+            except OSError:
+                return
+            if current_signature != signature:
+                return
+            self.entries[key] = ReadAheadEntry(
+                signature=signature,
+                start=start,
+                data=data,
+                last_access=time.monotonic(),
+            )
+            self._evict_locked()
+
+    def _evict_locked(self) -> None:
+        total = sum(len(entry.data) for entry in self.entries.values())
+        while total > self.max_bytes and self.entries:
+            evict_key, evict_entry = min(self.entries.items(), key=lambda item: item[1].last_access)
+            total -= len(evict_entry.data)
+            self.entries.pop(evict_key, None)
+
+
 SERVER_CACHE: Dict[str, DlnaServer] = {}
 RESOURCE_CACHE: Dict[str, object] = {}
 RESOURCE_METADATA_CACHE: Dict[str, Dict[str, object]] = {}
@@ -55,6 +205,10 @@ MEDIA_INFO_CACHE: Dict[str, Dict[str, object]] = {}
 LOCAL_DIRECTORY_FILE = Path(os.environ.get("FILE_PIPE_DIRECTORIES_FILE", "instance/served_directories.json"))
 PLAYABLE_BROWSER_AUDIO_CODECS = {"aac", "mp3", "opus", "vorbis", "flac", "alac"}
 PLAYABLE_BROWSER_VIDEO_CODECS = {"h264"}
+READ_AHEAD_BYTES = int(os.environ.get("FILE_PIPE_READ_AHEAD_BYTES", str(25 * 1024 * 1024)))
+READ_AHEAD_MAX_BYTES = int(os.environ.get("FILE_PIPE_READ_AHEAD_MAX_BYTES", str(128 * 1024 * 1024)))
+READ_AHEAD_MIN_TRIGGER_BYTES = int(os.environ.get("FILE_PIPE_READ_AHEAD_MIN_TRIGGER_BYTES", str(512 * 1024)))
+READ_AHEAD_SEQUENTIAL_GAP_BYTES = int(os.environ.get("FILE_PIPE_READ_AHEAD_SEQUENTIAL_GAP_BYTES", str(1024 * 1024)))
 TRANSCODE_CACHE_VERSION = "v5"
 TRANSCODE_CACHE_DIR = Path(os.environ.get("FILE_PIPE_TRANSCODE_CACHE_DIR", "instance/transcodes"))
 HLS_SEGMENT_SECONDS = int(os.environ.get("FILE_PIPE_HLS_SEGMENT_SECONDS", "6"))
@@ -70,6 +224,12 @@ MEDIA_TOOL_DIRS = [
     r"C:\Program Files\ffmpeg\bin",
     r"C:\Program Files (x86)\ffmpeg\bin",
 ]
+READ_AHEAD_CACHE = ReadAheadFileCache(
+    READ_AHEAD_BYTES,
+    READ_AHEAD_MAX_BYTES,
+    READ_AHEAD_MIN_TRIGGER_BYTES,
+    READ_AHEAD_SEQUENTIAL_GAP_BYTES,
+)
 
 
 @dataclass
@@ -1481,17 +1641,49 @@ def serve_file_with_range(path: Path, content_type: str):
 
     start, end = requested_range or (0, file_size - 1)
     content_length = end - start + 1
+    chunk_size = 1024 * 256
+    read_ahead_key = READ_AHEAD_CACHE.cache_key(path)
+    read_ahead_signature = READ_AHEAD_CACHE.signature(path, file_size)
+    is_ranged_response = requested_range is not None
 
     def generate():
-        with path.open("rb") as file:
-            file.seek(start)
+        position = start
+        file = None
+        try:
             remaining = content_length
             while remaining > 0:
-                chunk = file.read(min(1024 * 256, remaining))
+                read_size = min(chunk_size, remaining)
+                chunk = READ_AHEAD_CACHE.read(read_ahead_key, read_ahead_signature, position, read_size)
+                if not chunk:
+                    if file is None:
+                        file = path.open("rb")
+                    file.seek(position)
+                    chunk = file.read(read_size)
                 if not chunk:
                     break
+                position += len(chunk)
                 remaining -= len(chunk)
                 yield chunk
+        finally:
+            if file is not None:
+                file.close()
+            if position > start:
+                served_end = position - 1
+                served_length = position - start
+                if READ_AHEAD_CACHE.should_prefetch(
+                    read_ahead_key,
+                    start,
+                    served_end,
+                    served_length,
+                    is_ranged_response,
+                ):
+                    READ_AHEAD_CACHE.prefetch(
+                        path,
+                        read_ahead_key,
+                        read_ahead_signature,
+                        served_end + 1,
+                        file_size,
+                    )
 
     headers = {
         "Accept-Ranges": "bytes",
