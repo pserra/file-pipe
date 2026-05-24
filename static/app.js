@@ -701,6 +701,7 @@ document.addEventListener("alpine:init", () => {
           mediaSource,
           mimeType,
           signal: abortController.signal,
+          mediaElement: video,
           openStream: () => source.openLinearStream(abortController.signal),
           onBytes: (bytesRead) => {
             if (shouldUpdateChannelUi(source, 1000)) {
@@ -1251,6 +1252,7 @@ document.addEventListener("alpine:init", () => {
       if (window.Hls?.isSupported()) {
         this.hostHls = new Hls(hlsBufferConfig());
         this.hostHls.on(Hls.Events.ERROR, (_event, data) => {
+          if (this.recoverHostHlsAppendError(data)) return;
           if (data?.fatal) {
             this.error = data.details || "The segmented media player failed.";
           }
@@ -1263,6 +1265,19 @@ document.addEventListener("alpine:init", () => {
         return;
       }
       this.error = "This browser cannot play segmented HLS streams. Switch Transcode to Stable MP4 cache.";
+    },
+
+    recoverHostHlsAppendError(data) {
+      if (!this.hostHls || !isRecoverableHlsAppendError(data)) return false;
+      this.playerStatus = "Recovering segmented playback buffer...";
+      try {
+        this.hostHls.recoverMediaError();
+        this.hostHls.startLoad();
+        return true;
+      } catch (error) {
+        this.error = error.message;
+        return false;
+      }
     },
 
     async launchVideoItem(item) {
@@ -3532,6 +3547,8 @@ const P2P_CONFIG = {
 const DATA_CHANNEL_BUFFER_LOW_THRESHOLD = 2 * 1024 * 1024;
 const RANGE_STREAM_CHUNK_SIZE = 96 * 1024;
 const CHANNEL_UI_UPDATE_INTERVAL_MS = 500;
+const MSE_MAX_BUFFER_AHEAD_SECONDS = 24;
+const MSE_BACK_BUFFER_SECONDS = 8;
 const SYNC_BUFFER_SECONDS = 3;
 const SYNC_RELAXED_BUFFER_SECONDS = 1;
 const SYNC_RELAX_AFTER_MS = 3500;
@@ -3923,6 +3940,10 @@ function hlsBufferConfig() {
     maxMaxBufferLength: 120,
     backBufferLength: 30,
     maxBufferHole: 0.75,
+    appendErrorMaxRetry: 20,
+    fragLoadingMaxRetry: 8,
+    fragLoadingRetryDelay: 500,
+    fragLoadingMaxRetryTimeout: 8000,
   };
 }
 
@@ -3949,7 +3970,7 @@ function stableMp4MseMimeType(mediaInfo = {}) {
   return candidates.find((candidate) => MediaSourceClass.isTypeSupported(candidate)) || "";
 }
 
-async function pipeFetchToMediaSource({ mediaSource, mimeType, signal, openStream, onBytes, onEnded, onError }) {
+async function pipeFetchToMediaSource({ mediaSource, mimeType, signal, mediaElement, openStream, onBytes, onEnded, onError }) {
   try {
     const stream = await openStream();
     if (!stream) throw new Error("Linear Stable MP4 stream is unavailable.");
@@ -3960,7 +3981,7 @@ async function pipeFetchToMediaSource({ mediaSource, mimeType, signal, openStrea
       const { done, value } = await reader.read();
       if (done) break;
       if (!value?.byteLength) continue;
-      await appendSourceBuffer(sourceBuffer, exactArrayBuffer(value), signal);
+      await appendSourceBuffer(sourceBuffer, exactArrayBuffer(value), signal, mediaElement);
       bytesRead += value.byteLength;
       if (onBytes) onBytes(bytesRead);
     }
@@ -3999,10 +4020,29 @@ function addMediaSourceBuffer(mediaSource, mimeType, signal) {
   });
 }
 
-function appendSourceBuffer(sourceBuffer, buffer, signal) {
+async function appendSourceBuffer(sourceBuffer, buffer, signal, mediaElement = null) {
+  const chunk = exactArrayBuffer(buffer);
+  while (!signal?.aborted) {
+    await waitForMseAppendBudget(sourceBuffer, mediaElement, signal);
+    try {
+      await appendSourceBufferOnce(sourceBuffer, chunk, signal);
+      return;
+    } catch (error) {
+      if (!isMseQuotaError(error)) throw error;
+      const evicted = await evictMseBackBuffer(sourceBuffer, mediaElement, signal);
+      if (!evicted) await sleep(500);
+    }
+  }
+}
+
+function appendSourceBufferOnce(sourceBuffer, buffer, signal) {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
       reject(new DOMException("Aborted", "AbortError"));
+      return;
+    }
+    if (!sourceBuffer || sourceBuffer.updating || sourceBuffer.removed) {
+      reject(new Error("Stable MP4 SourceBuffer is unavailable."));
       return;
     }
     const cleanup = () => {
@@ -4026,6 +4066,60 @@ function appendSourceBuffer(sourceBuffer, buffer, signal) {
       reject(error);
     }
   });
+}
+
+async function waitForMseAppendBudget(sourceBuffer, mediaElement, signal) {
+  while (!signal?.aborted && mediaElement && sourceBuffer?.buffered?.length) {
+    const ahead = mseBufferedAhead(sourceBuffer, mediaElement.currentTime || 0);
+    if (ahead <= MSE_MAX_BUFFER_AHEAD_SECONDS) return;
+    await sleep(250);
+  }
+}
+
+async function evictMseBackBuffer(sourceBuffer, mediaElement, signal) {
+  if (!sourceBuffer || sourceBuffer.updating || !mediaElement) return false;
+  const removeEnd = Math.max(0, (mediaElement.currentTime || 0) - MSE_BACK_BUFFER_SECONDS);
+  if (removeEnd <= 0) return false;
+  return new Promise((resolve) => {
+    const cleanup = () => {
+      sourceBuffer.removeEventListener("updateend", onDone);
+      sourceBuffer.removeEventListener("error", onDone);
+    };
+    const onDone = () => {
+      cleanup();
+      resolve(true);
+    };
+    try {
+      sourceBuffer.addEventListener("updateend", onDone, { once: true });
+      sourceBuffer.addEventListener("error", onDone, { once: true });
+      sourceBuffer.remove(0, removeEnd);
+    } catch {
+      cleanup();
+      resolve(false);
+    }
+    signal?.addEventListener("abort", () => {
+      cleanup();
+      resolve(false);
+    }, { once: true });
+  });
+}
+
+function mseBufferedAhead(sourceBuffer, currentTime) {
+  for (let index = 0; index < sourceBuffer.buffered.length; index += 1) {
+    const start = sourceBuffer.buffered.start(index);
+    const end = sourceBuffer.buffered.end(index);
+    if (start <= currentTime + 0.25 && end >= currentTime) return end - currentTime;
+  }
+  return 0;
+}
+
+function isMseQuotaError(error) {
+  return error?.name === "QuotaExceededError" || String(error?.message || "").toLowerCase().includes("sourcebuffer is full");
+}
+
+function isRecoverableHlsAppendError(data) {
+  const detail = String(data?.details || data?.error?.message || data?.reason || "").toLowerCase();
+  return Boolean(data?.fatal) && (detail.includes("append") || detail.includes("sourcebuffer") || detail.includes("buffer"));
 }
 
 async function requestAudioInputStream(deviceId) {
