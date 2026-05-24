@@ -24,7 +24,7 @@ document.addEventListener("alpine:init", () => {
     transcodeProgress: 0,
     transcodeStatus: "",
     fileMediaStatus: {},
-    transcodePlaybackMode: localStorage.getItem("filePipeTranscodePlaybackMode") || "full",
+    transcodePlaybackMode: localStorage.getItem("filePipeTranscodePlaybackMode") || "segmented",
     shareProgress: 0,
     shareStatus: "",
     shareLink: "",
@@ -1041,28 +1041,25 @@ document.addEventListener("alpine:init", () => {
 
     async launchFullTranscodedConnectorVideo(item, resource, mediaInfo, transcodeParts) {
       const transcodePath = `${resource.proxyPath}/transcoded`;
-      this.playerStatus = `Transcoding ${transcodeParts.join(" and ")} until enough video is ready...`;
+      this.playerStatus = `Preparing complete Stable MP4 cache with browser-safe ${transcodeParts.join(" and ")}...`;
       this.playerTranscodeAvailablePercent = 0;
       const poller = this.pollTranscodeProgress(resource, item.title, "player");
       let transcodeInfo;
       try {
-        transcodeInfo = await this.request(`${resource.proxyPath}/transcoded-info?progressive=1`);
+        transcodeInfo = await this.request(`${resource.proxyPath}/transcoded-info`);
       } finally {
-        if (!transcodeInfo || transcodeInfo.complete) poller.stop();
+        poller.stop();
       }
-      const progress = transcodeInfo.progress || {};
-      this.playerTranscodeAvailablePercent = transcodeInfo.complete ? 100 : Number(progress.percent || 0);
+      this.playerTranscodeAvailablePercent = 100;
       const transcodeSize = Number(transcodeInfo.size || 0);
       const transcodeDuration = Number(transcodeInfo.duration || mediaInfo?.duration || 0);
-      const estimatedFinalSize = Number(transcodeInfo.estimatedFinalSize || mediaInfo?.size || resource.size || transcodeSize || 0);
       this.teardownHostHlsPlayer();
       this.teardownHostProgressiveMsePlayer();
       const stableMp4Url = this.connectorDirectUrl(transcodePath);
-      const linearMp4Url = this.connectorDirectUrl(`${transcodePath}?progressive=1&linear=1`);
-      this.playerUrl = transcodeInfo.complete ? stableMp4Url : "";
+      this.playerUrl = stableMp4Url;
       this.playerType = "video/mp4";
       this.playerTitle = item.title;
-      this.playerTranscodeComplete = Boolean(transcodeInfo.complete);
+      this.playerTranscodeComplete = true;
       const source = {
         title: item.title,
         type: "video/mp4",
@@ -1070,65 +1067,39 @@ document.addEventListener("alpine:init", () => {
         sourceLabel: `${this.sourceLabel(this.selectedServer)} video transcoded to MP4/AAC`,
         mediaInfo,
         playbackProfile: stableMp4PlaybackProfile(mediaInfo),
-        progressiveTranscode: !transcodeInfo.complete,
+        progressiveTranscode: false,
         progressiveTranscodePercent: this.playerTranscodeAvailablePercent,
         transcodedAvailableBytes: transcodeSize,
-        estimatedFinalSize,
+        estimatedFinalSize: transcodeSize,
         duration: transcodeDuration,
         mseType: stableMp4MseMimeType(mediaInfo),
         shareDisabledReason: "",
         checksumPath: `${transcodePath}/checksum`,
       };
-      source.openLinearStream = async (signal) => {
-        const response = await fetch(`${this.connectorUrl}${transcodePath}?progressive=1&linear=1`, {
-          headers: this.connectorHeaders(),
-          signal,
-        });
-        if (!response.ok) throw new Error(`Connector returned ${response.status} for linear Stable MP4.`);
-        return response.body;
-      };
       source.readRange = async (start, endExclusive) => {
         const requestedStart = Math.max(0, Number(start || 0));
         const requestedEndExclusive = Math.max(requestedStart, Number(endExclusive || 0));
         const expectedBytes = requestedEndExclusive - requestedStart;
-        const maxAttempts = source.progressiveTranscode ? 45 : 1;
-        for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-          const progressiveQuery = source.progressiveTranscode ? "?progressive=1" : "";
-          const response = await fetch(`${this.connectorUrl}${transcodePath}${progressiveQuery}`, {
-            headers: this.connectorHeaders({
-              Range: `bytes=${requestedStart}-${Math.max(requestedStart, requestedEndExclusive - 1)}`,
-            }),
-          });
-          if (response.status === 503 && source.progressiveTranscode) {
-            const availableBytes = Number(response.headers.get("X-Available-Bytes") || 0);
-            if (availableBytes) source.transcodedAvailableBytes = Math.max(Number(source.transcodedAvailableBytes || 0), availableBytes);
-            const retryAfterMs = Math.max(250, Math.min(2000, Number(response.headers.get("Retry-After") || 1) * 1000));
-            await sleep(retryAfterMs);
-            continue;
-          }
-          if (response.status !== 206) {
-            throw new Error(`Connector returned ${response.status} for transcoded range; expected 206 Partial Content.`);
-          }
-          const buffer = await response.arrayBuffer();
-          if (expectedBytes && buffer.byteLength !== expectedBytes) {
-            if (source.progressiveTranscode && buffer.byteLength < expectedBytes && attempt + 1 < maxAttempts) {
-              source.transcodedAvailableBytes = Math.max(Number(source.transcodedAvailableBytes || 0), requestedStart + buffer.byteLength);
-              await sleep(750);
-              continue;
-            }
-            throw new Error(`Connector returned ${buffer.byteLength} bytes for a ${expectedBytes}-byte transcoded range.`);
-          }
-          return buffer;
+        const response = await fetch(`${this.connectorUrl}${transcodePath}`, {
+          headers: this.connectorHeaders({
+            Range: `bytes=${requestedStart}-${Math.max(requestedStart, requestedEndExclusive - 1)}`,
+          }),
+        });
+        if (response.status !== 206) {
+          throw new Error(`Connector returned ${response.status} for transcoded range; expected 206 Partial Content.`);
         }
-        throw new Error("Timed out waiting for the transcoded range to become available.");
+        const buffer = await response.arrayBuffer();
+        if (expectedBytes && buffer.byteLength !== expectedBytes) {
+          throw new Error(`Connector returned ${buffer.byteLength} bytes for a ${expectedBytes}-byte transcoded range.`);
+        }
+        return buffer;
       };
       source.openStream = async () => {
-        const progressiveQuery = source.progressiveTranscode ? "?progressive=1" : "";
-        const response = await fetch(`${this.connectorUrl}${transcodePath}${progressiveQuery}`, {
+        const response = await fetch(`${this.connectorUrl}${transcodePath}`, {
           headers: this.connectorHeaders(),
         });
         if (!response.ok) throw new Error(`Connector returned ${response.status} for transcoded video.`);
-        const totalBytes = Number(response.headers.get("Content-Length") || source.estimatedFinalSize || source.size || 0);
+        const totalBytes = Number(response.headers.get("Content-Length") || source.size || 0);
         return {
           totalBytes,
           stream: response.body,
@@ -1136,12 +1107,7 @@ document.addEventListener("alpine:init", () => {
         };
       };
       this.playerSource = source;
-      if (!transcodeInfo.complete) {
-        this.startHostProgressiveMsePlayer(source, linearMp4Url);
-      }
-      this.playerStatus = transcodeInfo.complete
-        ? `Video ready with browser-safe ${transcodeParts.join(" and ")}.`
-        : "Playing while transcoding continues. Scrubbing is limited to the transcoded portion.";
+      this.playerStatus = `Video ready with browser-safe ${transcodeParts.join(" and ")}.`;
       setTimeout(() => {
         this.prepareHostPlayerMedia();
       }, 0);

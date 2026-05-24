@@ -273,11 +273,12 @@ document.addEventListener("alpine:init", () => {
       const result = [];
       if (modes.range || this.defaultPlaybackMode(this.metadata) === "range") {
         const progress = modes.range?.progressiveTranscode || this.metadata.progressiveTranscode;
+        const rangeIncomplete = progress && !progress.complete;
         result.push({
           id: "range",
           label: "Watch",
-          description: progress && !progress.complete ? "Linear playback until Stable MP4 finishes" : "More metadata and scrubbing",
-          disabled: false,
+          description: rangeIncomplete ? "Stable MP4 unlocks when the transcode completes" : "More metadata and scrubbing",
+          disabled: Boolean(rangeIncomplete),
         });
       }
       if (modes.hls || this.defaultPlaybackMode(this.metadata) === "hls") {
@@ -1320,15 +1321,15 @@ document.addEventListener("alpine:init", () => {
       if (this.videoUrl) return "Video ready";
       if (!this.acknowledgementAccepted) return "Confirm acknowledgement";
       if (hlsStream) return "Acknowledge and start live stream";
-      if (playbackMetadata?.progressiveTranscode && !playbackMetadata.progressiveTranscode.complete) return "Start linear playback";
+      if (playbackMetadata?.progressiveTranscode && !playbackMetadata.progressiveTranscode.complete) return "Stable MP4 preparing";
       return "Acknowledge and start streaming";
     },
 
     receiveDisabledReason() {
       const hlsStream = this.isHlsStream();
       const playbackMetadata = this.playbackMetadata();
+      if (!hlsStream && playbackMetadata?.progressiveTranscode && !playbackMetadata.progressiveTranscode.complete) return "Stable MP4 is still preparing. Switch to Stream for immediate playback; Watch unlocks when the file is complete.";
       if (!hlsStream && !playbackMetadata?.md5 && playbackMetadata?.checksumKind !== "original-source") return "Waiting for the host to publish the required MD5 checksum.";
-      if (!hlsStream && playbackMetadata?.progressiveTranscode && !playbackMetadata.progressiveTranscode.complete) return "Stable MP4 is still preparing. Play/pause is available now; scrubbing unlocks when the file is complete.";
       if (hlsStream) return "Live stream segments transcode on demand, so the first play or a scrub may take a moment.";
       if (!this.acknowledgementAccepted) return "Check the acknowledgement box before starting the video.";
       if (this.pendingVideoRequest) return "Waiting for the host peer connection to open. File Pipe will retry automatically; click Retry to force it now.";
