@@ -14,6 +14,7 @@
     sidePanelVisible: false,
     aspectLocked: true,
     backlightMode: "off",
+    backlightIntensity: 100,
     theme: "default",
   };
   const LAYOUT_LABELS = {
@@ -45,7 +46,11 @@
       this.themes = [];
       this.themeRevision = 0;
       this.videoTexture = null;
+      this.backlightGroup = null;
       this.backlightMesh = null;
+      this.backlightMaskMesh = null;
+      this.backlightSegments = [];
+      this.backlightTexture = null;
       this.backlightSampleCanvas = null;
       this.backlightSampleContext = null;
       this.lastBacklightSampleAt = 0;
@@ -53,6 +58,7 @@
       this.xrSidePanelContext = null;
       this.xrSidePanelTexture = null;
       this.xrSidePanelMesh = null;
+      this.xrSidePanelHotspots = [];
       this.lastSidePanelTextureAt = 0;
       this.xrSupported = false;
       this.xrVrSupported = false;
@@ -67,6 +73,8 @@
       this.controllers = [];
       this.controllerLines = [];
       this.activeGrab = null;
+      this.xrRaycaster = null;
+      this.xrControllerRayMatrix = null;
 
       this.buildInlineControls();
       this.bindInlineControls();
@@ -97,6 +105,7 @@
           sidePanelVisible: Boolean(stored.sidePanelVisible ?? DEFAULT_SETTINGS.sidePanelVisible),
           aspectLocked: stored.aspectLocked !== false,
           backlightMode: ["off", "soft", "dynamic"].includes(stored.backlightMode) ? stored.backlightMode : DEFAULT_SETTINGS.backlightMode,
+          backlightIntensity: clampNumber(Number(stored.backlightIntensity), 0, 150, DEFAULT_SETTINGS.backlightIntensity),
           theme: typeof stored.theme === "string" && stored.theme ? stored.theme : DEFAULT_SETTINGS.theme,
         };
       } catch (error) {
@@ -335,8 +344,9 @@
     }
 
     addThemeAsset(asset, revision = this.themeRevision) {
-      if (!asset?.url) return;
+      if (!asset) return;
       if (asset.type === "image") {
+        if (!asset.url) return;
         const texture = new THREE.TextureLoader().load(asset.url);
         texture.colorSpace = THREE.SRGBColorSpace;
         const material = new THREE.MeshBasicMaterial({
@@ -352,6 +362,7 @@
           this.themeObjects.push(mesh);
         }
       } else if (asset.type === "obj") {
+        if (!asset.url) return;
         fetch(asset.url)
           .then((response) => response.ok ? response.text() : "")
           .then((text) => {
@@ -370,6 +381,24 @@
             }
           })
           .catch(() => {});
+      } else if (asset.type === "box") {
+        const size = Array.isArray(asset.size) ? asset.size : [1, 1, 1];
+        const geometry = new THREE.BoxGeometry(
+          Number(size[0] ?? 1),
+          Number(size[1] ?? 1),
+          Number(size[2] ?? 1),
+        );
+        const material = new THREE.MeshBasicMaterial({
+          color: colorFromTheme(asset.color || "#334155", new THREE.Color("#334155")),
+          transparent: Number(asset.opacity ?? 1) < 1,
+          opacity: clampNumber(Number(asset.opacity ?? 1), 0, 1, 1),
+        });
+        const mesh = new THREE.Mesh(geometry, material);
+        this.applyThemeTransform(mesh, asset);
+        if (revision === this.themeRevision) {
+          this.themeGroup.add(mesh);
+          this.themeObjects.push(mesh);
+        }
       }
     }
 
@@ -427,9 +456,8 @@
         this.xrSidePanelMesh.material?.dispose();
       }
       this.clearThemeObjects();
-      if (this.backlightMesh) {
-        this.backlightMesh.geometry?.dispose();
-        this.backlightMesh.material?.dispose();
+      if (this.backlightGroup) {
+        this.disposeBacklight();
       }
       if (this.renderer) this.renderer.dispose();
       this.renderer = null;
@@ -441,16 +469,23 @@
       this.xrSidePanelTexture = null;
       this.xrSidePanelCanvas = null;
       this.xrSidePanelContext = null;
+      this.xrSidePanelHotspots = [];
       this.screenGroup = null;
       this.gridMesh = null;
       this.themeGroup = null;
       this.themeObjects = [];
+      this.backlightGroup = null;
       this.backlightMesh = null;
+      this.backlightMaskMesh = null;
+      this.backlightSegments = [];
+      this.backlightTexture = null;
       this.backlightSampleCanvas = null;
       this.backlightSampleContext = null;
       this.controllers = [];
       this.controllerLines = [];
       this.activeGrab = null;
+      this.xrRaycaster = null;
+      this.xrControllerRayMatrix = null;
       document.body.classList.remove("fp-three-xr-active");
     }
 
@@ -514,6 +549,7 @@
                   <option value="dynamic">Dynamic video</option>
                 </select>
               </label>
+              <label class="fp-xr-range"><span>Backlight intensity <output data-role="backlight-intensity-label"></output></span><input class="form-range" type="range" min="0" max="150" step="5" data-role="backlight-intensity"></label>
               <label class="fp-xr-field">
                 <span>View</span>
                 <select class="form-select form-select-sm" data-role="overlay-layout">
@@ -554,6 +590,7 @@
       this.overlayHeadsetModeSelect = this.overlay.querySelector("[data-role='overlay-headset-mode']");
       this.themeSelect = this.overlay.querySelector("[data-role='theme']");
       this.backlightSelect = this.overlay.querySelector("[data-role='backlight']");
+      this.backlightIntensityInput = this.overlay.querySelector("[data-role='backlight-intensity']");
       this.overlayLayoutSelect = this.overlay.querySelector("[data-role='overlay-layout']");
       this.overlayEyeSelect = this.overlay.querySelector("[data-role='overlay-eye']");
       this.overlayEyeField = this.overlay.querySelector("[data-role='overlay-eye-field']");
@@ -565,6 +602,7 @@
       this.yawInput = this.overlay.querySelector("[data-role='panel-yaw']");
       this.distanceInput = this.overlay.querySelector("[data-role='panel-distance']");
       this.dimInput = this.overlay.querySelector("[data-role='room-dim']");
+      this.backlightIntensityLabel = this.overlay.querySelector("[data-role='backlight-intensity-label']");
       this.widthLabel = this.overlay.querySelector("[data-role='width-label']");
       this.heightLabel = this.overlay.querySelector("[data-role='height-label']");
       this.xLabel = this.overlay.querySelector("[data-role='x-label']");
@@ -647,6 +685,7 @@
       this.yawInput.addEventListener("input", () => this.updateNumericSetting("panelYaw", this.yawInput.value));
       this.distanceInput.addEventListener("input", () => this.updateNumericSetting("distance", this.distanceInput.value));
       this.dimInput.addEventListener("input", () => this.updateNumericSetting("roomDim", this.dimInput.value));
+      this.backlightIntensityInput.addEventListener("input", () => this.updateNumericSetting("backlightIntensity", this.backlightIntensityInput.value));
       this.syncOverlayControls();
     }
 
@@ -661,6 +700,7 @@
       this.syncThemeOptions();
       this.themeSelect.value = this.settings.theme;
       this.backlightSelect.value = this.settings.backlightMode;
+      this.backlightIntensityInput.value = String(this.settings.backlightIntensity);
       this.aspectLockInput.checked = Boolean(this.settings.aspectLocked);
       this.overlayLayoutSelect.value = this.settings.layout;
       this.overlayEyeSelect.value = this.settings.eye;
@@ -679,6 +719,7 @@
       this.yawLabel.textContent = `${Math.round(this.settings.panelYaw)}°`;
       this.distanceLabel.textContent = `${this.settings.distance.toFixed(1)}m`;
       this.dimLabel.textContent = `${Math.round(this.settings.roomDim)}%`;
+      this.backlightIntensityLabel.textContent = `${Math.round(this.settings.backlightIntensity)}%`;
       if (this.webXrButton) {
         const modeSupported = this.settings.headsetMode === "mr" ? this.xrArSupported : this.xrVrSupported;
         this.webXrButton.disabled = !modeSupported || Boolean(this.xrSession);
@@ -709,12 +750,14 @@
         panelYaw: [-35, 35],
         distance: [1.4, 6],
         roomDim: [0, 100],
+        backlightIntensity: [0, 150],
       }[key];
       this.settings[key] = clampNumber(Number(value), limits[0], limits[1], DEFAULT_SETTINGS[key]);
       this.saveSettings();
       this.syncOverlayControls();
       this.updateVideoGeometry();
       this.updateSceneLighting();
+      if (key === "backlightIntensity") this.updateBacklight(true);
     }
 
     updatePanelSize(axis, value) {
@@ -784,6 +827,8 @@
       this.scene = new THREE.Scene();
       this.camera = new THREE.PerspectiveCamera(60, 1, 0.1, 100);
       this.camera.position.set(0, 0, 0);
+      this.xrRaycaster = new THREE.Raycaster();
+      this.xrControllerRayMatrix = new THREE.Matrix4();
       const ambient = new THREE.AmbientLight(0xffffff, 1);
       this.scene.add(ambient);
       this.screenGroup = new THREE.Group();
@@ -869,10 +914,16 @@
       for (let index = 0; index < 2; index += 1) {
         const controller = this.renderer.xr.getController(index);
         controller.userData.index = index;
-        controller.addEventListener("selectstart", () => this.toggleSidePanel());
+        controller.addEventListener("connected", (event) => {
+          controller.userData.inputSource = event.data;
+        });
+        controller.addEventListener("selectstart", () => this.handleControllerSelect(controller));
         controller.addEventListener("squeezestart", () => this.startScreenGrab(controller));
         controller.addEventListener("squeezeend", () => this.endScreenGrab(controller));
-        controller.addEventListener("disconnected", () => this.endScreenGrab(controller));
+        controller.addEventListener("disconnected", () => {
+          controller.userData.inputSource = null;
+          this.endScreenGrab(controller);
+        });
         const line = new THREE.Line(
           lineGeometry.clone(),
           new THREE.LineBasicMaterial({ color: index === 0 ? 0x93c5fd : 0xf8fafc, transparent: true, opacity: 0.72 }),
@@ -883,6 +934,83 @@
         this.scene.add(controller);
         this.controllers.push(controller);
         this.controllerLines.push(line);
+      }
+    }
+
+    handleControllerSelect(controller) {
+      if (this.activateXrSidePanelHotspot(controller)) {
+        this.pulseController(controller);
+        return;
+      }
+      this.toggleSidePanel();
+      this.pulseController(controller);
+    }
+
+    activateXrSidePanelHotspot(controller) {
+      if (!this.xrSession || !this.xrSidePanelMesh?.visible || !this.xrRaycaster || !this.xrControllerRayMatrix) return false;
+      const hit = this.sidePanelHitForController(controller);
+      if (!hit?.uv) return false;
+      const x = hit.uv.x * this.xrSidePanelCanvas.width;
+      const y = (1 - hit.uv.y) * this.xrSidePanelCanvas.height;
+      const hotspot = this.xrSidePanelHotspots.find((item) => (
+        x >= item.x
+        && x <= item.x + item.width
+        && y >= item.y
+        && y <= item.y + item.height
+      ));
+      if (!hotspot) return false;
+      this.activateXrHotspot(hotspot);
+      this.updateXrSidePanelTexture(true);
+      return true;
+    }
+
+    sidePanelHitForController(controller) {
+      this.xrControllerRayMatrix.identity().extractRotation(controller.matrixWorld);
+      this.xrRaycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
+      this.xrRaycaster.ray.direction.set(0, 0, -1).applyMatrix4(this.xrControllerRayMatrix);
+      return this.xrRaycaster.intersectObject(this.xrSidePanelMesh, false)[0] || null;
+    }
+
+    activateXrHotspot(hotspot) {
+      const sizeStep = 0.2;
+      const intensityStep = 10;
+      const dimStep = 10;
+      if (hotspot.action === "play") {
+        this.togglePlayback();
+      } else if (hotspot.action === "mute-video") {
+        this.video.muted = !this.video.muted;
+        this.updatePlaybackControls();
+      } else if (hotspot.action === "recenter") {
+        this.recenterScreen();
+      } else if (hotspot.action === "size-down") {
+        this.updatePanelSize("width", this.settings.panelWidth - sizeStep);
+      } else if (hotspot.action === "size-up") {
+        this.updatePanelSize("width", this.settings.panelWidth + sizeStep);
+      } else if (hotspot.action === "intensity-down") {
+        this.updateNumericSetting("backlightIntensity", this.settings.backlightIntensity - intensityStep);
+      } else if (hotspot.action === "intensity-up") {
+        this.updateNumericSetting("backlightIntensity", this.settings.backlightIntensity + intensityStep);
+      } else if (hotspot.action === "dim-down") {
+        this.updateNumericSetting("roomDim", this.settings.roomDim - dimStep);
+      } else if (hotspot.action === "dim-up") {
+        this.updateNumericSetting("roomDim", this.settings.roomDim + dimStep);
+      } else if (hotspot.action === "backlight-cycle") {
+        const nextMode = this.settings.backlightMode === "off"
+          ? "soft"
+          : this.settings.backlightMode === "soft" ? "dynamic" : "off";
+        this.settings.backlightMode = nextMode;
+        this.saveSettings();
+        this.syncOverlayControls();
+        this.updateBacklight(true);
+      } else if (hotspot.action === "dom-click" && hotspot.element) {
+        hotspot.element.click();
+      }
+    }
+
+    pulseController(controller) {
+      const actuator = controller.userData.inputSource?.gamepad?.hapticActuators?.[0];
+      if (actuator?.pulse) {
+        actuator.pulse(0.35, 35).catch(() => {});
       }
     }
 
@@ -918,51 +1046,130 @@
     }
 
     initBacklight() {
-      const material = new THREE.MeshBasicMaterial({
-        color: 0x3b82f6,
-        transparent: true,
-        opacity: 0.42,
-        depthWrite: false,
-        blending: THREE.AdditiveBlending,
-        side: THREE.DoubleSide,
+      this.backlightGroup = new THREE.Group();
+      this.backlightGroup.position.set(0, 0, -0.1);
+      this.screenGroup.add(this.backlightGroup);
+      this.backlightTexture = createBacklightGlowTexture();
+      const segments = [
+        ...Array.from({ length: 20 }, (_value, index) => ({ side: "top", index, count: 20 })),
+        ...Array.from({ length: 20 }, (_value, index) => ({ side: "bottom", index, count: 20 })),
+        ...Array.from({ length: 6 }, (_value, index) => ({ side: "left", index, count: 6 })),
+        ...Array.from({ length: 6 }, (_value, index) => ({ side: "right", index, count: 6 })),
+      ];
+      this.backlightSegments = segments.map((segment) => {
+        const material = new THREE.MeshBasicMaterial({
+          color: 0x3b82f6,
+          map: this.backlightTexture,
+          transparent: true,
+          opacity: 0.24,
+          depthWrite: false,
+          depthTest: true,
+          blending: THREE.AdditiveBlending,
+          side: THREE.DoubleSide,
+        });
+        const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1, 3, 3), material);
+        mesh.renderOrder = -3;
+        mesh.userData.backlightSegment = segment;
+        this.backlightGroup.add(mesh);
+        return mesh;
       });
-      this.backlightMesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), material);
-      this.backlightMesh.position.set(0, 0, -0.06);
-      this.screenGroup.add(this.backlightMesh);
+      this.backlightMaskMesh = new THREE.Mesh(
+        new THREE.PlaneGeometry(1, 1),
+        new THREE.MeshBasicMaterial({
+          color: 0x000000,
+          colorWrite: false,
+          depthWrite: true,
+          depthTest: true,
+          side: THREE.DoubleSide,
+        }),
+      );
+      this.backlightMaskMesh.renderOrder = -4;
+      this.backlightMaskMesh.position.set(0, 0, 0.02);
+      this.backlightGroup.add(this.backlightMaskMesh);
       this.backlightSampleCanvas = document.createElement("canvas");
-      this.backlightSampleCanvas.width = 32;
-      this.backlightSampleCanvas.height = 18;
+      this.backlightSampleCanvas.width = 64;
+      this.backlightSampleCanvas.height = 36;
       this.backlightSampleContext = this.backlightSampleCanvas.getContext("2d", { willReadFrequently: true });
       this.updateBacklightGeometry();
       this.updateBacklight(true);
     }
 
+    disposeBacklight() {
+      if (this.backlightGroup) {
+        for (const segment of this.backlightSegments || []) {
+          segment.geometry?.dispose?.();
+          segment.material?.dispose?.();
+          segment.parent?.remove?.(segment);
+        }
+        if (this.backlightMaskMesh) {
+          this.backlightMaskMesh.geometry?.dispose?.();
+          this.backlightMaskMesh.material?.dispose?.();
+          this.backlightMaskMesh.parent?.remove?.(this.backlightMaskMesh);
+        }
+        this.backlightGroup.parent?.remove?.(this.backlightGroup);
+      }
+      this.backlightTexture?.dispose?.();
+      this.backlightGroup = null;
+      this.backlightMesh = null;
+      this.backlightMaskMesh = null;
+      this.backlightSegments = [];
+      this.backlightTexture = null;
+    }
+
     updateBacklightGeometry() {
-      if (!this.backlightMesh) return;
-      this.backlightMesh.scale.set(this.settings.panelWidth + 0.72, this.settings.panelHeight + 0.52, 1);
+      if (!this.backlightGroup) return;
+      const width = this.settings.panelWidth;
+      const height = this.settings.panelHeight;
+      const edgeInset = 0.12;
+      if (this.backlightMaskMesh) {
+        this.backlightMaskMesh.scale.set(width * 1.01, height * 1.01, 1);
+      }
+      for (const segmentMesh of this.backlightSegments) {
+        const segment = segmentMesh.userData.backlightSegment || {};
+        if (segment.side === "top" || segment.side === "bottom") {
+          const segmentWidth = (width / segment.count) * 4.85;
+          const x = -width / 2 + (segment.index + 0.5) * (width / segment.count);
+          const y = segment.side === "top" ? height / 2 - edgeInset : -height / 2 + edgeInset;
+          segmentMesh.position.set(x, y, 0);
+          segmentMesh.scale.set(segmentWidth, 2.2, 1);
+        } else {
+          const segmentHeight = (height / segment.count) * 4.15;
+          const x = segment.side === "left" ? -width / 2 - edgeInset * 0.15 : width / 2 + edgeInset * 0.15;
+          const y = -height / 2 + (segment.index + 0.5) * (height / segment.count);
+          segmentMesh.position.set(x, y, 0);
+          segmentMesh.scale.set(2.75, segmentHeight, 1);
+        }
+      }
     }
 
     updateBacklight(force = false) {
-      if (!this.backlightMesh) return;
+      if (!this.backlightGroup) return;
       const mode = this.settings.backlightMode;
-      this.backlightMesh.visible = mode !== "off";
+      this.backlightGroup.visible = mode !== "off";
       if (mode === "off") return;
+      const intensity = clampNumber(Number(this.settings.backlightIntensity), 0, 150, DEFAULT_SETTINGS.backlightIntensity) / 100;
       if (mode === "soft") {
-        this.backlightMesh.material.color.set("#3b82f6");
-        this.backlightMesh.material.opacity = 0.34;
+        for (const segmentMesh of this.backlightSegments) {
+          segmentMesh.material.color.set("#3b82f6");
+          segmentMesh.material.opacity = 0.16 * intensity;
+        }
         return;
       }
       const now = performance.now();
-      if (!force && now - this.lastBacklightSampleAt < 220) return;
+      if (!force && now - this.lastBacklightSampleAt < 120) return;
       this.lastBacklightSampleAt = now;
-      const color = this.sampleVideoColor();
-      this.backlightMesh.material.color.setRGB(color.r, color.g, color.b);
-      this.backlightMesh.material.opacity = 0.46;
+      const colors = this.sampleVideoEdgeColors();
+      for (const segmentMesh of this.backlightSegments) {
+        const segment = segmentMesh.userData.backlightSegment || {};
+        const color = colors[segment.side]?.[segment.index] || fallbackBacklightColor(segment);
+        segmentMesh.material.color.setRGB(color.r, color.g, color.b);
+        segmentMesh.material.opacity = clampNumber((color.opacity ?? 0.3) * 0.72 * intensity, 0, 0.52, 0.26);
+      }
     }
 
-    sampleVideoColor() {
+    sampleVideoEdgeColors() {
       if (!this.backlightSampleContext || this.video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
-        return { r: 0.23, g: 0.51, b: 0.96 };
+        return fallbackBacklightColors();
       }
       try {
         const context = this.backlightSampleContext;
@@ -970,23 +1177,59 @@
         const height = this.backlightSampleCanvas.height;
         context.drawImage(this.video, 0, 0, width, height);
         const data = context.getImageData(0, 0, width, height).data;
-        let r = 0;
-        let g = 0;
-        let b = 0;
-        const pixels = data.length / 4;
-        for (let index = 0; index < data.length; index += 4) {
-          r += data[index];
-          g += data[index + 1];
-          b += data[index + 2];
+        const window = this.displayedVideoSampleWindow();
+        const output = { top: [], bottom: [], left: [], right: [] };
+        const edgeDepth = 0.13;
+        for (const segment of this.backlightSegments) {
+          const start = segment.index / segment.count;
+          const end = (segment.index + 1) / segment.count;
+          if (segment.side === "top") {
+            output.top[segment.index] = averageSampleRegion(data, width, height, {
+              x0: lerp(window.x0, window.x1, start),
+              x1: lerp(window.x0, window.x1, end),
+              y0: window.y0,
+              y1: lerp(window.y0, window.y1, edgeDepth),
+            });
+          } else if (segment.side === "bottom") {
+            output.bottom[segment.index] = averageSampleRegion(data, width, height, {
+              x0: lerp(window.x0, window.x1, start),
+              x1: lerp(window.x0, window.x1, end),
+              y0: lerp(window.y0, window.y1, 1 - edgeDepth),
+              y1: window.y1,
+            });
+          } else if (segment.side === "left") {
+            const yStart = 1 - end;
+            const yEnd = 1 - start;
+            output.left[segment.index] = averageSampleRegion(data, width, height, {
+              x0: window.x0,
+              x1: lerp(window.x0, window.x1, edgeDepth),
+              y0: lerp(window.y0, window.y1, yStart),
+              y1: lerp(window.y0, window.y1, yEnd),
+            });
+          } else if (segment.side === "right") {
+            const yStart = 1 - end;
+            const yEnd = 1 - start;
+            output.right[segment.index] = averageSampleRegion(data, width, height, {
+              x0: lerp(window.x0, window.x1, 1 - edgeDepth),
+              x1: window.x1,
+              y0: lerp(window.y0, window.y1, yStart),
+              y1: lerp(window.y0, window.y1, yEnd),
+            });
+          }
         }
-        return {
-          r: clampNumber((r / pixels) / 255 * 1.25, 0.08, 1, 0.25),
-          g: clampNumber((g / pixels) / 255 * 1.25, 0.08, 1, 0.45),
-          b: clampNumber((b / pixels) / 255 * 1.25, 0.08, 1, 0.9),
-        };
+        return output;
       } catch (error) {
-        return { r: 0.23, g: 0.51, b: 0.96 };
+        return fallbackBacklightColors();
       }
+    }
+
+    displayedVideoSampleWindow() {
+      if (this.settings.layout === "half-sbs" || this.settings.layout === "full-sbs") {
+        return this.settings.eye === "right"
+          ? { x0: 0.5, x1: 1, y0: 0, y1: 1 }
+          : { x0: 0, x1: 0.5, y0: 0, y1: 1 };
+      }
+      return { x0: 0, x1: 1, y0: 0, y1: 1 };
     }
 
     resizeRenderer() {
@@ -1115,6 +1358,7 @@
       const width = this.xrSidePanelCanvas.width;
       const height = this.xrSidePanelCanvas.height;
       const lines = this.collectSidePanelLines();
+      const hotspots = [];
       context.clearRect(0, 0, width, height);
       context.fillStyle = "rgba(8, 13, 24, 0.94)";
       roundRect(context, 0, 0, width, height, 44);
@@ -1128,7 +1372,7 @@
       context.fillText("Voice & Room", 56, 92);
       context.fillStyle = "rgba(248, 250, 252, 0.62)";
       context.font = "700 28px system-ui, -apple-system, BlinkMacSystemFont, sans-serif";
-      context.fillText("Trigger toggles this panel. Grip moves the screen.", 56, 136);
+      context.fillText("Aim + trigger selects. Trigger off-controls toggles this panel. Grip moves screen.", 56, 136);
 
       let y = 205;
       for (const line of lines.slice(0, 18)) {
@@ -1144,16 +1388,54 @@
           for (const wrapped of wrapCanvasText(context, line.text, 900)) {
             context.fillText(wrapped, 70, y);
             y += 42;
-            if (y > height - 92) break;
+            if (y > height - 352) break;
           }
         }
-        if (y > height - 92) break;
+        if (y > height - 352) break;
       }
+
+      const buttonWidth = 292;
+      const buttonHeight = 58;
+      const gap = 18;
+      const startX = 56;
+      const baseY = height - 296;
+      const buttons = [
+        { label: this.video.paused ? "Play" : "Pause", action: "play" },
+        { label: this.video.muted || this.video.volume === 0 ? "Unmute video" : "Mute video", action: "mute-video" },
+        { label: "Recenter", action: "recenter" },
+        { label: "Size -", action: "size-down" },
+        { label: "Size +", action: "size-up" },
+        { label: `Backlight ${this.backlightModeLabel()}`, action: "backlight-cycle" },
+        { label: "Light -", action: "intensity-down" },
+        { label: "Light +", action: "intensity-up" },
+        { label: "Room dim -", action: "dim-down" },
+        { label: "Room dim +", action: "dim-up" },
+        ...this.collectVoiceActionButtons().slice(0, 2),
+      ];
+      buttons.slice(0, 12).forEach((button, index) => {
+        const col = index % 3;
+        const row = Math.floor(index / 3);
+        const rect = {
+          x: startX + col * (buttonWidth + gap),
+          y: baseY + row * (buttonHeight + gap),
+          width: buttonWidth,
+          height: buttonHeight,
+        };
+        drawXrPanelButton(context, rect, button.label);
+        hotspots.push({ ...rect, action: button.action, element: button.element || null });
+      });
+      this.xrSidePanelHotspots = hotspots;
 
       context.fillStyle = "rgba(248, 250, 252, 0.48)";
       context.font = "600 24px system-ui, -apple-system, BlinkMacSystemFont, sans-serif";
-      context.fillText("Use desktop controls for mic/device changes.", 56, height - 46);
+      context.fillText("Microphone and output device selection still use the browser panel.", 56, height - 28);
       this.xrSidePanelTexture.needsUpdate = true;
+    }
+
+    backlightModeLabel() {
+      if (this.settings.backlightMode === "dynamic") return "Dynamic";
+      if (this.settings.backlightMode === "soft") return "Soft";
+      return "Off";
     }
 
     collectSidePanelLines() {
@@ -1188,6 +1470,26 @@
             { kind: "header", text: "Status" },
             { kind: "text", text: "Voice controls are available on the page side panel." },
           ];
+    }
+
+    collectVoiceActionButtons() {
+      if (!this.sidePanel) return [];
+      const actions = [];
+      const seen = new Set();
+      for (const element of Array.from(this.sidePanel.querySelectorAll("button"))) {
+        if (element.disabled || element.hidden || element.offsetParent === null) continue;
+        const label = cleanPanelText(element.textContent || "");
+        if (!label || seen.has(label)) continue;
+        if (!/voice|mic|mute|unmute|host|enable|stop/i.test(label)) continue;
+        seen.add(label);
+        actions.push({
+          label: label.length > 22 ? `${label.slice(0, 21).trim()}...` : label,
+          action: "dom-click",
+          element,
+        });
+        if (actions.length >= 4) break;
+      }
+      return actions;
     }
 
     moveSidePanelIntoOverlay() {
@@ -1247,6 +1549,101 @@
   function clampNumber(value, min, max, fallback) {
     if (!Number.isFinite(value)) return fallback;
     return Math.min(max, Math.max(min, value));
+  }
+
+  function lerp(start, end, amount) {
+    return start + (end - start) * amount;
+  }
+
+  function createBacklightGlowTexture() {
+    const canvas = document.createElement("canvas");
+    canvas.width = 320;
+    canvas.height = 320;
+    const context = canvas.getContext("2d");
+    const gradient = context.createRadialGradient(160, 160, 0, 160, 160, 160);
+    gradient.addColorStop(0, "rgba(255, 255, 255, 0.42)");
+    gradient.addColorStop(0.22, "rgba(255, 255, 255, 0.28)");
+    gradient.addColorStop(0.52, "rgba(255, 255, 255, 0.13)");
+    gradient.addColorStop(0.78, "rgba(255, 255, 255, 0.045)");
+    gradient.addColorStop(1, "rgba(255, 255, 255, 0)");
+    context.fillStyle = gradient;
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.needsUpdate = true;
+    return texture;
+  }
+
+  function averageSampleRegion(data, width, height, region) {
+    const x0 = Math.max(0, Math.min(width - 1, Math.floor(region.x0 * width)));
+    const x1 = Math.max(x0 + 1, Math.min(width, Math.ceil(region.x1 * width)));
+    const y0 = Math.max(0, Math.min(height - 1, Math.floor(region.y0 * height)));
+    const y1 = Math.max(y0 + 1, Math.min(height, Math.ceil(region.y1 * height)));
+    let r = 0;
+    let g = 0;
+    let b = 0;
+    let pixels = 0;
+    for (let y = y0; y < y1; y += 1) {
+      for (let x = x0; x < x1; x += 1) {
+        const index = (y * width + x) * 4;
+        r += data[index];
+        g += data[index + 1];
+        b += data[index + 2];
+        pixels += 1;
+      }
+    }
+    if (!pixels) return { r: 0.23, g: 0.51, b: 0.96, opacity: 0.42 };
+    const maxChannel = Math.max(r, g, b) / pixels / 255;
+    const luminance = (0.2126 * r + 0.7152 * g + 0.0722 * b) / pixels / 255;
+    if (luminance < 0.06 && maxChannel < 0.11) {
+      return { r: 0, g: 0, b: 0, opacity: 0 };
+    }
+    const boost = maxChannel < 0.24 ? 1.58 : 1.18;
+    return {
+      r: clampNumber((r / pixels) / 255 * boost, 0.05, 1, 0.2),
+      g: clampNumber((g / pixels) / 255 * boost, 0.05, 1, 0.45),
+      b: clampNumber((b / pixels) / 255 * boost, 0.05, 1, 0.95),
+      opacity: clampNumber(0.22 + maxChannel * 0.26, 0.22, 0.5, 0.36),
+    };
+  }
+
+  function fallbackBacklightColors(color = null, opacity = null) {
+    const output = { top: [], bottom: [], left: [], right: [] };
+    for (const side of Object.keys(output)) {
+      const count = side === "top" || side === "bottom" ? 20 : 6;
+      for (let index = 0; index < count; index += 1) {
+        output[side][index] = color
+          ? { ...colorToRgb(color), opacity: opacity ?? 0.34 }
+          : fallbackBacklightColor({ side, index, count });
+      }
+    }
+    return output;
+  }
+
+  function colorToRgb(value) {
+    const color = colorFromTheme(value, new THREE.Color("#3b82f6"));
+    return { r: color.r, g: color.g, b: color.b };
+  }
+
+  function fallbackBacklightColor(segment) {
+    const position = segment.count ? segment.index / Math.max(1, segment.count - 1) : 0;
+    const palette = [
+      { r: 0.05, g: 0.35, b: 1, opacity: 0.3 },
+      { r: 0.1, g: 0.9, b: 0.95, opacity: 0.31 },
+      { r: 0.9, g: 0.12, b: 1, opacity: 0.36 },
+      { r: 1, g: 0.86, b: 0.22, opacity: 0.32 },
+    ];
+    const offset = segment.side === "bottom" ? 0.16 : segment.side === "right" ? 0.32 : segment.side === "left" ? -0.12 : 0;
+    const scaled = ((position + offset) % 1 + 1) % 1 * (palette.length - 1);
+    const index = Math.floor(scaled);
+    const next = Math.min(palette.length - 1, index + 1);
+    const amount = scaled - index;
+    return {
+      r: lerp(palette[index].r, palette[next].r, amount),
+      g: lerp(palette[index].g, palette[next].g, amount),
+      b: lerp(palette[index].b, palette[next].b, amount),
+      opacity: lerp(palette[index].opacity, palette[next].opacity, amount),
+    };
   }
 
   function lockedPanelSize(axis, value, aspect, current) {
@@ -1328,6 +1725,22 @@
     context.lineTo(x, y + r);
     context.quadraticCurveTo(x, y, x + r, y);
     context.closePath();
+  }
+
+  function drawXrPanelButton(context, rect, label) {
+    context.fillStyle = "rgba(20, 33, 55, 0.94)";
+    roundRect(context, rect.x, rect.y, rect.width, rect.height, 14);
+    context.fill();
+    context.strokeStyle = "rgba(147, 197, 253, 0.52)";
+    context.lineWidth = 3;
+    context.stroke();
+    context.fillStyle = "#f8fafc";
+    context.font = "800 25px system-ui, -apple-system, BlinkMacSystemFont, sans-serif";
+    context.textAlign = "center";
+    context.textBaseline = "middle";
+    context.fillText(label, rect.x + rect.width / 2, rect.y + rect.height / 2);
+    context.textAlign = "start";
+    context.textBaseline = "alphabetic";
   }
 
   function colorFromTheme(value, fallback) {

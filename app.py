@@ -353,17 +353,20 @@ def normalize_xr_theme(theme_dir: Path) -> Optional[dict]:
         if not isinstance(asset, dict):
             continue
         file_name = str(asset.get("file") or "").strip()
-        if not file_name or ".." in Path(file_name).parts:
-            continue
-        asset_path = theme_dir / file_name
-        if not asset_path.is_file():
-            continue
-        normalized_assets.append(
-            {
-                **asset,
-                "url": url_for("static", filename=f"{XR_THEME_FOLDER}/{theme_dir.name}/{file_name}"),
-            }
-        )
+        if file_name:
+            if ".." in Path(file_name).parts:
+                continue
+            asset_path = theme_dir / file_name
+            if not asset_path.is_file():
+                continue
+            normalized_assets.append(
+                {
+                    **asset,
+                    "url": url_for("static", filename=f"{XR_THEME_FOLDER}/{theme_dir.name}/{file_name}"),
+                }
+            )
+        elif asset.get("type") == "box":
+            normalized_assets.append(asset)
     return {
         **data,
         "id": theme_id,
