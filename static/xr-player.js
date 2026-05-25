@@ -1179,7 +1179,7 @@
         const data = context.getImageData(0, 0, width, height).data;
         const window = this.displayedVideoSampleWindow();
         const output = { top: [], bottom: [], left: [], right: [] };
-        const edgeDepth = 0.32;
+        const edgeDepth = 0.72;
         for (const segment of this.backlightSegments) {
           const start = segment.index / segment.count;
           const end = (segment.index + 1) / segment.count;
@@ -1215,6 +1215,12 @@
               y0: lerp(window.y0, window.y1, yStart),
               y1: lerp(window.y0, window.y1, yEnd),
             });
+          }
+        }
+        if (!hasVisibleBacklightColors(output)) {
+          const frameColor = averageSampleRegion(data, width, height, window);
+          if (Number(frameColor.opacity || 0) > 0) {
+            return filledBacklightColors(frameColor);
           }
         }
         return output;
@@ -1619,7 +1625,7 @@
     const maxChannel = Math.max(r, g, b) / pixels / 255;
     const luminance = (0.2126 * r + 0.7152 * g + 0.0722 * b) / pixels / 255;
     const activeRatio = activePixels / pixels;
-    if (luminance < 0.018 && maxChannel < 0.04 && activeRatio < 0.01) {
+    if (luminance < 0.012 && maxChannel < 0.028 && activeRatio < 0.004) {
       return { r: 0, g: 0, b: 0, opacity: 0 };
     }
     const sampleR = activeWeight ? weightedR / activeWeight : r / pixels;
@@ -1627,7 +1633,8 @@
     const sampleB = activeWeight ? weightedB / activeWeight : b / pixels;
     const sampleMax = Math.max(sampleR, sampleG, sampleB) / 255;
     const boost = sampleMax < 0.24 ? 1.45 : 1.12;
-    const opacity = 0.1 + Math.sqrt(Math.max(luminance, sampleMax * activeRatio)) * 0.38 + Math.sqrt(activeRatio) * 0.12;
+    const opacityFloor = activePixels ? 0.16 : 0.08;
+    const opacity = opacityFloor + Math.sqrt(Math.max(luminance, sampleMax * Math.max(activeRatio, 0.02))) * 0.36 + Math.sqrt(activeRatio) * 0.12;
     return {
       r: clampNumber(sampleR / 255 * boost, 0.02, 1, 0.2),
       g: clampNumber(sampleG / 255 * boost, 0.02, 1, 0.45),
@@ -1647,6 +1654,24 @@
       }
     }
     return output;
+  }
+
+  function filledBacklightColors(color) {
+    const output = { top: [], bottom: [], left: [], right: [] };
+    for (const side of Object.keys(output)) {
+      const count = side === "top" || side === "bottom" ? 20 : 6;
+      for (let index = 0; index < count; index += 1) {
+        output[side][index] = { ...color };
+      }
+    }
+    return output;
+  }
+
+  function hasVisibleBacklightColors(colors) {
+    return Object.values(colors || {}).some((sideColors) => (
+      Array.isArray(sideColors)
+      && sideColors.some((color) => Number(color?.opacity || 0) > 0.01)
+    ));
   }
 
   function offBacklightColors() {
