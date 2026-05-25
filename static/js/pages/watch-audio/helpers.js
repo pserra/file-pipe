@@ -158,6 +158,19 @@ function plainData(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+function serviceWorkerSetupMessage(error) {
+  const message = error?.message || String(error);
+  const lowerMessage = message.toLowerCase();
+  if (
+    lowerMessage.includes("certificate")
+    || lowerMessage.includes("unknown error occurred when fetching the script")
+    || lowerMessage.includes("failed to register a serviceworker")
+  ) {
+    return `${message} Trust the File Pipe HTTPS certificate on this device for the exact host you are using, or serve File Pipe with a publicly trusted HTTPS certificate. Browsers will not install service workers over an untrusted LAN certificate, even if the page itself was opened after a warning.`;
+  }
+  return message;
+}
+
 async function waitForIceGatheringComplete(peer) {
   if (peer.iceGatheringState === "complete") return;
   await new Promise((resolve) => {

@@ -24,6 +24,7 @@ PUBLIC_ACCESS_ATTEMPTS: Dict[str, list] = {}
 PUBLIC_WATCH_ENDPOINTS = {
     "share",
     "watch",
+    "watch_audio",
     "bigscreen_service_worker",
     "put_p2p_answer",
     "get_p2p_signal",
@@ -527,6 +528,7 @@ def create_app():
     def bigscreen_service_worker():
         response = app.send_static_file("bigscreen-sw.js")
         response.headers["Service-Worker-Allowed"] = "/"
+        response.headers["Cache-Control"] = "no-cache"
         return response
 
     @app.get("/bigscreen-media/<session_id>/<path:_filename>")

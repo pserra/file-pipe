@@ -599,18 +599,22 @@ document.addEventListener("alpine:init", () => {
     },
 
     async registerServiceWorker() {
-      const registration = await navigator.serviceWorker.register("/bigscreen-sw.js?v=11", { scope: "/" });
-      await navigator.serviceWorker.ready;
-      if (!navigator.serviceWorker.controller) {
-        await new Promise((resolve) => {
-          navigator.serviceWorker.addEventListener("controllerchange", resolve, { once: true });
-          registration.active?.postMessage({ type: "claim" });
-          setTimeout(resolve, 4000);
-        });
-      }
-      if (!navigator.serviceWorker.controller) {
-        window.location.reload();
-        throw new Error("Reloading once so the range-streaming service worker can control this page.");
+      try {
+        const registration = await navigator.serviceWorker.register("/bigscreen-sw.js?v=11", { scope: "/" });
+        await navigator.serviceWorker.ready;
+        if (!navigator.serviceWorker.controller) {
+          await new Promise((resolve) => {
+            navigator.serviceWorker.addEventListener("controllerchange", resolve, { once: true });
+            registration.active?.postMessage({ type: "claim" });
+            setTimeout(resolve, 4000);
+          });
+        }
+        if (!navigator.serviceWorker.controller) {
+          window.location.reload();
+          throw new Error("Reloading once so the range-streaming service worker can control this page.");
+        }
+      } catch (error) {
+        throw new Error(serviceWorkerSetupMessage(error));
       }
     },
 
