@@ -1118,7 +1118,9 @@
       this.backlightReadPixels = new Uint8Array(96 * 54 * 4);
       this.backlightReadData = new Uint8Array(96 * 54 * 4);
       this.backlightSampleScene = new THREE.Scene();
-      this.backlightSampleCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, -1, 1);
+      this.backlightSampleCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 2);
+      this.backlightSampleCamera.position.set(0, 0, 1);
+      this.backlightSampleCamera.lookAt(0, 0, 0);
       this.backlightSampleMesh = new THREE.Mesh(
         new THREE.PlaneGeometry(2, 2),
         new THREE.MeshBasicMaterial({ map: this.videoTexture, side: THREE.DoubleSide }),
@@ -1211,11 +1213,11 @@
 
     sampleVideoEdgeColors() {
       if (this.video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
-        return this.lastVideoBacklightColors || fallbackBacklightColors(null, 0.22);
+        return this.lastVideoBacklightColors || offBacklightColors();
       }
       try {
         const sample = this.readBacklightVideoSample();
-        if (!sample) return this.lastVideoBacklightColors || fallbackBacklightColors(null, 0.22);
+        if (!sample) return this.lastVideoBacklightColors || offBacklightColors();
         const { data, width, height } = sample;
         const window = this.displayedVideoSampleWindow();
         const output = { top: [], bottom: [], left: [], right: [] };
@@ -1279,20 +1281,13 @@
           this.lastVideoBacklightColors = broadOutput;
           return broadOutput;
         }
-        return this.lastVideoBacklightColors || fallbackBacklightColors(null, 0.22);
+        return this.lastVideoBacklightColors || offBacklightColors();
       } catch (error) {
-        return this.lastVideoBacklightColors || fallbackBacklightColors(null, 0.22);
+        return this.lastVideoBacklightColors || offBacklightColors();
       }
     }
 
     readBacklightVideoSample() {
-      let webglSample = null;
-      try {
-        webglSample = this.readBacklightWebglSample();
-      } catch (error) {
-        webglSample = null;
-      }
-      if (webglSample && hasVisibleSamplePixels(webglSample.data)) return webglSample;
       let canvasSample = null;
       try {
         canvasSample = this.readBacklightCanvasSample();
@@ -1300,7 +1295,14 @@
         canvasSample = null;
       }
       if (canvasSample && hasVisibleSamplePixels(canvasSample.data)) return canvasSample;
-      return webglSample || canvasSample;
+      let webglSample = null;
+      try {
+        webglSample = this.readBacklightWebglSample();
+      } catch (error) {
+        webglSample = null;
+      }
+      if (webglSample && hasVisibleSamplePixels(webglSample.data)) return webglSample;
+      return canvasSample || webglSample;
     }
 
     readBacklightCanvasSample() {
