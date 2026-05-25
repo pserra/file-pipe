@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 720">
+  <rect width="1000" height="720" fill="none"/>
+  <g fill="none" stroke="#d7dde3" stroke-linecap="round" opacity="0.22">
+    <path d="M166 158 C254 132 342 144 428 172"/>
+    <path d="M834 158 C746 132 658 144 572 172"/>
+    <path d="M154 556 C242 584 340 572 424 546"/>
+    <path d="M846 556 C758 584 660 572 576 546"/>
+    <path d="M340 326 C394 312 448 314 500 334 C552 314 606 312 660 326"/>
+    <path d="M318 396 C384 418 448 414 500 392 C552 414 616 418 682 396"/>
+  </g>
+  <g fill="#0d1116" opacity="0.26">
+    <circle cx="252" cy="270" r="4"/><circle cx="748" cy="270" r="4"/>
+    <circle cx="334" cy="472" r="3"/><circle cx="666" cy="472" r="3"/>
+    <circle cx="426" cy="218" r="2.5"/><circle cx="574" cy="218" r="2.5"/>
+    <circle cx="462" cy="594" r="2.5"/><circle cx="538" cy="594" r="2.5"/>
+  </g>
+  <g fill="none" stroke="#05070a" stroke-width="2" opacity="0.2">
+    <path d="M90 244 H282 M718 244 H910"/>
+    <path d="M90 476 H282 M718 476 H910"/>
+    <path d="M412 100 V244 M588 100 V244 M412 476 V620 M588 476 V620"/>
+  </g>
+</svg>

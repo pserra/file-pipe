@@ -8,4 +8,16 @@ floor:
   size: 8
   divisions: 16
   y: -1.65
+lights:
+  - id: default-fill
+    type: ambient
+    color: "#dbeafe"
+    intensity: 0.52
+  - id: default-screen-wash
+    type: point
+    position: [0, 0.55, -2.7]
+    color: "#93c5fd"
+    intensity: 0.85
+    distance: 4.8
+    decay: 2
 assets: []

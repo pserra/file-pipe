@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 620">
+  <rect width="1400" height="620" fill="none"/>
+  <g fill="none" stroke-linecap="round">
+    <g stroke="#c8d0d8" stroke-width="2" opacity="0.14">
+      <path d="M110 118 H312"/><path d="M1088 118 H1290"/>
+      <path d="M236 432 H512"/><path d="M888 432 H1164"/>
+      <path d="M418 252 H662"/><path d="M738 252 H982"/>
+      <path d="M180 526 H396"/><path d="M1004 526 H1220"/>
+    </g>
+    <g stroke="#05070a" stroke-width="3" opacity="0.24">
+      <path d="M118 176 H268"/><path d="M1132 176 H1282"/>
+      <path d="M338 344 H578"/><path d="M822 344 H1062"/>
+      <path d="M606 112 H794"/>
+      <path d="M606 510 H794"/>
+    </g>
+    <g stroke="#7c8792" stroke-width="1.5" opacity="0.16">
+      <path d="M72 86 L180 132"/><path d="M1328 86 L1220 132"/>
+      <path d="M74 534 L188 490"/><path d="M1326 534 L1212 490"/>
+      <path d="M492 186 L560 156"/><path d="M908 186 L840 156"/>
+      <path d="M492 458 L560 488"/><path d="M908 458 L840 488"/>
+    </g>
+  </g>
+  <g fill="#0b0e12" opacity="0.18">
+    <rect x="142" y="276" width="72" height="8"/><rect x="1186" y="276" width="72" height="8"/>
+    <rect x="392" y="88" width="96" height="6"/><rect x="912" y="88" width="96" height="6"/>
+    <rect x="392" y="526" width="96" height="6"/><rect x="912" y="526" width="96" height="6"/>
+  </g>
+</svg>
