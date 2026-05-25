@@ -1246,7 +1246,7 @@
           this.lastVideoBacklightColors = broadOutput;
           return broadOutput;
         }
-        return output;
+        return this.lastVideoBacklightColors || fallbackBacklightColors(null, 0.22);
       } catch (error) {
         return this.lastVideoBacklightColors || fallbackBacklightColors(null, 0.22);
       }
