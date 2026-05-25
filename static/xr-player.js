@@ -22,6 +22,12 @@
     "half-sbs": "Half SBS 3D",
     "full-sbs": "Full SBS 3D",
   };
+  const BACKLIGHT_SEGMENT_COUNTS = {
+    top: 20,
+    bottom: 20,
+    left: 8,
+    right: 8,
+  };
 
   class FilePipeThreeXrPlayer {
     constructor(video, options = {}) {
@@ -1052,10 +1058,10 @@
       this.screenGroup.add(this.backlightGroup);
       this.backlightTexture = createBacklightGlowTexture();
       const segments = [
-        ...Array.from({ length: 20 }, (_value, index) => ({ side: "top", index, count: 20 })),
-        ...Array.from({ length: 20 }, (_value, index) => ({ side: "bottom", index, count: 20 })),
-        ...Array.from({ length: 6 }, (_value, index) => ({ side: "left", index, count: 6 })),
-        ...Array.from({ length: 6 }, (_value, index) => ({ side: "right", index, count: 6 })),
+        ...Array.from({ length: BACKLIGHT_SEGMENT_COUNTS.top }, (_value, index) => ({ side: "top", index, count: BACKLIGHT_SEGMENT_COUNTS.top })),
+        ...Array.from({ length: BACKLIGHT_SEGMENT_COUNTS.bottom }, (_value, index) => ({ side: "bottom", index, count: BACKLIGHT_SEGMENT_COUNTS.bottom })),
+        ...Array.from({ length: BACKLIGHT_SEGMENT_COUNTS.left }, (_value, index) => ({ side: "left", index, count: BACKLIGHT_SEGMENT_COUNTS.left })),
+        ...Array.from({ length: BACKLIGHT_SEGMENT_COUNTS.right }, (_value, index) => ({ side: "right", index, count: BACKLIGHT_SEGMENT_COUNTS.right })),
       ];
       this.backlightSegments = segments.map((segment) => {
         const material = new THREE.MeshBasicMaterial({
@@ -1128,13 +1134,13 @@
       for (const segmentMesh of this.backlightSegments) {
         const segment = segmentMesh.userData.backlightSegment || {};
         if (segment.side === "top" || segment.side === "bottom") {
-          const segmentWidth = (width / segment.count) * 4.85;
+          const segmentWidth = (width / segment.count) * 3.65;
           const x = -width / 2 + (segment.index + 0.5) * (width / segment.count);
           const y = segment.side === "top" ? height / 2 - edgeInset : -height / 2 + edgeInset;
           segmentMesh.position.set(x, y, 0);
           segmentMesh.scale.set(segmentWidth, 2.2, 1);
         } else {
-          const segmentHeight = (height / segment.count) * 4.15;
+          const segmentHeight = (height / segment.count) * 3.35;
           const x = segment.side === "left" ? -width / 2 - edgeInset * 0.15 : width / 2 + edgeInset * 0.15;
           const y = -height / 2 + (segment.index + 0.5) * (height / segment.count);
           segmentMesh.position.set(x, y, 0);
@@ -1179,48 +1185,55 @@
         const data = context.getImageData(0, 0, width, height).data;
         const window = this.displayedVideoSampleWindow();
         const output = { top: [], bottom: [], left: [], right: [] };
-        const edgeDepth = 0.72;
+        const edgeDepth = 0.32;
         for (const segment of this.backlightSegments) {
           const start = segment.index / segment.count;
           const end = (segment.index + 1) / segment.count;
+          let color = null;
           if (segment.side === "top") {
-            output.top[segment.index] = averageSampleRegion(data, width, height, {
+            color = averageSampleRegion(data, width, height, {
               x0: lerp(window.x0, window.x1, start),
               x1: lerp(window.x0, window.x1, end),
               y0: window.y0,
               y1: lerp(window.y0, window.y1, edgeDepth),
             });
+            output.top[segment.index] = isVisibleBacklightColor(color)
+              ? color
+              : sampleExpandedSegmentRegion(data, width, height, window, segment);
           } else if (segment.side === "bottom") {
-            output.bottom[segment.index] = averageSampleRegion(data, width, height, {
+            color = averageSampleRegion(data, width, height, {
               x0: lerp(window.x0, window.x1, start),
               x1: lerp(window.x0, window.x1, end),
               y0: lerp(window.y0, window.y1, 1 - edgeDepth),
               y1: window.y1,
             });
+            output.bottom[segment.index] = isVisibleBacklightColor(color)
+              ? color
+              : sampleExpandedSegmentRegion(data, width, height, window, segment);
           } else if (segment.side === "left") {
             const yStart = 1 - end;
             const yEnd = 1 - start;
-            output.left[segment.index] = averageSampleRegion(data, width, height, {
+            color = averageSampleRegion(data, width, height, {
               x0: window.x0,
               x1: lerp(window.x0, window.x1, edgeDepth),
               y0: lerp(window.y0, window.y1, yStart),
               y1: lerp(window.y0, window.y1, yEnd),
             });
+            output.left[segment.index] = isVisibleBacklightColor(color)
+              ? color
+              : sampleExpandedSegmentRegion(data, width, height, window, segment);
           } else if (segment.side === "right") {
             const yStart = 1 - end;
             const yEnd = 1 - start;
-            output.right[segment.index] = averageSampleRegion(data, width, height, {
+            color = averageSampleRegion(data, width, height, {
               x0: lerp(window.x0, window.x1, 1 - edgeDepth),
               x1: window.x1,
               y0: lerp(window.y0, window.y1, yStart),
               y1: lerp(window.y0, window.y1, yEnd),
             });
-          }
-        }
-        if (!hasVisibleBacklightColors(output)) {
-          const frameColor = averageSampleRegion(data, width, height, window);
-          if (Number(frameColor.opacity || 0) > 0) {
-            return filledBacklightColors(frameColor);
+            output.right[segment.index] = isVisibleBacklightColor(color)
+              ? color
+              : sampleExpandedSegmentRegion(data, width, height, window, segment);
           }
         }
         return output;
@@ -1572,10 +1585,11 @@
     canvas.height = 320;
     const context = canvas.getContext("2d");
     const gradient = context.createRadialGradient(160, 160, 0, 160, 160, 160);
-    gradient.addColorStop(0, "rgba(255, 255, 255, 0.42)");
-    gradient.addColorStop(0.22, "rgba(255, 255, 255, 0.28)");
-    gradient.addColorStop(0.52, "rgba(255, 255, 255, 0.13)");
-    gradient.addColorStop(0.78, "rgba(255, 255, 255, 0.045)");
+    gradient.addColorStop(0, "rgba(255, 255, 255, 0.46)");
+    gradient.addColorStop(0.14, "rgba(255, 255, 255, 0.32)");
+    gradient.addColorStop(0.38, "rgba(255, 255, 255, 0.16)");
+    gradient.addColorStop(0.66, "rgba(255, 255, 255, 0.055)");
+    gradient.addColorStop(0.88, "rgba(255, 255, 255, 0.014)");
     gradient.addColorStop(1, "rgba(255, 255, 255, 0)");
     context.fillStyle = gradient;
     context.fillRect(0, 0, canvas.width, canvas.height);
@@ -1643,10 +1657,35 @@
     };
   }
 
+  function sampleExpandedSegmentRegion(data, width, height, window, segment) {
+    const start = segment.index / segment.count;
+    const end = (segment.index + 1) / segment.count;
+    if (segment.side === "top" || segment.side === "bottom") {
+      return averageSampleRegion(data, width, height, {
+        x0: lerp(window.x0, window.x1, start),
+        x1: lerp(window.x0, window.x1, end),
+        y0: window.y0,
+        y1: window.y1,
+      });
+    }
+    const yStart = 1 - end;
+    const yEnd = 1 - start;
+    return averageSampleRegion(data, width, height, {
+      x0: window.x0,
+      x1: window.x1,
+      y0: lerp(window.y0, window.y1, yStart),
+      y1: lerp(window.y0, window.y1, yEnd),
+    });
+  }
+
+  function isVisibleBacklightColor(color) {
+    return Number(color?.opacity || 0) > 0.01;
+  }
+
   function fallbackBacklightColors(color = null, opacity = null) {
     const output = { top: [], bottom: [], left: [], right: [] };
     for (const side of Object.keys(output)) {
-      const count = side === "top" || side === "bottom" ? 20 : 6;
+      const count = BACKLIGHT_SEGMENT_COUNTS[side] || 1;
       for (let index = 0; index < count; index += 1) {
         output[side][index] = color
           ? { ...colorToRgb(color), opacity: opacity ?? 0.34 }
@@ -1656,28 +1695,10 @@
     return output;
   }
 
-  function filledBacklightColors(color) {
-    const output = { top: [], bottom: [], left: [], right: [] };
-    for (const side of Object.keys(output)) {
-      const count = side === "top" || side === "bottom" ? 20 : 6;
-      for (let index = 0; index < count; index += 1) {
-        output[side][index] = { ...color };
-      }
-    }
-    return output;
-  }
-
-  function hasVisibleBacklightColors(colors) {
-    return Object.values(colors || {}).some((sideColors) => (
-      Array.isArray(sideColors)
-      && sideColors.some((color) => Number(color?.opacity || 0) > 0.01)
-    ));
-  }
-
   function offBacklightColors() {
     const output = { top: [], bottom: [], left: [], right: [] };
     for (const side of Object.keys(output)) {
-      const count = side === "top" || side === "bottom" ? 20 : 6;
+      const count = BACKLIGHT_SEGMENT_COUNTS[side] || 1;
       for (let index = 0; index < count; index += 1) {
         output[side][index] = offBacklightColor();
       }
