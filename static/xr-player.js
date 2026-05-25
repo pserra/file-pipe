@@ -59,6 +59,12 @@
       this.backlightTexture = null;
       this.backlightSampleCanvas = null;
       this.backlightSampleContext = null;
+      this.backlightRenderTarget = null;
+      this.backlightSampleScene = null;
+      this.backlightSampleCamera = null;
+      this.backlightSampleMesh = null;
+      this.backlightReadPixels = null;
+      this.backlightReadData = null;
       this.lastVideoBacklightColors = null;
       this.lastBacklightSampleAt = 0;
       this.xrSidePanelCanvas = null;
@@ -488,6 +494,12 @@
       this.backlightTexture = null;
       this.backlightSampleCanvas = null;
       this.backlightSampleContext = null;
+      this.backlightRenderTarget = null;
+      this.backlightSampleScene = null;
+      this.backlightSampleCamera = null;
+      this.backlightSampleMesh = null;
+      this.backlightReadPixels = null;
+      this.backlightReadData = null;
       this.controllers = [];
       this.controllerLines = [];
       this.activeGrab = null;
@@ -1098,6 +1110,20 @@
       this.backlightSampleCanvas.width = 96;
       this.backlightSampleCanvas.height = 54;
       this.backlightSampleContext = this.backlightSampleCanvas.getContext("2d", { willReadFrequently: true });
+      this.backlightRenderTarget = new THREE.WebGLRenderTarget(96, 54, {
+        depthBuffer: false,
+        stencilBuffer: false,
+      });
+      this.backlightRenderTarget.texture.colorSpace = THREE.SRGBColorSpace;
+      this.backlightReadPixels = new Uint8Array(96 * 54 * 4);
+      this.backlightReadData = new Uint8Array(96 * 54 * 4);
+      this.backlightSampleScene = new THREE.Scene();
+      this.backlightSampleCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, -1, 1);
+      this.backlightSampleMesh = new THREE.Mesh(
+        new THREE.PlaneGeometry(2, 2),
+        new THREE.MeshBasicMaterial({ map: this.videoTexture, side: THREE.DoubleSide }),
+      );
+      this.backlightSampleScene.add(this.backlightSampleMesh);
       this.updateBacklightGeometry();
       this.updateBacklight(true);
     }
@@ -1117,11 +1143,20 @@
         this.backlightGroup.parent?.remove?.(this.backlightGroup);
       }
       this.backlightTexture?.dispose?.();
+      this.backlightRenderTarget?.dispose?.();
+      this.backlightSampleMesh?.geometry?.dispose?.();
+      this.backlightSampleMesh?.material?.dispose?.();
       this.backlightGroup = null;
       this.backlightMesh = null;
       this.backlightMaskMesh = null;
       this.backlightSegments = [];
       this.backlightTexture = null;
+      this.backlightRenderTarget = null;
+      this.backlightSampleScene = null;
+      this.backlightSampleCamera = null;
+      this.backlightSampleMesh = null;
+      this.backlightReadPixels = null;
+      this.backlightReadData = null;
     }
 
     updateBacklightGeometry() {
@@ -1175,15 +1210,13 @@
     }
 
     sampleVideoEdgeColors() {
-      if (!this.backlightSampleContext || this.video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+      if (this.video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
         return this.lastVideoBacklightColors || fallbackBacklightColors(null, 0.22);
       }
       try {
-        const context = this.backlightSampleContext;
-        const width = this.backlightSampleCanvas.width;
-        const height = this.backlightSampleCanvas.height;
-        context.drawImage(this.video, 0, 0, width, height);
-        const data = context.getImageData(0, 0, width, height).data;
+        const sample = this.readBacklightVideoSample();
+        if (!sample) return this.lastVideoBacklightColors || fallbackBacklightColors(null, 0.22);
+        const { data, width, height } = sample;
         const window = this.displayedVideoSampleWindow();
         const output = { top: [], bottom: [], left: [], right: [] };
         const edgeDepth = 0.32;
@@ -1249,6 +1282,79 @@
         return this.lastVideoBacklightColors || fallbackBacklightColors(null, 0.22);
       } catch (error) {
         return this.lastVideoBacklightColors || fallbackBacklightColors(null, 0.22);
+      }
+    }
+
+    readBacklightVideoSample() {
+      let webglSample = null;
+      try {
+        webglSample = this.readBacklightWebglSample();
+      } catch (error) {
+        webglSample = null;
+      }
+      if (webglSample && hasVisibleSamplePixels(webglSample.data)) return webglSample;
+      let canvasSample = null;
+      try {
+        canvasSample = this.readBacklightCanvasSample();
+      } catch (error) {
+        canvasSample = null;
+      }
+      if (canvasSample && hasVisibleSamplePixels(canvasSample.data)) return canvasSample;
+      return webglSample || canvasSample;
+    }
+
+    readBacklightCanvasSample() {
+      if (!this.backlightSampleContext || !this.backlightSampleCanvas) return null;
+      const context = this.backlightSampleContext;
+      const width = this.backlightSampleCanvas.width;
+      const height = this.backlightSampleCanvas.height;
+      context.drawImage(this.video, 0, 0, width, height);
+      return {
+        data: context.getImageData(0, 0, width, height).data,
+        width,
+        height,
+      };
+    }
+
+    readBacklightWebglSample() {
+      if (!this.renderer || !this.videoTexture || !this.backlightRenderTarget || !this.backlightSampleScene || !this.backlightSampleCamera) {
+        return null;
+      }
+      const width = this.backlightRenderTarget.width;
+      const height = this.backlightRenderTarget.height;
+      const previousTarget = this.renderer.getRenderTarget();
+      const previousViewport = this.renderer.getViewport(new THREE.Vector4());
+      const previousScissor = this.renderer.getScissor(new THREE.Vector4());
+      const previousScissorTest = this.renderer.getScissorTest();
+      const previousXrEnabled = this.renderer.xr.enabled;
+      const previousOffsetX = this.videoTexture.offset.x;
+      const previousOffsetY = this.videoTexture.offset.y;
+      const previousRepeatX = this.videoTexture.repeat.x;
+      const previousRepeatY = this.videoTexture.repeat.y;
+      try {
+        this.renderer.xr.enabled = false;
+        this.videoTexture.offset.set(0, 0);
+        this.videoTexture.repeat.set(1, 1);
+        this.videoTexture.needsUpdate = true;
+        this.renderer.setRenderTarget(this.backlightRenderTarget);
+        this.renderer.clear();
+        this.renderer.render(this.backlightSampleScene, this.backlightSampleCamera);
+        this.renderer.readRenderTargetPixels(this.backlightRenderTarget, 0, 0, width, height, this.backlightReadPixels);
+        flipRgbaRows(this.backlightReadPixels, this.backlightReadData, width, height);
+        return {
+          data: this.backlightReadData,
+          width,
+          height,
+        };
+      } finally {
+        this.videoTexture.offset.set(previousOffsetX, previousOffsetY);
+        this.videoTexture.repeat.set(previousRepeatX, previousRepeatY);
+        this.videoTexture.needsUpdate = true;
+        this.renderer.setRenderTarget(previousTarget);
+        this.renderer.setViewport(previousViewport);
+        this.renderer.setScissor(previousScissor);
+        this.renderer.setScissorTest(previousScissorTest);
+        this.renderer.xr.enabled = previousXrEnabled;
       }
     }
 
@@ -1607,6 +1713,33 @@
     texture.colorSpace = THREE.SRGBColorSpace;
     texture.needsUpdate = true;
     return texture;
+  }
+
+  function flipRgbaRows(source, target, width, height) {
+    const rowBytes = width * 4;
+    for (let y = 0; y < height; y += 1) {
+      const sourceStart = (height - 1 - y) * rowBytes;
+      const targetStart = y * rowBytes;
+      target.set(source.subarray(sourceStart, sourceStart + rowBytes), targetStart);
+    }
+    return target;
+  }
+
+  function hasVisibleSamplePixels(data) {
+    if (!data?.length) return false;
+    let visible = 0;
+    for (let index = 0; index < data.length; index += 16) {
+      const pixelR = data[index];
+      const pixelG = data[index + 1];
+      const pixelB = data[index + 2];
+      const pixelMax = Math.max(pixelR, pixelG, pixelB) / 255;
+      const pixelLuminance = (0.2126 * pixelR + 0.7152 * pixelG + 0.0722 * pixelB) / 255;
+      if (pixelLuminance > 0.018 || pixelMax > 0.045) {
+        visible += 1;
+        if (visible >= 6) return true;
+      }
+    }
+    return false;
   }
 
   function averageSampleRegion(data, width, height, region) {
