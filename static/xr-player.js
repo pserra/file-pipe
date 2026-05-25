@@ -1088,8 +1088,8 @@
       this.backlightMaskMesh.position.set(0, 0, 0.02);
       this.backlightGroup.add(this.backlightMaskMesh);
       this.backlightSampleCanvas = document.createElement("canvas");
-      this.backlightSampleCanvas.width = 64;
-      this.backlightSampleCanvas.height = 36;
+      this.backlightSampleCanvas.width = 96;
+      this.backlightSampleCanvas.height = 54;
       this.backlightSampleContext = this.backlightSampleCanvas.getContext("2d", { willReadFrequently: true });
       this.updateBacklightGeometry();
       this.updateBacklight(true);
@@ -1179,7 +1179,7 @@
         const data = context.getImageData(0, 0, width, height).data;
         const window = this.displayedVideoSampleWindow();
         const output = { top: [], bottom: [], left: [], right: [] };
-        const edgeDepth = 0.13;
+        const edgeDepth = 0.32;
         for (const segment of this.backlightSegments) {
           const start = segment.index / segment.count;
           const end = (segment.index + 1) / segment.count;
@@ -1587,28 +1587,52 @@
     let r = 0;
     let g = 0;
     let b = 0;
+    let weightedR = 0;
+    let weightedG = 0;
+    let weightedB = 0;
+    let activeWeight = 0;
+    let activePixels = 0;
     let pixels = 0;
     for (let y = y0; y < y1; y += 1) {
       for (let x = x0; x < x1; x += 1) {
         const index = (y * width + x) * 4;
-        r += data[index];
-        g += data[index + 1];
-        b += data[index + 2];
+        const pixelR = data[index];
+        const pixelG = data[index + 1];
+        const pixelB = data[index + 2];
+        r += pixelR;
+        g += pixelG;
+        b += pixelB;
+        const pixelMax = Math.max(pixelR, pixelG, pixelB) / 255;
+        const pixelLuminance = (0.2126 * pixelR + 0.7152 * pixelG + 0.0722 * pixelB) / 255;
+        if (pixelLuminance > 0.025 || pixelMax > 0.055) {
+          const weight = 0.35 + Math.min(1.6, pixelLuminance * 5 + pixelMax * 1.4);
+          weightedR += pixelR * weight;
+          weightedG += pixelG * weight;
+          weightedB += pixelB * weight;
+          activeWeight += weight;
+          activePixels += 1;
+        }
         pixels += 1;
       }
     }
     if (!pixels) return { r: 0.23, g: 0.51, b: 0.96, opacity: 0.42 };
     const maxChannel = Math.max(r, g, b) / pixels / 255;
     const luminance = (0.2126 * r + 0.7152 * g + 0.0722 * b) / pixels / 255;
-    if (luminance < 0.06 && maxChannel < 0.11) {
+    const activeRatio = activePixels / pixels;
+    if (luminance < 0.018 && maxChannel < 0.04 && activeRatio < 0.01) {
       return { r: 0, g: 0, b: 0, opacity: 0 };
     }
-    const boost = maxChannel < 0.24 ? 1.58 : 1.18;
+    const sampleR = activeWeight ? weightedR / activeWeight : r / pixels;
+    const sampleG = activeWeight ? weightedG / activeWeight : g / pixels;
+    const sampleB = activeWeight ? weightedB / activeWeight : b / pixels;
+    const sampleMax = Math.max(sampleR, sampleG, sampleB) / 255;
+    const boost = sampleMax < 0.24 ? 1.45 : 1.12;
+    const opacity = 0.1 + Math.sqrt(Math.max(luminance, sampleMax * activeRatio)) * 0.38 + Math.sqrt(activeRatio) * 0.12;
     return {
-      r: clampNumber((r / pixels) / 255 * boost, 0.05, 1, 0.2),
-      g: clampNumber((g / pixels) / 255 * boost, 0.05, 1, 0.45),
-      b: clampNumber((b / pixels) / 255 * boost, 0.05, 1, 0.95),
-      opacity: clampNumber(0.22 + maxChannel * 0.26, 0.22, 0.5, 0.36),
+      r: clampNumber(sampleR / 255 * boost, 0.02, 1, 0.2),
+      g: clampNumber(sampleG / 255 * boost, 0.02, 1, 0.45),
+      b: clampNumber(sampleB / 255 * boost, 0.02, 1, 0.95),
+      opacity: clampNumber(opacity, 0.08, 0.5, 0.26),
     };
   }
 
