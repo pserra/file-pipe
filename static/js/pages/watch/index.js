@@ -1179,6 +1179,7 @@ document.addEventListener("alpine:init", () => {
         panelSelector: ".xr-side-panel",
         storageKey: "filePipeViewerXrPlayer",
         mediaInfo: () => this.playbackMetadata()?.mediaInfo || this.metadata?.mediaInfo || null,
+        playbackProfile: profile,
         sourceLayout: xrSourceLayoutFromProfile(profile),
         localDepthProcessor: profile.localStereoProcessor ? profile.stereoProcessor : "",
         localDepthTargetLayout: profile.targetVideoLayout || "",

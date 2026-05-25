@@ -14,10 +14,11 @@
     screenCurve: 0,
     distance: 3,
     roomViewX: 0,
-    roomViewY: 0,
+    roomViewY: 1.45,
     roomViewZ: 0,
     roomViewYaw: 0,
-    roomViewPitch: 0,
+    roomViewPitch: -16,
+    roomViewPresetVersion: 2,
     roomDim: 80,
     sidePanelVisible: false,
     aspectLocked: true,
@@ -149,6 +150,11 @@
       this.lastRenderAt = 0;
       this.xrRaycaster = null;
       this.xrControllerRayMatrix = null;
+      this.updateOptions = this.updateOptions.bind(this);
+      this.openTheater = this.openTheater.bind(this);
+      this.closeTheater = this.closeTheater.bind(this);
+      this.dispose = this.dispose.bind(this);
+      this.setSpatialAudioEnabled = this.setSpatialAudioEnabled.bind(this);
 
       this.buildInlineControls();
       this.bindInlineControls();
@@ -159,12 +165,22 @@
       if (isKnownLayout(this.options.sourceLayout) && this.options.sourceLayout !== "mono") {
         this.setLayout(this.options.sourceLayout, { persist: false });
       }
+      if (this.settings.aspectLocked && this.generatedStereoSourceAspectRatio()) {
+        this.applyAspectRatioFrom("width");
+        this.syncOverlayControls();
+      }
     }
 
     updateOptions(options = {}) {
       this.options = { ...this.options, ...options };
       if (isKnownLayout(options.sourceLayout) && options.sourceLayout !== "mono") {
         this.setLayout(options.sourceLayout, { persist: false });
+      }
+      if ("playbackProfile" in options || "mediaInfo" in options || "sourceLayout" in options) {
+        if (this.settings.aspectLocked) this.applyAspectRatioFrom("width");
+        this.updateVideoGeometry();
+        this.syncOverlayControls();
+        this.updateInlineStatus();
       }
       if ("localDepthProcessor" in options || "localDepthTargetLayout" in options) {
         this.setLocalDepthProcessor(options.localDepthProcessor || "", options.localDepthTargetLayout || "");
@@ -241,10 +257,11 @@
           screenCurve: clampNumber(Number(stored.screenCurve), 0, 100, DEFAULT_SETTINGS.screenCurve),
           distance: clampNumber(Number(stored.distance), 1.4, 6, DEFAULT_SETTINGS.distance),
           roomViewX: clampNumber(Number(stored.roomViewX), -2.8, 2.8, DEFAULT_SETTINGS.roomViewX),
-          roomViewY: clampNumber(Number(stored.roomViewY), -0.8, 1.2, DEFAULT_SETTINGS.roomViewY),
+          roomViewY: clampNumber(Number(stored.roomViewY), -0.8, 1.8, DEFAULT_SETTINGS.roomViewY),
           roomViewZ: clampNumber(Number(stored.roomViewZ), -3.7, 1.2, DEFAULT_SETTINGS.roomViewZ),
           roomViewYaw: normalizeDegrees(clampNumber(Number(stored.roomViewYaw), -180, 180, DEFAULT_SETTINGS.roomViewYaw)),
           roomViewPitch: clampNumber(Number(stored.roomViewPitch), -35, 35, DEFAULT_SETTINGS.roomViewPitch),
+          roomViewPresetVersion: clampNumber(Number(stored.roomViewPresetVersion), 0, 100, 0),
           roomDim: clampNumber(Number(stored.roomDim), 0, 100, DEFAULT_SETTINGS.roomDim),
           sidePanelVisible: Boolean(stored.sidePanelVisible ?? DEFAULT_SETTINGS.sidePanelVisible),
           aspectLocked: stored.aspectLocked !== false,
@@ -256,6 +273,14 @@
           themeValueRevisions: isPlainObject(stored.themeValueRevisions) ? stored.themeValueRevisions : {},
           themeObjectStates: isPlainObject(stored.themeObjectStates) ? stored.themeObjectStates : {},
         };
+        if (settings.roomViewPresetVersion < DEFAULT_SETTINGS.roomViewPresetVersion && shouldRestoreDesktopRoomView(stored)) {
+          settings.roomViewX = DEFAULT_SETTINGS.roomViewX;
+          settings.roomViewY = DEFAULT_SETTINGS.roomViewY;
+          settings.roomViewZ = DEFAULT_SETTINGS.roomViewZ;
+          settings.roomViewYaw = DEFAULT_SETTINGS.roomViewYaw;
+          settings.roomViewPitch = DEFAULT_SETTINGS.roomViewPitch;
+        }
+        settings.roomViewPresetVersion = DEFAULT_SETTINGS.roomViewPresetVersion;
         return settings;
       } catch (error) {
         return { ...DEFAULT_SETTINGS };
@@ -1099,7 +1124,6 @@
         <div class="fp-three-xr-main">
           <div class="fp-three-xr-stage-panel">
             <canvas class="fp-three-xr-canvas"></canvas>
-            <canvas class="fp-three-xr-fallback" data-role="render-fallback" hidden></canvas>
             <div class="fp-three-xr-playback">
               <button class="btn btn-sm btn-light" type="button" data-action="play-toggle"><i class="bi bi-play-fill"></i></button>
               <input class="form-range" type="range" min="0" max="1000" step="1" value="0" data-role="seek">
@@ -1178,8 +1202,8 @@
       `;
       document.body.appendChild(this.overlay);
       this.canvas = this.overlay.querySelector(".fp-three-xr-canvas");
-      this.fallbackCanvas = this.overlay.querySelector("[data-role='render-fallback']");
-      this.fallbackContext = this.fallbackCanvas?.getContext("2d") || null;
+      this.fallbackCanvas = null;
+      this.fallbackContext = null;
       this.theaterStatus = this.overlay.querySelector("[data-role='theater-status']");
       this.overlayHeadsetModeSelect = this.overlay.querySelector("[data-role='overlay-headset-mode']");
       this.themeSelect = this.overlay.querySelector("[data-role='theme']");
@@ -1419,11 +1443,22 @@
     }
 
     videoAspectRatio() {
+      const generatedStereoAspect = this.generatedStereoSourceAspectRatio();
+      if (generatedStereoAspect) return generatedStereoAspect;
       const width = Number(this.video.videoWidth || 16);
       const height = Number(this.video.videoHeight || 9);
       if (!width || !height) return 16 / 9;
       if (this.settings.layout === "full-sbs") return Math.max(0.1, (width / 2) / height);
       return Math.max(0.1, width / height);
+    }
+
+    generatedStereoSourceAspectRatio() {
+      const profile = isPlainObject(this.options.playbackProfile) ? this.options.playbackProfile : {};
+      const profileLayout = profile.targetVideoLayout || profile.videoLayout || this.options.sourceLayout || "";
+      const stereoLayout = ["half-sbs", "full-sbs"].includes(profileLayout) ? profileLayout : "";
+      const generatedStereo = Boolean(profile.localStereoProcessor || profile.sourceKind === "hls-live");
+      if (!generatedStereo || !stereoLayout) return 0;
+      return mediaInfoVideoAspectRatio(this.mediaInfo());
     }
 
     recenterScreen(options = {}) {
@@ -1712,7 +1747,7 @@
       this.settings.roomViewY = clampNumber(
         this.settings.roomViewY + vertical,
         -0.8,
-        1.2,
+        1.8,
         DEFAULT_SETTINGS.roomViewY,
       );
       this.settings.roomViewZ = clampNumber(
@@ -2048,6 +2083,10 @@
     }
 
     spatialAudioMediaInfo() {
+      return this.mediaInfo();
+    }
+
+    mediaInfo() {
       try {
         return typeof this.options.mediaInfo === "function" ? this.options.mediaInfo() : this.options.mediaInfo;
       } catch (error) {
@@ -2140,7 +2179,7 @@
     }
 
     initThree() {
-      this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: true, alpha: true, preserveDrawingBuffer: true });
+      this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: true, alpha: true });
       this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
       this.renderer.setClearAlpha(0);
       this.renderer.xr.enabled = true;
@@ -2168,16 +2207,6 @@
       this.videoTexture.minFilter = THREE.LinearFilter;
       this.videoTexture.magFilter = THREE.LinearFilter;
       this.videoTexture.generateMipmaps = false;
-      this.screenBackingMesh = new THREE.Mesh(
-        new THREE.PlaneGeometry(1, 1),
-        new THREE.MeshBasicMaterial({
-          color: 0x121820,
-          side: THREE.DoubleSide,
-        }),
-      );
-      this.screenBackingMesh.position.set(0, 0, -0.015);
-      this.screenBackingMesh.renderOrder = 1;
-      this.screenSurfaceGroup.add(this.screenBackingMesh);
       const material = new THREE.MeshBasicMaterial({ map: this.videoTexture, side: THREE.DoubleSide, transparent: true, opacity: 1 });
       this.videoMesh = new THREE.Mesh(this.createVideoGeometry(), material);
       this.videoMesh.renderOrder = 2;
@@ -2260,9 +2289,6 @@
       }
       this.videoMesh.scale.set(this.settings.panelWidth, this.settings.panelHeight, 1);
       this.videoMesh.position.set(0, 0, 0);
-      if (this.screenBackingMesh) {
-        this.screenBackingMesh.scale.set(this.settings.panelWidth * 1.04, this.settings.panelHeight * 1.08, 1);
-      }
       if (this.screenGroup) {
         this.screenGroup.position.set(this.settings.panelX, this.settings.panelY, -this.settings.distance);
         this.screenGroup.rotation.set(0, 0, 0);
@@ -2551,7 +2577,7 @@
 
     initBacklight() {
       this.backlightGroup = new THREE.Group();
-      this.backlightGroup.position.set(0, 0, -0.1);
+      this.backlightGroup.position.set(0, 0, -0.16);
       (this.screenSurfaceGroup || this.screenGroup).add(this.backlightGroup);
       this.backlightTexture = createBacklightGlowTexture();
       const segments = Object.entries(BACKLIGHT_SEGMENT_COUNTS).flatMap(([side, count]) => (
@@ -2664,6 +2690,7 @@
       const width = this.settings.panelWidth;
       const height = this.settings.panelHeight;
       const edgeInset = 0.12;
+      const rearOffset = edgeInset * 0.45;
       if (this.backlightMaskMesh) {
         this.backlightMaskMesh.scale.set(width * 1.01, height * 1.01, 1);
       }
@@ -2676,20 +2703,20 @@
           const xInset = edgeInset * lerp(0.55, 1.45, amount);
           const yInset = edgeInset * lerp(1.45, 0.55, amount);
           segmentMesh.position.set(
-            horizontal * (width / 2 - xInset),
-            vertical * (height / 2 - yInset),
+            horizontal * (width / 2 + rearOffset - xInset * 0.35),
+            vertical * (height / 2 + rearOffset - yInset * 0.35),
             0,
           );
           segmentMesh.scale.set(3.25, 2.85, 1);
         } else if (segment.side === "top" || segment.side === "bottom") {
           const segmentWidth = (width / segment.count) * 3.65;
           const x = -width / 2 + (segment.index + 0.5) * (width / segment.count);
-          const y = segment.side === "top" ? height / 2 - edgeInset : -height / 2 + edgeInset;
+          const y = segment.side === "top" ? height / 2 + rearOffset : -height / 2 - rearOffset;
           segmentMesh.position.set(x, y, 0);
           segmentMesh.scale.set(segmentWidth, 2.2, 1);
         } else {
           const segmentHeight = (height / segment.count) * 3.35;
-          const x = segment.side === "left" ? -width / 2 - edgeInset * 0.15 : width / 2 + edgeInset * 0.15;
+          const x = segment.side === "left" ? -width / 2 - rearOffset : width / 2 + rearOffset;
           const y = -height / 2 + (segment.index + 0.5) * (height / segment.count);
           segmentMesh.position.set(x, y, 0);
           segmentMesh.scale.set(2.75, segmentHeight, 1);
@@ -3657,6 +3684,17 @@
     return Boolean(value && typeof value === "object" && !Array.isArray(value));
   }
 
+  function mediaInfoVideoAspectRatio(mediaInfo) {
+    const streams = Array.isArray(mediaInfo?.videoStreams) ? mediaInfo.videoStreams : [];
+    const candidates = [mediaInfo?.defaultVideo, ...streams];
+    for (const candidate of candidates) {
+      const width = Number(candidate?.width || 0);
+      const height = Number(candidate?.height || 0);
+      if (width > 0 && height > 0) return Math.max(0.1, width / height);
+    }
+    return 0;
+  }
+
   function coerceThemeSettingValue(value, definition = null) {
     const type = String(definition?.type || "number").toLowerCase();
     if (type === "boolean") return Boolean(value);
@@ -3768,7 +3806,7 @@
       transparent: true,
       opacity: 0.24,
       depthWrite: false,
-      depthTest: true,
+      depthTest: false,
       blending: THREE.AdditiveBlending,
       side: THREE.DoubleSide,
     });
@@ -3827,7 +3865,7 @@
       `,
       transparent: true,
       depthWrite: false,
-      depthTest: true,
+      depthTest: false,
       blending: THREE.AdditiveBlending,
       side: THREE.DoubleSide,
     });
@@ -4196,6 +4234,15 @@
     } catch (error) {
       return fallback instanceof THREE.Color ? fallback : new THREE.Color(fallback || "#000000");
     }
+  }
+
+  function shouldRestoreDesktopRoomView(stored) {
+    const viewKeys = ["roomViewX", "roomViewY", "roomViewZ", "roomViewYaw", "roomViewPitch"];
+    if (!viewKeys.some((key) => Object.prototype.hasOwnProperty.call(stored, key))) return false;
+    const allZero = viewKeys.every((key) => Math.abs(Number(stored[key] || 0)) < 0.001);
+    const flatFloorView = Math.abs(Number(stored.roomViewY || 0)) < 0.05
+      && Math.abs(Number(stored.roomViewPitch || 0)) < 1;
+    return allZero || flatFloorView;
   }
 
   function parseObjGeometry(text) {

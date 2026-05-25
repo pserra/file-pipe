@@ -2716,6 +2716,7 @@ document.addEventListener("alpine:init", () => {
         panelSelector: ".xr-side-panel",
         storageKey: "filePipeHostXrPlayer",
         mediaInfo: () => this.playerSource?.mediaInfo || this.playerRoomMetadata?.mediaInfo || null,
+        playbackProfile: profile,
         onSpatialAudioPreference: () => this.ensureHostSpatialAudioSource(),
         sourceLayout: xrSourceLayoutFromProfile(profile),
         localDepthProcessor: profile.localStereoProcessor ? profile.stereoProcessor : "",
