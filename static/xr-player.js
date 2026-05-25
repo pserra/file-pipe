@@ -59,6 +59,7 @@
       this.backlightTexture = null;
       this.backlightSampleCanvas = null;
       this.backlightSampleContext = null;
+      this.lastVideoBacklightColors = null;
       this.lastBacklightSampleAt = 0;
       this.xrSidePanelCanvas = null;
       this.xrSidePanelContext = null;
@@ -1175,7 +1176,7 @@
 
     sampleVideoEdgeColors() {
       if (!this.backlightSampleContext || this.video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
-        return offBacklightColors();
+        return this.lastVideoBacklightColors || fallbackBacklightColors(null, 0.22);
       }
       try {
         const context = this.backlightSampleContext;
@@ -1236,9 +1237,18 @@
               : sampleExpandedSegmentRegion(data, width, height, window, segment);
           }
         }
+        if (hasVisibleBacklightColors(output)) {
+          this.lastVideoBacklightColors = output;
+          return output;
+        }
+        const broadOutput = sampleExpandedBacklightColors(data, width, height, window, this.backlightSegments);
+        if (hasVisibleBacklightColors(broadOutput)) {
+          this.lastVideoBacklightColors = broadOutput;
+          return broadOutput;
+        }
         return output;
       } catch (error) {
-        return offBacklightColors();
+        return this.lastVideoBacklightColors || fallbackBacklightColors(null, 0.22);
       }
     }
 
@@ -1680,6 +1690,22 @@
 
   function isVisibleBacklightColor(color) {
     return Number(color?.opacity || 0) > 0.01;
+  }
+
+  function hasVisibleBacklightColors(colors) {
+    return Object.values(colors || {}).some((sideColors) => (
+      Array.isArray(sideColors)
+      && sideColors.some((color) => isVisibleBacklightColor(color))
+    ));
+  }
+
+  function sampleExpandedBacklightColors(data, width, height, window, segments) {
+    const output = { top: [], bottom: [], left: [], right: [] };
+    for (const segment of segments || []) {
+      if (!output[segment.side]) continue;
+      output[segment.side][segment.index] = sampleExpandedSegmentRegion(data, width, height, window, segment);
+    }
+    return output;
   }
 
   function fallbackBacklightColors(color = null, opacity = null) {
