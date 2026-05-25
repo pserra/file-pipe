@@ -1132,16 +1132,7 @@
         ...Array.from({ length: BACKLIGHT_SEGMENT_COUNTS.right }, (_value, index) => ({ side: "right", index, count: BACKLIGHT_SEGMENT_COUNTS.right })),
       ];
       this.backlightSegments = segments.map((segment) => {
-        const material = new THREE.MeshBasicMaterial({
-          color: 0x3b82f6,
-          map: this.backlightTexture,
-          transparent: true,
-          opacity: 0.24,
-          depthWrite: false,
-          depthTest: true,
-          blending: THREE.AdditiveBlending,
-          side: THREE.DoubleSide,
-        });
+        const material = createBacklightSegmentMaterial(this.backlightTexture, this.videoTexture);
         const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1, 3, 3), material);
         mesh.renderOrder = -3;
         mesh.userData.backlightSegment = segment;
@@ -1263,9 +1254,17 @@
       const intensity = clampNumber(Number(this.settings.backlightIntensity), 0, 150, DEFAULT_SETTINGS.backlightIntensity) / 100;
       if (mode === "soft") {
         for (const segmentMesh of this.backlightSegments) {
-          segmentMesh.material.color.set("#3b82f6");
-          segmentMesh.material.opacity = 0.16 * intensity;
+          this.setBacklightSegmentStatic(segmentMesh, colorToRgb("#3b82f6"), 0.16 * intensity);
         }
+        return;
+      }
+      if (mode === "video") {
+        const ready = this.video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA;
+        if (this.videoTexture) this.videoTexture.needsUpdate = true;
+        for (const segmentMesh of this.backlightSegments) {
+          this.setBacklightSegmentVideo(segmentMesh, ready ? 0.8 * intensity : 0);
+        }
+        this.setBacklightSampleStatus(ready ? "shader: live video texture" : "shader: waiting for frame");
         return;
       }
       const colors = mode === "video" ? this.sampleVideoEdgeColors() : fallbackBacklightColors();
@@ -1275,9 +1274,78 @@
         const color = colors[segment.side]?.[segment.index] || (
           mode === "video" ? offBacklightColor() : fallbackBacklightColor(segment)
         );
-        segmentMesh.material.color.setRGB(color.r, color.g, color.b);
-        segmentMesh.material.opacity = clampNumber((color.opacity ?? 0.3) * 0.72 * intensity, 0, 0.52, 0.26);
+        this.setBacklightSegmentStatic(
+          segmentMesh,
+          color,
+          clampNumber((color.opacity ?? 0.3) * 0.72 * intensity, 0, 0.52, 0.26),
+        );
       }
+    }
+
+    setBacklightSegmentStatic(segmentMesh, color, opacity) {
+      const material = segmentMesh?.material;
+      if (!material) return;
+      if (material.uniforms) {
+        material.uniforms.useVideo.value = 0;
+        material.uniforms.glowColor.value.setRGB(color.r, color.g, color.b);
+        material.uniforms.opacity.value = opacity;
+        material.needsUpdate = true;
+        return;
+      }
+      material.color?.setRGB?.(color.r, color.g, color.b);
+      material.opacity = opacity;
+    }
+
+    setBacklightSegmentVideo(segmentMesh, opacity) {
+      const material = segmentMesh?.material;
+      if (!material?.uniforms) {
+        this.setBacklightSegmentStatic(segmentMesh, fallbackBacklightColor(segmentMesh?.userData?.backlightSegment || {}), opacity * 0.45);
+        return;
+      }
+      const region = this.videoSampleRegionForSegment(segmentMesh.userData.backlightSegment || {});
+      material.uniforms.useVideo.value = 1;
+      material.uniforms.opacity.value = opacity;
+      material.uniforms.videoMap.value = this.videoTexture;
+      material.uniforms.sampleRegion.value.set(region.x0, region.y0, region.x1, region.y1);
+    }
+
+    videoSampleRegionForSegment(segment) {
+      const window = this.displayedVideoSampleWindow();
+      const start = Number(segment.index || 0) / Math.max(1, Number(segment.count || 1));
+      const end = (Number(segment.index || 0) + 1) / Math.max(1, Number(segment.count || 1));
+      const edgeDepth = 0.34;
+      if (segment.side === "top") {
+        return {
+          x0: lerp(window.x0, window.x1, start),
+          x1: lerp(window.x0, window.x1, end),
+          y0: window.y0,
+          y1: lerp(window.y0, window.y1, edgeDepth),
+        };
+      }
+      if (segment.side === "bottom") {
+        return {
+          x0: lerp(window.x0, window.x1, start),
+          x1: lerp(window.x0, window.x1, end),
+          y0: lerp(window.y0, window.y1, 1 - edgeDepth),
+          y1: window.y1,
+        };
+      }
+      const yStart = 1 - end;
+      const yEnd = 1 - start;
+      if (segment.side === "left") {
+        return {
+          x0: window.x0,
+          x1: lerp(window.x0, window.x1, edgeDepth),
+          y0: lerp(window.y0, window.y1, yStart),
+          y1: lerp(window.y0, window.y1, yEnd),
+        };
+      }
+      return {
+        x0: lerp(window.x0, window.x1, 1 - edgeDepth),
+        x1: window.x1,
+        y0: lerp(window.y0, window.y1, yStart),
+        y1: lerp(window.y0, window.y1, yEnd),
+      };
     }
 
     sampleVideoEdgeColors() {
@@ -1863,6 +1931,70 @@
     texture.colorSpace = THREE.SRGBColorSpace;
     texture.needsUpdate = true;
     return texture;
+  }
+
+  function createBacklightSegmentMaterial(glowTexture, videoTexture) {
+    return new THREE.ShaderMaterial({
+      uniforms: {
+        glowMap: { value: glowTexture },
+        videoMap: { value: videoTexture },
+        glowColor: { value: new THREE.Color("#3b82f6") },
+        opacity: { value: 0.24 },
+        sampleRegion: { value: new THREE.Vector4(0, 0, 1, 1) },
+        useVideo: { value: 0 },
+      },
+      vertexShader: `
+        varying vec2 vUv;
+
+        void main() {
+          vUv = uv;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform sampler2D glowMap;
+        uniform sampler2D videoMap;
+        uniform vec3 glowColor;
+        uniform float opacity;
+        uniform vec4 sampleRegion;
+        uniform float useVideo;
+        varying vec2 vUv;
+
+        vec3 sampledVideoColor() {
+          vec3 sum = vec3(0.0);
+          for (int y = 0; y < 3; y += 1) {
+            for (int x = 0; x < 4; x += 1) {
+              vec2 grid = (vec2(float(x), float(y)) + vec2(0.5)) / vec2(4.0, 3.0);
+              vec2 topOriginUv = mix(sampleRegion.xy, sampleRegion.zw, grid);
+              vec2 textureUv = vec2(topOriginUv.x, 1.0 - topOriginUv.y);
+              sum += texture2D(videoMap, textureUv).rgb;
+            }
+          }
+          vec3 average = sum / 12.0;
+          float maxChannel = max(max(average.r, average.g), average.b);
+          float luminance = dot(average, vec3(0.2126, 0.7152, 0.0722));
+          float active = smoothstep(0.018, 0.075, max(maxChannel, luminance));
+          float boost = mix(1.65, 1.08, smoothstep(0.14, 0.55, maxChannel));
+          return clamp(average * boost * active, vec3(0.0), vec3(1.0));
+        }
+
+        void main() {
+          vec4 glow = texture2D(glowMap, vUv);
+          vec3 videoColor = sampledVideoColor();
+          float videoMax = max(max(videoColor.r, videoColor.g), videoColor.b);
+          float videoLuminance = dot(videoColor, vec3(0.2126, 0.7152, 0.0722));
+          float videoAlpha = smoothstep(0.01, 0.05, max(videoMax, videoLuminance));
+          vec3 color = mix(glowColor, videoColor, useVideo);
+          float alpha = glow.a * opacity * mix(1.0, videoAlpha, useVideo);
+          gl_FragColor = vec4(color, alpha);
+        }
+      `,
+      transparent: true,
+      depthWrite: false,
+      depthTest: true,
+      blending: THREE.AdditiveBlending,
+      side: THREE.DoubleSide,
+    });
   }
 
   function flipRgbaRows(source, target, width, height) {
