@@ -1268,9 +1268,10 @@
       }
       if (mode === "video") {
         const ready = this.video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA;
+        const videoIntensity = intensity + 2;
         if (this.videoTexture) this.videoTexture.needsUpdate = true;
         for (const segmentMesh of this.backlightSegments) {
-          this.setBacklightSegmentVideo(segmentMesh, ready ? 0.32 * intensity : 0);
+          this.setBacklightSegmentVideo(segmentMesh, ready ? 0.32 * videoIntensity : 0);
         }
         this.setBacklightSampleStatus(ready ? "shader: live video texture" : "shader: waiting for frame");
         return;
