@@ -24,6 +24,8 @@ document.addEventListener("alpine:init", () => {
     hostClockRttMs: 0,
     hostClockSynced: false,
     acknowledgementAccepted: false,
+    acceptedSourceVersion: 0,
+    acceptedContentKey: "",
     pendingVideoRequest: false,
     pendingVideoRequestTimer: null,
     receiving: false,
@@ -99,6 +101,8 @@ document.addEventListener("alpine:init", () => {
         "viewerName",
         "selectedPlaybackMode",
         "acknowledgementAccepted",
+        "acceptedSourceVersion",
+        "acceptedContentKey",
         "mediaVolume",
         "participantVolume",
         "voiceInputId",
@@ -133,6 +137,8 @@ document.addEventListener("alpine:init", () => {
         this.selectedPlaybackMode = session.selectedPlaybackMode;
       }
       this.acknowledgementAccepted = Boolean(session.acknowledgementAccepted);
+      this.acceptedSourceVersion = Number(session.acceptedSourceVersion || 0);
+      if (typeof session.acceptedContentKey === "string") this.acceptedContentKey = session.acceptedContentKey;
       const mediaVolume = Number(session.mediaVolume);
       const participantVolume = Number(session.participantVolume);
       if (Number.isFinite(mediaVolume)) this.mediaVolume = clamp(mediaVolume, 0, 1);
@@ -154,6 +160,8 @@ document.addEventListener("alpine:init", () => {
           viewerName: this.viewerName,
           selectedPlaybackMode: this.selectedPlaybackMode,
           acknowledgementAccepted: this.acknowledgementAccepted,
+          acceptedSourceVersion: this.acceptedSourceVersion,
+          acceptedContentKey: this.acceptedContentKey,
           mediaVolume: this.mediaVolume,
           participantVolume: this.participantVolume,
           voiceInputId: this.voiceInputId,
@@ -233,6 +241,13 @@ document.addEventListener("alpine:init", () => {
         );
         this.metadata = JSON.parse(new TextDecoder().decode(metadataBytes));
         this.sourceVersion = Number(this.metadata.sourceVersion || 0);
+        const contentKey = this.metadata.contentKey || String(this.sourceVersion || "");
+        const acceptedKey = this.acceptedContentKey || String(this.acceptedSourceVersion || "");
+        if (this.acknowledgementAccepted && acceptedKey && acceptedKey !== contentKey) {
+          this.acknowledgementAccepted = false;
+          this.acceptedSourceVersion = 0;
+          this.acceptedContentKey = "";
+        }
         if (!this.isPlaybackModeAvailable(this.selectedPlaybackMode)) {
           this.selectedPlaybackMode = this.defaultPlaybackMode();
         }
@@ -1095,6 +1110,8 @@ document.addEventListener("alpine:init", () => {
       }
       if (!this.acknowledgementAccepted) {
         this.acknowledgementAccepted = true;
+        this.acceptedSourceVersion = this.sourceVersion;
+        this.acceptedContentKey = this.metadata?.contentKey || String(this.sourceVersion || "");
         this.saveWatchSession();
       }
       const hlsStream = this.isHlsStream();
@@ -1662,6 +1679,15 @@ document.addEventListener("alpine:init", () => {
       this.metadata = message.metadata || this.metadata;
       this.sourceVersion = Number(this.metadata?.sourceVersion || this.sourceVersion || 0);
       this.selectedPlaybackMode = this.defaultPlaybackMode();
+      const contentKey = this.metadata?.contentKey || String(this.sourceVersion || "");
+      if (message.requiresAcknowledgement || (this.acceptedContentKey && this.acceptedContentKey !== contentKey)) {
+        this.acknowledgementAccepted = false;
+        this.acceptedSourceVersion = 0;
+        this.acceptedContentKey = "";
+      } else if (this.acknowledgementAccepted) {
+        this.acceptedSourceVersion = this.sourceVersion;
+        this.acceptedContentKey = contentKey;
+      }
       this.teardownViewerHlsPlayer();
       this.teardownViewerProgressiveMsePlayer();
       this.detachViewerXrPlayer();
@@ -1687,8 +1713,12 @@ document.addEventListener("alpine:init", () => {
       this.pendingHlsBytes = {};
       this.pendingSegmentSync = null;
       this.pendingSync = null;
+      this.pendingVideoRequest = false;
       this.rangePlayerPromoted = false;
-      this.status = message.reason || "Host switched video source for compatibility.";
+      this.status = this.acknowledgementAccepted
+        ? (message.reason || "Host updated the room source.")
+        : (message.reason || "Host switched video source. Confirm the new content before playback.");
+      this.saveWatchSession();
       if (this.acknowledgementAccepted) {
         this.pendingVideoRequest = true;
         setTimeout(() => this.requestVideo(), 250);

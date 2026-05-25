@@ -203,6 +203,8 @@ RESOURCE_METADATA_CACHE: Dict[str, Dict[str, object]] = {}
 CHECKSUM_CACHE: Dict[str, Dict[str, object]] = {}
 MEDIA_INFO_CACHE: Dict[str, Dict[str, object]] = {}
 RESOURCE_CHECKSUM_CACHE: Dict[str, Dict[str, object]] = {}
+CONNECTOR_SERVICE_ENABLED = True
+CONNECTOR_SETTINGS: Dict[str, object] = {"hostName": "", "pinnedWatchRoom": False}
 LOCAL_DIRECTORY_FILE = Path(os.environ.get("FILE_PIPE_DIRECTORIES_FILE", "instance/served_directories.json"))
 PLAYABLE_BROWSER_AUDIO_CODECS = {"aac", "mp3", "opus", "vorbis", "flac", "alac"}
 PLAYABLE_BROWSER_VIDEO_CODECS = {"h264"}
@@ -2091,6 +2093,16 @@ def create_connector_app(security: Optional[ConnectorSecurity] = None):
     app = Flask(__name__)
     app.after_request(add_cors_headers)
 
+    @app.before_request
+    def require_enabled_service():
+        if CONNECTOR_SERVICE_ENABLED:
+            return None
+        if request.method == "OPTIONS":
+            return None
+        if request.path in {"/", "/health", "/auth/session"} or request.path.startswith("/admin"):
+            return None
+        return jsonify({"error": "Local connector is turned off.", "serviceEnabled": False}), 503
+
     @app.route("/<path:_path>", methods=["OPTIONS"])
     @app.route("/", methods=["OPTIONS"])
     def options(_path=None):
@@ -2106,6 +2118,8 @@ def create_connector_app(security: Optional[ConnectorSecurity] = None):
             {
                 "ok": True,
                 "service": "file-pipe-local-connector",
+                "serviceEnabled": CONNECTOR_SERVICE_ENABLED,
+                "settings": CONNECTOR_SETTINGS,
                 **auth_state(security),
             }
         )

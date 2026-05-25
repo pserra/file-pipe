@@ -10,7 +10,15 @@ import webbrowser
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
-from standalone_config import config_path, default_cache_dir, default_ssl_dir, load_config, normalize_config, save_config
+from standalone_config import (
+    config_path,
+    default_cache_dir,
+    default_ssl_dir,
+    load_config,
+    normalize_config,
+    public_connector_settings,
+    save_config,
+)
 
 
 class StandaloneRuntime:
@@ -230,6 +238,8 @@ def main() -> int:
     from standalone_admin import create_admin_blueprint
 
     local_connector.TRANSCODE_CACHE_DIR = active_cache_dir
+    local_connector.CONNECTOR_SERVICE_ENABLED = bool(config["serviceEnabled"])
+    local_connector.CONNECTOR_SETTINGS = public_connector_settings(config)
 
     ssl_context = ensure_local_certificate(str(config["host"])) if config["useTls"] else None
     scheme = "https" if ssl_context else "http"

@@ -8,6 +8,7 @@ document.addEventListener("alpine:init", () => {
     connectorSecure: false,
     connectorReady: false,
     connectorRestoreAttempted: false,
+    connectorSettings: { hostName: "", pinnedWatchRoom: false },
     servers: [],
     selectedServer: null,
     selectedServerId: "",
@@ -35,6 +36,7 @@ document.addEventListener("alpine:init", () => {
     localFileSize: 0,
     localFileType: "",
     outgoingTransfers: [],
+    peerShareSessions: {},
     previewLoading: false,
     previewUrl: "",
     previewType: "",
@@ -323,7 +325,14 @@ document.addEventListener("alpine:init", () => {
         this.connectorAuthRequired = Boolean(health.authRequired);
         this.connectorAuthenticated = Boolean(health.authenticated);
         this.connectorSecure = Boolean(health.secure);
-        this.connectorReady = !this.connectorAuthRequired || this.connectorAuthenticated;
+        this.connectorSettings = {
+          hostName: String(health.settings?.hostName || ""),
+          pinnedWatchRoom: Boolean(health.settings?.pinnedWatchRoom),
+        };
+        this.connectorReady = Boolean(health.serviceEnabled !== false) && (!this.connectorAuthRequired || this.connectorAuthenticated);
+        if (health.serviceEnabled === false) {
+          this.error = "The local connector is turned off. Open the connector toolbar UI to turn it back on.";
+        }
         if (this.connectorReady) {
           await this.loadConnectorDirectories();
           await this.restoreLastBrowseSelection();
@@ -903,12 +912,14 @@ document.addEventListener("alpine:init", () => {
           reofferTimer: null,
         };
         transfer.status = "Waiting for recipient";
+        transfer.expiresAt = shareSession.expiresAt;
         await this.updateShareQrCode(this.shareLink);
         transfer.progress = 0;
         transfer.bytesSent = 0;
         transfer.totalBytes = hashResult.totalBytes;
         transfer.shareLink = this.shareLink;
         transfer.md5 = metadata.md5;
+        this.peerShareSessions[transfer.id] = shareSession;
         await this.publishPeerShareOffer(shareSession);
       } catch (error) {
         this.error = error.message;
@@ -1168,6 +1179,7 @@ document.addEventListener("alpine:init", () => {
         title: item.title,
         type: "video/mp4",
         size: transcodeSize,
+        contentKey: `connector:${resource.proxyPath}`,
         sourceLabel: `${this.sourceLabel(this.selectedServer)} video transcoded to MP4/AAC`,
         mediaInfo,
         playbackProfile: stableMp4PlaybackProfile(mediaInfo),
@@ -1225,6 +1237,7 @@ document.addEventListener("alpine:init", () => {
         title: item.title,
         type: "application/vnd.apple.mpegurl",
         size: Number(mediaInfo?.size || hlsInfo?.mediaInfo?.size || resource.size || 0),
+        contentKey: `connector:${resource.proxyPath}`,
         sourceLabel: `${this.sourceLabel(this.selectedServer)} live segmented transcode`,
         mediaInfo: hlsInfo.mediaInfo || mediaInfo,
         playbackProfile: {
@@ -1357,7 +1370,8 @@ document.addEventListener("alpine:init", () => {
         return;
       }
 
-      this.clearPlayer();
+      const preserveWatchRoom = this.shouldPreserveWatchRoom();
+      this.clearPlayer(preserveWatchRoom);
       this.playerLoading = true;
       this.playerTitle = item.title;
       this.playerType = "Preparing video";
@@ -1386,6 +1400,7 @@ document.addEventListener("alpine:init", () => {
           } else {
             await this.launchFullTranscodedConnectorVideo(item, resource, mediaInfo, transcodeParts);
           }
+          await this.publishPinnedWatchRoomSourceChange("Host switched videos in this pinned room.");
           return;
         }
 
@@ -1405,6 +1420,7 @@ document.addEventListener("alpine:init", () => {
           title: item.title,
           type: this.playerType,
           size: blob.size || Number(resource.size || 0),
+          contentKey: `connector:${resource.proxyPath}`,
           sourceLabel: `${this.sourceLabel(this.selectedServer)} video`,
           mediaInfo,
           playbackProfile: playbackProfileFromMediaInfo(mediaInfo, this.playerType, "original"),
@@ -1430,6 +1446,7 @@ document.addEventListener("alpine:init", () => {
           this.prepareHostPlayerMedia();
         }, 0);
         this.showBootstrapTab("player-tab");
+        await this.publishPinnedWatchRoomSourceChange("Host switched videos in this pinned room.");
       } catch (error) {
         this.error = error.message;
         this.playerStatus = "";
@@ -1438,12 +1455,13 @@ document.addEventListener("alpine:init", () => {
       }
     },
 
-    launchLocalVideo() {
+    async launchLocalVideo() {
       if (!this.localFile || !this.localFileType.startsWith("video/")) {
         this.error = "Choose a local video file first.";
         return;
       }
-      this.clearPlayer();
+      const preserveWatchRoom = this.shouldPreserveWatchRoom();
+      this.clearPlayer(preserveWatchRoom);
       this.teardownHostHlsPlayer();
       this.playerUrl = URL.createObjectURL(this.localFile);
       this.playerType = this.localFile.type || "video/mp4";
@@ -1453,6 +1471,7 @@ document.addEventListener("alpine:init", () => {
         title: this.localFile.name,
         type: this.playerType,
         size: this.localFile.size,
+        contentKey: `local:${this.localFile.name}:${this.localFile.size}:${this.localFile.lastModified || 0}`,
         sourceLabel: "Local video",
         playbackProfile: {
           sourceKind: "local",
@@ -1474,9 +1493,10 @@ document.addEventListener("alpine:init", () => {
         this.prepareHostPlayerMedia();
       }, 0);
       this.showBootstrapTab("player-tab");
+      await this.publishPinnedWatchRoomSourceChange("Host switched videos in this pinned room.");
     },
 
-    clearPlayer() {
+    clearPlayer(preserveWatchRoom = false) {
       if (this.hostXrPlayer) {
         this.hostXrPlayer.dispose();
         this.hostXrPlayer = null;
@@ -1484,7 +1504,9 @@ document.addEventListener("alpine:init", () => {
       this.teardownHostHlsPlayer();
       this.teardownHostProgressiveMsePlayer();
       if (this.playerUrl && this.playerUrl.startsWith("blob:")) URL.revokeObjectURL(this.playerUrl);
-      this.resetWatchRoom();
+      if (!preserveWatchRoom) {
+        this.resetWatchRoom();
+      }
       if (this.bigscreenTransfer?.channel) this.bigscreenTransfer.channel.close();
       if (this.bigscreenTransfer?.peer) this.bigscreenTransfer.peer.close();
       this.playerUrl = "";
@@ -1492,7 +1514,7 @@ document.addEventListener("alpine:init", () => {
       this.playerTitle = "";
       this.playerSource = null;
       this.playerConnectorLaunch = null;
-      this.playerSourceVersion = 0;
+      if (!preserveWatchRoom) this.playerSourceVersion = 0;
       this.playerCompatibilitySwitching = false;
       this.playerAudioStatus = "";
       this.playerLoading = false;
@@ -1528,6 +1550,32 @@ document.addEventListener("alpine:init", () => {
       this.playerRoomRangeSource = null;
       this.playerRoomHlsSource = null;
       if (this.qrModalUrl) this.closeQrModal();
+    },
+
+    shouldPreserveWatchRoom() {
+      return Boolean(this.connectorSettings?.pinnedWatchRoom && this.playerRoomId && this.playerRoomKey);
+    },
+
+    async publishPinnedWatchRoomSourceChange(reason = "Host switched videos in this pinned room.") {
+      if (!this.shouldPreserveWatchRoom() || !this.playerSource) return false;
+      this.playerStatus = "Updating pinned watch room...";
+      await this.publishCurrentWatchRoomMetadata(reason, this.playerSource);
+      for (const peer of this.connectedWatchPeers()) {
+        peer.videoComplete = false;
+        peer.readySyncId = "";
+        peer.viewerHasPlayer = false;
+        peer.cancelledRanges?.clear();
+        if (peer.channel?.readyState === "open") {
+          sendChannelJson(peer.channel, {
+            type: "source-update",
+            reason,
+            requiresAcknowledgement: true,
+            metadata: this.playerRoomMetadata,
+          });
+        }
+      }
+      this.playerStatus = "Pinned watch room updated. Viewers will confirm the new video before playback.";
+      return true;
     },
 
     async refreshAudioDevices() {
@@ -1999,9 +2047,11 @@ document.addEventListener("alpine:init", () => {
         md5: hashResult.md5,
         originalMd5: hashResult.provisional ? hashResult.md5 : "",
         originalSize: hashResult.originalBytes || 0,
+        contentKey: source.contentKey || `${source.title}|${source.sourceLabel}`,
         checksumKind: isHlsLive ? "hls-segments" : (hashResult.provisional ? "original-source" : "stream"),
         provisional: Boolean(hashResult.provisional),
         source: source.sourceLabel,
+        hostName: this.connectorSettings?.hostName || "",
         mode: isHlsLive ? "Encrypted WebRTC live stream" : "Encrypted WebRTC watch room",
         sharedAt: new Date().toISOString(),
         playbackProfile: source.playbackProfile || null,
@@ -2084,6 +2134,18 @@ document.addEventListener("alpine:init", () => {
       }
 
       this.error = "";
+      if (this.shouldPreserveWatchRoom()) {
+        this.playerRoomCreating = true;
+        try {
+          await this.publishPinnedWatchRoomSourceChange("Host updated this pinned watch room.");
+          if (!this.playerPollActive) this.pollWatchRoomParticipants();
+        } catch (error) {
+          this.error = error.message;
+        } finally {
+          this.playerRoomCreating = false;
+        }
+        return;
+      }
       if (this.playerRoomId || Object.keys(this.playerPeers).length > 0) {
         this.resetWatchRoom();
       }
@@ -2130,13 +2192,33 @@ document.addEventListener("alpine:init", () => {
       }
 
       this.error = "";
-      if (this.playerRoomId || Object.keys(this.playerPeers).length > 0) {
-        this.resetWatchRoom();
-      }
       this.playerRoomCreating = true;
       this.playerStatus = "Preparing live stream watch link...";
       try {
         const liveSource = await this.liveWatchSourceForCurrentPlayer();
+        if (this.shouldPreserveWatchRoom()) {
+          await this.publishCurrentWatchRoomMetadata("Host updated this pinned stream room.", liveSource);
+          for (const peer of this.connectedWatchPeers()) {
+            peer.videoComplete = false;
+            peer.readySyncId = "";
+            peer.viewerHasPlayer = false;
+            peer.cancelledRanges?.clear();
+            if (peer.channel?.readyState === "open") {
+              sendChannelJson(peer.channel, {
+                type: "source-update",
+                reason: "Host updated this pinned stream room.",
+                requiresAcknowledgement: true,
+                metadata: this.playerRoomMetadata,
+              });
+            }
+          }
+          this.playerStatus = "Pinned stream room updated. Viewers will confirm the new video before playback.";
+          if (!this.playerPollActive) this.pollWatchRoomParticipants();
+          return;
+        }
+        if (this.playerRoomId || Object.keys(this.playerPeers).length > 0) {
+          this.resetWatchRoom();
+        }
         this.playerRoomKey = await crypto.subtle.generateKey(
           { name: "AES-GCM", length: 256 },
           true,
@@ -3616,9 +3698,44 @@ document.addEventListener("alpine:init", () => {
       return this.outgoingTransfers.filter((transfer) => activeStatuses.has(transfer.status)).length;
     },
 
+    copyTransferLink(transfer) {
+      if (!transfer?.shareLink) return;
+      this.copyToClipboard(transfer.shareLink);
+    },
+
+    stopShareTransfer(transfer) {
+      if (!transfer) return;
+      const session = this.peerShareSessions[transfer.id];
+      if (session?.reofferTimer) window.clearTimeout(session.reofferTimer);
+      try {
+        session?.channel?.close?.();
+        session?.peer?.close?.();
+        transfer.channel?.close?.();
+        transfer.peer?.close?.();
+      } catch (error) {
+        // The peer may already be closed.
+      }
+      if (!["Expired", "Failed"].includes(transfer.status)) {
+        transfer.status = "Stopped";
+      }
+      delete this.peerShareSessions[transfer.id];
+      this.shareStatus = "Share link stopped.";
+    },
+
+    removeShareTransfer(transfer) {
+      if (!transfer) return;
+      this.stopShareTransfer(transfer);
+      this.outgoingTransfers = this.outgoingTransfers.filter((candidate) => candidate.id !== transfer.id);
+      if (this.shareLink === transfer.shareLink) {
+        this.shareLink = "";
+        this.updateShareQrCode("");
+      }
+    },
+
     badgeForTransfer(transfer) {
-      if (transfer.status === "Ready") return "text-bg-success";
+      if (["Ready", "Ready for another download", "Complete"].includes(transfer.status)) return "text-bg-success";
       if (transfer.status === "Failed") return "text-bg-danger";
+      if (["Expired", "Stopped"].includes(transfer.status)) return "text-bg-secondary";
       return "text-bg-primary";
     },
 

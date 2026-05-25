@@ -11,7 +11,7 @@ from flask import Blueprint, Response, jsonify, request
 from werkzeug.security import generate_password_hash
 
 import local_connector
-from standalone_config import normalize_config, public_config
+from standalone_config import normalize_config, public_config, public_connector_settings
 
 
 ADMIN_HEADER = "X-File-Pipe-Admin"
@@ -36,25 +36,53 @@ def cache_dir() -> Path:
     return Path(local_connector.TRANSCODE_CACHE_DIR).expanduser()
 
 
+def path_size(path: Path) -> int:
+    if path.is_file():
+        return path.stat().st_size
+    total = 0
+    for child in path.rglob("*"):
+        if child.is_file():
+            try:
+                total += child.stat().st_size
+            except OSError:
+                continue
+    return total
+
+
+def cache_entry_kind(path: Path) -> str:
+    name = path.name
+    if path.is_dir():
+        return "HLS segments"
+    if ".part" in name:
+        return "In progress"
+    if name.endswith(".mp4"):
+        return "Stable MP4"
+    return "Transcode"
+
+
 def transcode_files() -> List[Dict[str, object]]:
     directory = cache_dir()
     if not directory.exists():
         return []
     entries = []
     for path in sorted(directory.iterdir(), key=lambda item: item.stat().st_mtime if item.exists() else 0, reverse=True):
-        if not path.is_file():
+        if not path.is_file() and not path.is_dir():
             continue
-        if path.suffix not in {".mp4", ".part"}:
+        if path.is_file() and path.suffix not in {".mp4", ".part"}:
+            continue
+        if path.is_dir() and not path.name.startswith(local_connector.HLS_SEGMENT_CACHE_VERSION):
             continue
         try:
             stat = path.stat()
         except OSError:
             continue
+        size = path_size(path)
         entries.append(
             {
                 "name": path.name,
                 "path": str(path),
-                "size": stat.st_size,
+                "kind": cache_entry_kind(path),
+                "size": size,
                 "modifiedAt": format_timestamp(stat.st_mtime),
             }
         )
@@ -76,6 +104,10 @@ def safe_cache_path(name: str) -> Path:
     path = (directory / name).resolve()
     if path.parent != directory:
         raise ValueError("Invalid cache file.")
+    if path.is_dir():
+        if not path.name.startswith(local_connector.HLS_SEGMENT_CACHE_VERSION):
+            raise ValueError("Invalid cache entry.")
+        return path
     if path.suffix not in {".mp4", ".part"}:
         raise ValueError("Invalid cache file.")
     return path
@@ -187,6 +219,7 @@ def create_admin_blueprint(security, runtime):
                 "healthUrl": f"{runtime.connector_url}/health",
                 "configPath": str(runtime.config_path),
                 "restartRequired": runtime.restart_required,
+                "serviceEnabled": bool(local_connector.CONNECTOR_SERVICE_ENABLED),
                 "authRequired": bool(security.password_hash),
                 "allowInsecurePassword": bool(security.allow_insecure_password),
                 "activeSessions": len(sessions),
@@ -200,6 +233,7 @@ def create_admin_blueprint(security, runtime):
                 },
                 "readAhead": local_connector.READ_AHEAD_CACHE.stats(),
                 "config": public_config(runtime.config),
+                "settings": public_connector_settings(runtime.config),
             }
         )
 
@@ -210,12 +244,14 @@ def create_admin_blueprint(security, runtime):
     @blueprint.delete("/admin/api/cache")
     def admin_clear_cache():
         deleted = 0
-        bytes_deleted = 0
         for entry in transcode_files():
             try:
                 path = safe_cache_path(str(entry["name"]))
-                size = path.stat().st_size
-                path.unlink()
+                size = path_size(path)
+                if path.is_dir():
+                    shutil.rmtree(path)
+                else:
+                    path.unlink()
             except OSError:
                 continue
             deleted += 1
@@ -230,8 +266,11 @@ def create_admin_blueprint(security, runtime):
             return jsonify({"error": str(exc)}), 400
         if not path.exists():
             return jsonify({"error": "Cache file not found."}), 404
-        size = path.stat().st_size
-        path.unlink()
+        size = path_size(path)
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
         return jsonify({"ok": True, "deleted": 1, "bytesDeleted": size, "cache": cache_payload()})
 
     @blueprint.post("/admin/api/discover")
@@ -292,6 +331,8 @@ def create_admin_blueprint(security, runtime):
                 return jsonify({"error": f"Cache folder is unavailable: {exc}"}), 400
         security.allow_insecure_password = bool(updated["allowInsecurePassword"])
         runtime.save_config(updated)
+        local_connector.CONNECTOR_SERVICE_ENABLED = bool(updated["serviceEnabled"])
+        local_connector.CONNECTOR_SETTINGS = public_connector_settings(updated)
         if cache_changed:
             local_connector.TRANSCODE_CACHE_DIR = Path(updated["cacheDir"]).expanduser()
         if network_changed:
@@ -301,6 +342,8 @@ def create_admin_blueprint(security, runtime):
                 "ok": True,
                 "config": public_config(runtime.config),
                 "restartRequired": runtime.restart_required,
+                "serviceEnabled": bool(local_connector.CONNECTOR_SERVICE_ENABLED),
+                "settings": public_connector_settings(runtime.config),
                 "cache": cache_payload(),
             }
         )
@@ -809,11 +852,17 @@ ADMIN_HTML = r"""<!doctype html>
         </div>
         <div class="actions" style="margin-top:0;">
           <button id="refresh" type="button">Refresh</button>
-          <button class="danger" id="quit-app" type="button">Exit service</button>
+          <button class="secondary" id="toggle-service" type="button">Turn off connector</button>
+          <button class="danger" id="quit-app" type="button">Quit app</button>
         </div>
       </section>
 
       <section class="grid" aria-label="Connector status">
+        <div class="stat">
+          <span class="muted">Connector</span>
+          <strong id="service-state">On</strong>
+          <span id="host-name-state" class="muted">Host name not set</span>
+        </div>
         <div class="stat">
           <span class="muted">Cached files</span>
           <strong id="cache-count">0</strong>
@@ -862,6 +911,9 @@ ADMIN_HTML = r"""<!doctype html>
                 <button class="secondary" id="choose-cache-dir" type="button">Choose</button>
               </div>
             </label>
+            <label>Host name
+              <input id="host-name" maxlength="80" autocomplete="name" placeholder="Shown to room participants">
+            </label>
             <label>New password
               <input id="password" type="password" autocomplete="new-password">
             </label>
@@ -872,8 +924,16 @@ ADMIN_HTML = r"""<!doctype html>
               HTTPS connector
             </label>
             <label class="check-row">
+              <input id="service-enabled" type="checkbox">
+              Connector on
+            </label>
+            <label class="check-row">
               <input id="open-browser" type="checkbox">
               Open UI on launch
+            </label>
+            <label class="check-row">
+              <input id="pinned-watch-room" type="checkbox">
+              Pin watch rooms
             </label>
             <label class="check-row">
               <input id="allow-insecure-password" type="checkbox">
@@ -935,13 +995,14 @@ ADMIN_HTML = r"""<!doctype html>
             <thead>
               <tr>
                 <th>File</th>
+                <th>Type</th>
                 <th>Size</th>
                 <th>Modified</th>
                 <th></th>
               </tr>
             </thead>
             <tbody id="cache-rows">
-              <tr><td colspan="4" class="empty-row">No cached transcodes.</td></tr>
+              <tr><td colspan="5" class="empty-row">No cached transcodes.</td></tr>
             </tbody>
           </table>
         </div>
@@ -1006,8 +1067,11 @@ ADMIN_HTML = r"""<!doctype html>
         setValue("host", config.host);
         setValue("port", config.port);
         setValue("cache-dir", config.cacheDir);
+        setValue("host-name", config.hostName);
         setChecked("use-tls", config.useTls);
+        setChecked("service-enabled", config.serviceEnabled);
         setChecked("open-browser", config.openBrowser);
+        setChecked("pinned-watch-room", config.pinnedWatchRoom);
         setChecked("allow-insecure-password", config.allowInsecurePassword);
         document.getElementById("config-path").textContent = `Config: ${configPath}`;
       }
@@ -1033,12 +1097,13 @@ ADMIN_HTML = r"""<!doctype html>
         document.getElementById("cache-path").textContent = `Cache: ${cache.cacheDir}`;
         const body = document.getElementById("cache-rows");
         if (!cache.files.length) {
-          body.innerHTML = '<tr><td colspan="4" class="empty-row">No cached transcodes.</td></tr>';
+          body.innerHTML = '<tr><td colspan="5" class="empty-row">No cached transcodes.</td></tr>';
           return;
         }
         body.innerHTML = cache.files.map((file) => `
           <tr>
             <td><span class="cache-file">${escapeHtml(file.name)}</span></td>
+            <td>${escapeHtml(file.kind || "Transcode")}</td>
             <td>${formatBytes(file.size)}</td>
             <td>${escapeHtml(file.modifiedAt)}</td>
             <td><button class="danger" type="button" data-delete-cache="${encodeURIComponent(file.name)}">Delete</button></td>
@@ -1048,9 +1113,12 @@ ADMIN_HTML = r"""<!doctype html>
 
       function renderStatus(payload) {
         document.getElementById("connector-url").textContent = payload.connectorUrl;
-        document.getElementById("status-pill").textContent = payload.restartRequired ? "Restart needed" : "Running";
-        document.getElementById("status-pill").className = `pill ${payload.restartRequired ? "warn" : "ready"}`;
+        document.getElementById("status-pill").textContent = payload.restartRequired ? "Restart needed" : (payload.serviceEnabled ? "Running" : "Off");
+        document.getElementById("status-pill").className = `pill ${payload.restartRequired || !payload.serviceEnabled ? "warn" : "ready"}`;
         document.getElementById("restart-notice").className = `notice ${payload.restartRequired ? "show" : ""}`;
+        document.getElementById("service-state").textContent = payload.serviceEnabled ? "On" : "Off";
+        document.getElementById("host-name-state").textContent = payload.settings?.hostName || "Host name not set";
+        document.getElementById("toggle-service").textContent = payload.serviceEnabled ? "Turn off connector" : "Turn on connector";
         document.getElementById("server-count").textContent = payload.connections.serverCount || 0;
         document.getElementById("resource-count").textContent = `${payload.connections.resourceCount || 0} resources`;
         document.getElementById("auth-state").textContent = payload.authRequired ? "On" : "Off";
@@ -1080,8 +1148,11 @@ ADMIN_HTML = r"""<!doctype html>
           host: document.getElementById("host").value.trim(),
           port: Number(document.getElementById("port").value),
           cacheDir: document.getElementById("cache-dir").value.trim(),
+          hostName: document.getElementById("host-name").value.trim(),
           useTls: document.getElementById("use-tls").checked,
+          serviceEnabled: document.getElementById("service-enabled").checked,
           openBrowser: document.getElementById("open-browser").checked,
+          pinnedWatchRoom: document.getElementById("pinned-watch-room").checked,
           allowInsecurePassword: document.getElementById("allow-insecure-password").checked,
           clearPassword: document.getElementById("clear-password").checked,
         };
@@ -1146,6 +1217,13 @@ ADMIN_HTML = r"""<!doctype html>
         log("Cached file deleted.");
       }
 
+      async function toggleService() {
+        const enabled = !document.getElementById("service-enabled").checked;
+        document.getElementById("service-enabled").checked = enabled;
+        await saveConfig();
+        log(enabled ? "Connector turned on." : "Connector turned off. The admin UI remains available.");
+      }
+
       function wire(id, handler) {
         document.getElementById(id).addEventListener("click", async (event) => {
           const button = event.currentTarget;
@@ -1170,6 +1248,7 @@ ADMIN_HTML = r"""<!doctype html>
       wire("clear-connections", clearConnections);
       wire("refresh-cache", refreshCache);
       wire("clear-cache", clearCache);
+      wire("toggle-service", toggleService);
       wire("copy-url", async () => {
         await navigator.clipboard.writeText(document.getElementById("connector-url").textContent);
         log("Connector URL copied.");

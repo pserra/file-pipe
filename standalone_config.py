@@ -43,10 +43,13 @@ def default_config() -> Dict[str, Any]:
         "host": "127.0.0.1",
         "port": 8765,
         "useTls": True,
+        "serviceEnabled": True,
         "openBrowser": True,
         "allowInsecurePassword": False,
         "cacheDir": str(default_cache_dir()),
         "passwordHash": None,
+        "hostName": "",
+        "pinnedWatchRoom": False,
     }
 
 
@@ -85,12 +88,15 @@ def normalize_config(raw: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     config["host"] = host or defaults["host"]
     config["port"] = normalize_port(raw.get("port"), defaults["port"])
     config["useTls"] = normalize_bool(raw.get("useTls", raw.get("tls")), defaults["useTls"])
+    config["serviceEnabled"] = normalize_bool(raw.get("serviceEnabled"), defaults["serviceEnabled"])
     config["openBrowser"] = normalize_bool(raw.get("openBrowser"), defaults["openBrowser"])
     config["allowInsecurePassword"] = normalize_bool(
         raw.get("allowInsecurePassword"),
         defaults["allowInsecurePassword"],
     )
     config["cacheDir"] = normalize_path(raw.get("cacheDir"), default_cache_dir())
+    config["hostName"] = str(raw.get("hostName") or "").strip()[:80]
+    config["pinnedWatchRoom"] = normalize_bool(raw.get("pinnedWatchRoom"), defaults["pinnedWatchRoom"])
     password_hash = raw.get("passwordHash")
     config["passwordHash"] = password_hash if isinstance(password_hash, str) and password_hash else None
     return config
@@ -121,3 +127,11 @@ def public_config(config: Dict[str, Any]) -> Dict[str, Any]:
     payload = normalize_config(config)
     payload["passwordProtected"] = bool(payload.pop("passwordHash", None))
     return payload
+
+
+def public_connector_settings(config: Dict[str, Any]) -> Dict[str, Any]:
+    payload = normalize_config(config)
+    return {
+        "hostName": payload["hostName"],
+        "pinnedWatchRoom": payload["pinnedWatchRoom"],
+    }
