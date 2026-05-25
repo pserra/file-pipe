@@ -2,3 +2,6 @@
 pyinstaller>=6.0
 pystray>=0.19
 Pillow>=10.0
+pyobjc-core==10.3.2; sys_platform == "darwin"
+pyobjc-framework-Cocoa==10.3.2; sys_platform == "darwin"
+pyobjc-framework-Quartz==10.3.2; sys_platform == "darwin"
