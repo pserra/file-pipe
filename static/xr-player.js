@@ -1270,7 +1270,7 @@
         const ready = this.video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA;
         if (this.videoTexture) this.videoTexture.needsUpdate = true;
         for (const segmentMesh of this.backlightSegments) {
-          this.setBacklightSegmentVideo(segmentMesh, ready ? 0.8 * intensity : 0);
+          this.setBacklightSegmentVideo(segmentMesh, ready ? 0.32 * intensity : 0);
         }
         this.setBacklightSampleStatus(ready ? "shader: live video texture" : "shader: waiting for frame");
         return;
@@ -2008,11 +2008,11 @@
             videoAt(vec2(0.50, 0.82)) +
             videoAt(vec2(0.82, 0.82))
           ) / 9.0;
-          float glowStrength = max(max(glow.r, glow.g), max(glow.b, glow.a));
+          float glowStrength = glow.a;
           float videoMax = max(max(videoColor.r, videoColor.g), videoColor.b);
           float videoLuminance = dot(videoColor, vec3(0.2126, 0.7152, 0.0722));
-          float videoAlpha = smoothstep(0.012, 0.055, max(videoMax, videoLuminance));
-          float boost = mix(1.7, 1.08, smoothstep(0.14, 0.55, videoMax));
+          float videoAlpha = smoothstep(0.018, 0.09, max(videoMax, videoLuminance));
+          float boost = mix(1.25, 1.0, smoothstep(0.18, 0.62, videoMax));
           vec3 color = clamp(videoColor * boost, vec3(0.0), vec3(1.0));
           float alpha = glowStrength * opacity * videoAlpha;
           gl_FragColor = vec4(color, alpha);
