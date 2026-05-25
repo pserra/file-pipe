@@ -29,10 +29,14 @@
     "full-sbs": "Full SBS 3D",
   };
   const BACKLIGHT_SEGMENT_COUNTS = {
-    top: 20,
-    bottom: 20,
-    left: 8,
-    right: 8,
+    top: 22,
+    bottom: 22,
+    left: 9,
+    right: 9,
+    "top-left": 2,
+    "top-right": 2,
+    "bottom-left": 2,
+    "bottom-right": 2,
   };
 
   class FilePipeThreeXrPlayer {
@@ -1125,12 +1129,14 @@
       this.backlightGroup.position.set(0, 0, -0.1);
       this.screenGroup.add(this.backlightGroup);
       this.backlightTexture = createBacklightGlowTexture();
-      const segments = [
-        ...Array.from({ length: BACKLIGHT_SEGMENT_COUNTS.top }, (_value, index) => ({ side: "top", index, count: BACKLIGHT_SEGMENT_COUNTS.top })),
-        ...Array.from({ length: BACKLIGHT_SEGMENT_COUNTS.bottom }, (_value, index) => ({ side: "bottom", index, count: BACKLIGHT_SEGMENT_COUNTS.bottom })),
-        ...Array.from({ length: BACKLIGHT_SEGMENT_COUNTS.left }, (_value, index) => ({ side: "left", index, count: BACKLIGHT_SEGMENT_COUNTS.left })),
-        ...Array.from({ length: BACKLIGHT_SEGMENT_COUNTS.right }, (_value, index) => ({ side: "right", index, count: BACKLIGHT_SEGMENT_COUNTS.right })),
-      ];
+      const segments = Object.entries(BACKLIGHT_SEGMENT_COUNTS).flatMap(([side, count]) => (
+        Array.from({ length: count }, (_value, index) => ({
+          side,
+          index,
+          count,
+          opacityScale: isBacklightCornerSide(side) ? 0.72 : 1,
+        }))
+      ));
       this.backlightSegments = segments.map((segment) => {
         const material = createBacklightStaticMaterial(this.backlightTexture);
         const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1, 3, 3), material);
@@ -1238,7 +1244,19 @@
       }
       for (const segmentMesh of this.backlightSegments) {
         const segment = segmentMesh.userData.backlightSegment || {};
-        if (segment.side === "top" || segment.side === "bottom") {
+        if (isBacklightCornerSide(segment.side)) {
+          const horizontal = segment.side.includes("left") ? -1 : 1;
+          const vertical = segment.side.includes("top") ? 1 : -1;
+          const amount = (segment.index + 0.5) / Math.max(1, segment.count);
+          const xInset = edgeInset * lerp(0.55, 1.45, amount);
+          const yInset = edgeInset * lerp(1.45, 0.55, amount);
+          segmentMesh.position.set(
+            horizontal * (width / 2 - xInset),
+            vertical * (height / 2 - yInset),
+            0,
+          );
+          segmentMesh.scale.set(3.25, 2.85, 1);
+        } else if (segment.side === "top" || segment.side === "bottom") {
           const segmentWidth = (width / segment.count) * 3.65;
           const x = -width / 2 + (segment.index + 0.5) * (width / segment.count);
           const y = segment.side === "top" ? height / 2 - edgeInset : -height / 2 + edgeInset;
@@ -1296,7 +1314,7 @@
       if (!material) return;
       const staticMaterial = this.useBacklightStaticMaterial(segmentMesh);
       staticMaterial.color.setRGB(color.r, color.g, color.b);
-      staticMaterial.opacity = opacity;
+      staticMaterial.opacity = opacity * backlightOpacityScale(segmentMesh.userData.backlightSegment || {});
     }
 
     setBacklightSegmentVideo(segmentMesh, opacity) {
@@ -1306,7 +1324,7 @@
         return;
       }
       const region = this.videoSampleRegionForSegment(segmentMesh.userData.backlightSegment || {});
-      material.uniforms.opacity.value = opacity;
+      material.uniforms.opacity.value = opacity * backlightOpacityScale(segmentMesh.userData.backlightSegment || {});
       material.uniforms.videoMap.value = this.videoTexture;
       material.uniforms.sampleRegion.value.set(region.x0, region.y0, region.x1, region.y1);
     }
@@ -1336,6 +1354,9 @@
       const start = Number(segment.index || 0) / Math.max(1, Number(segment.count || 1));
       const end = (Number(segment.index || 0) + 1) / Math.max(1, Number(segment.count || 1));
       const edgeDepth = 0.34;
+      if (isBacklightCornerSide(segment.side)) {
+        return cornerVideoSampleRegion(window, segment, edgeDepth);
+      }
       if (segment.side === "top") {
         return {
           x0: lerp(window.x0, window.x1, start),
@@ -1383,13 +1404,18 @@
         }
         const { data, width, height } = sample;
         const window = this.displayedVideoSampleWindow();
-        const output = { top: [], bottom: [], left: [], right: [] };
+        const output = emptyBacklightColorMap();
         const edgeDepth = 0.32;
         for (const segment of this.backlightSegments) {
           const start = segment.index / segment.count;
           const end = (segment.index + 1) / segment.count;
           let color = null;
-          if (segment.side === "top") {
+          if (isBacklightCornerSide(segment.side)) {
+            color = averageSampleRegion(data, width, height, cornerVideoSampleRegion(window, segment, edgeDepth));
+            output[segment.side][segment.index] = isVisibleBacklightColor(color)
+              ? color
+              : sampleExpandedSegmentRegion(data, width, height, window, segment);
+          } else if (segment.side === "top") {
             color = averageSampleRegion(data, width, height, {
               x0: lerp(window.x0, window.x1, start),
               x1: lerp(window.x0, window.x1, end),
@@ -1931,6 +1957,36 @@
     return Math.min(max, Math.max(min, value));
   }
 
+  function isBacklightCornerSide(side) {
+    return ["top-left", "top-right", "bottom-left", "bottom-right"].includes(side);
+  }
+
+  function backlightOpacityScale(segment) {
+    return Number(segment?.opacityScale ?? 1);
+  }
+
+  function emptyBacklightColorMap() {
+    return Object.fromEntries(Object.keys(BACKLIGHT_SEGMENT_COUNTS).map((side) => [side, []]));
+  }
+
+  function cornerVideoSampleRegion(window, segment, edgeDepth) {
+    const amount = (Number(segment.index || 0) + 0.5) / Math.max(1, Number(segment.count || 1));
+    const broad = edgeDepth * lerp(1.24, 0.72, amount);
+    const narrow = edgeDepth * lerp(0.72, 1.24, amount);
+    const left = segment.side.includes("left");
+    const top = segment.side.includes("top");
+    const width = window.x1 - window.x0;
+    const height = window.y1 - window.y0;
+    const xSize = width * (top ? broad : narrow);
+    const ySize = height * (top ? narrow : broad);
+    return {
+      x0: left ? window.x0 : window.x1 - xSize,
+      x1: left ? window.x0 + xSize : window.x1,
+      y0: top ? window.y0 : window.y1 - ySize,
+      y1: top ? window.y0 + ySize : window.y1,
+    };
+  }
+
   function lerp(start, end, amount) {
     return start + (end - start) * amount;
   }
@@ -2130,6 +2186,9 @@
   }
 
   function sampleExpandedSegmentRegion(data, width, height, window, segment) {
+    if (isBacklightCornerSide(segment.side)) {
+      return averageSampleRegion(data, width, height, cornerVideoSampleRegion(window, segment, 0.58));
+    }
     const start = segment.index / segment.count;
     const end = (segment.index + 1) / segment.count;
     if (segment.side === "top" || segment.side === "bottom") {
