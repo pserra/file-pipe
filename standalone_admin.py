@@ -515,7 +515,7 @@ ADMIN_HTML = r"""<!doctype html>
         display: grid;
         gap: 1.1rem;
         margin: 0 auto;
-        max-width: 1180px;
+        max-width: 1240px;
         padding: 1.15rem clamp(1rem, 3vw, 2.2rem) 2.2rem;
       }
 
@@ -604,6 +604,13 @@ ADMIN_HTML = r"""<!doctype html>
         padding: 1rem;
       }
 
+      .hero-title {
+        align-items: center;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.65rem;
+      }
+
       .hero-main {
         min-width: 0;
       }
@@ -630,7 +637,13 @@ ADMIN_HTML = r"""<!doctype html>
       .columns {
         display: grid;
         gap: 1rem;
-        grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      }
+
+      .settings-layout {
+        display: grid;
+        gap: 1rem;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
       }
 
       .panel {
@@ -647,6 +660,17 @@ ADMIN_HTML = r"""<!doctype html>
         gap: 1rem;
         justify-content: space-between;
         margin-bottom: 0.95rem;
+      }
+
+      .section-title {
+        border-bottom: 1px solid var(--soft);
+        color: var(--text-strong);
+        font-size: 0.8rem;
+        font-weight: 900;
+        letter-spacing: 0;
+        margin: 0 0 0.8rem;
+        padding-bottom: 0.55rem;
+        text-transform: uppercase;
       }
 
       .panel-subtitle {
@@ -698,6 +722,11 @@ ADMIN_HTML = r"""<!doctype html>
         grid-template-columns: repeat(2, minmax(0, 1fr));
       }
 
+      .form-stack {
+        display: grid;
+        gap: 0.85rem;
+      }
+
       .path-picker {
         display: grid;
         gap: 0.55rem;
@@ -713,6 +742,31 @@ ADMIN_HTML = r"""<!doctype html>
         gap: 0.55rem;
         min-height: 2.4rem;
         padding: 0.55rem 0.65rem;
+      }
+
+      .toggle-grid {
+        display: grid;
+        gap: 0.65rem;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .inline-meta {
+        align-items: center;
+        color: var(--muted);
+        display: flex;
+        flex-wrap: wrap;
+        font-size: 0.85rem;
+        gap: 0.5rem;
+        margin-top: 0.55rem;
+      }
+
+      .code-chip {
+        background: #eef2f6;
+        border: 1px solid #dce4ee;
+        border-radius: 8px;
+        color: #344054;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        padding: 0.28rem 0.45rem;
       }
 
       .actions {
@@ -801,7 +855,7 @@ ADMIN_HTML = r"""<!doctype html>
       }
 
       @media (max-width: 920px) {
-        .grid, .columns, .form-grid, .hero {
+        .grid, .columns, .settings-layout, .form-grid, .toggle-grid, .hero {
           grid-template-columns: 1fr;
         }
 
@@ -847,8 +901,15 @@ ADMIN_HTML = r"""<!doctype html>
       <section class="hero" aria-label="Connector overview">
         <div class="hero-main">
           <div class="topline">Service endpoint</div>
-          <h2>Connector is available to this computer and the File Pipe web app.</h2>
+          <div class="hero-title">
+            <h2>Connector service</h2>
+            <span class="pill" id="protocol-pill">Checking</span>
+          </div>
           <div class="hero-url" id="connector-url">Starting...</div>
+          <div class="inline-meta">
+            <span>Admin UI stays available when the connector is turned off.</span>
+            <span class="code-chip" id="health-url">Health check pending</span>
+          </div>
         </div>
         <div class="actions" style="margin-top:0;">
           <button id="refresh" type="button">Refresh</button>
@@ -894,55 +955,80 @@ ADMIN_HTML = r"""<!doctype html>
         <div class="panel">
           <div class="panel-head">
             <div>
-              <h2>Settings</h2>
-              <p class="panel-subtitle">Network, cache, and authentication options for this connector.</p>
+              <h2>Connector Settings</h2>
+              <p class="panel-subtitle">Identity, room behavior, network, cache, and access controls.</p>
             </div>
           </div>
-          <div class="form-grid">
-            <label>Host
-              <input id="host" autocomplete="off">
-            </label>
-            <label>Port
-              <input id="port" type="number" min="1" max="65535">
-            </label>
-            <label>Cache folder
-              <div class="path-picker">
-                <input id="cache-dir" autocomplete="off">
-                <button class="secondary" id="choose-cache-dir" type="button">Choose</button>
+          <div class="settings-layout">
+            <div class="form-stack">
+              <div>
+                <div class="section-title">Room identity</div>
+                <div class="form-stack">
+                  <label>Host name
+                    <input id="host-name" maxlength="80" autocomplete="name" placeholder="Shown to room participants">
+                  </label>
+                  <label class="check-row">
+                    <input id="pinned-watch-room" type="checkbox">
+                    Pin watch rooms
+                  </label>
+                </div>
               </div>
-            </label>
-            <label>Host name
-              <input id="host-name" maxlength="80" autocomplete="name" placeholder="Shown to room participants">
-            </label>
-            <label>New password
-              <input id="password" type="password" autocomplete="new-password">
-            </label>
-          </div>
-          <div class="form-grid" style="margin-top: 0.85rem;">
-            <label class="check-row">
-              <input id="use-tls" type="checkbox">
-              HTTPS connector
-            </label>
-            <label class="check-row">
-              <input id="service-enabled" type="checkbox">
-              Connector on
-            </label>
-            <label class="check-row">
-              <input id="open-browser" type="checkbox">
-              Open UI on launch
-            </label>
-            <label class="check-row">
-              <input id="pinned-watch-room" type="checkbox">
-              Pin watch rooms
-            </label>
-            <label class="check-row">
-              <input id="allow-insecure-password" type="checkbox">
-              Allow password over HTTP
-            </label>
-            <label class="check-row">
-              <input id="clear-password" type="checkbox">
-              Remove password
-            </label>
+
+              <div>
+                <div class="section-title">Cache</div>
+                <label>Cache folder
+                  <div class="path-picker">
+                    <input id="cache-dir" autocomplete="off">
+                    <button class="secondary" id="choose-cache-dir" type="button">Choose</button>
+                  </div>
+                </label>
+              </div>
+            </div>
+
+            <div class="form-stack">
+              <div>
+                <div class="section-title">Network</div>
+                <div class="form-grid">
+                  <label>Host
+                    <input id="host" autocomplete="off">
+                  </label>
+                  <label>Port
+                    <input id="port" type="number" min="1" max="65535">
+                  </label>
+                </div>
+                <div class="toggle-grid" style="margin-top: 0.85rem;">
+                  <label class="check-row">
+                    <input id="use-tls" type="checkbox">
+                    HTTPS connector
+                  </label>
+                  <label class="check-row">
+                    <input id="service-enabled" type="checkbox">
+                    Connector on
+                  </label>
+                  <label class="check-row">
+                    <input id="open-browser" type="checkbox">
+                    Open UI on launch
+                  </label>
+                  <label class="check-row">
+                    <input id="allow-insecure-password" type="checkbox">
+                    Allow password over HTTP
+                  </label>
+                </div>
+              </div>
+
+              <div>
+                <div class="section-title">Access</div>
+                <div class="form-grid">
+                  <label>New password
+                    <input id="password" type="password" autocomplete="new-password">
+                  </label>
+                  <label class="check-row">
+                    <input id="clear-password" type="checkbox">
+                    Remove password
+                  </label>
+                </div>
+              </div>
+            </div>
           </div>
           <div class="actions">
             <button id="save-config" type="button">Save settings</button>
@@ -1113,6 +1199,9 @@ ADMIN_HTML = r"""<!doctype html>
 
       function renderStatus(payload) {
         document.getElementById("connector-url").textContent = payload.connectorUrl;
+        document.getElementById("health-url").textContent = payload.healthUrl;
+        document.getElementById("protocol-pill").textContent = payload.connectorUrl.startsWith("https://") ? "HTTPS" : "HTTP";
+        document.getElementById("protocol-pill").className = `pill ${payload.connectorUrl.startsWith("https://") ? "ready" : "warn"}`;
         document.getElementById("status-pill").textContent = payload.restartRequired ? "Restart needed" : (payload.serviceEnabled ? "Running" : "Off");
         document.getElementById("status-pill").className = `pill ${payload.restartRequired || !payload.serviceEnabled ? "warn" : "ready"}`;
         document.getElementById("restart-notice").className = `notice ${payload.restartRequired ? "show" : ""}`;
