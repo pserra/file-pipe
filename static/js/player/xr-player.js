@@ -14,11 +14,10 @@
     screenCurve: 0,
     distance: 3,
     roomViewX: 0,
-    roomViewY: 1.45,
+    roomViewY: 0,
     roomViewZ: 0,
     roomViewYaw: 0,
-    roomViewPitch: -16,
-    roomViewPresetVersion: 2,
+    roomViewPitch: 0,
     roomDim: 80,
     sidePanelVisible: false,
     aspectLocked: true,
@@ -63,11 +62,18 @@
       this.settings = this.readSettings();
       this.cleanups = [];
       this.overlay = null;
+      this.fallbackCanvas = null;
+      this.fallbackContext = null;
+      this.renderSampleCanvas = null;
+      this.renderSampleContext = null;
+      this.fallbackActive = false;
+      this.lastRenderSampleAt = 0;
       this.renderer = null;
       this.scene = null;
       this.camera = null;
       this.screenGroup = null;
       this.screenSurfaceGroup = null;
+      this.screenBackingMesh = null;
       this.videoMesh = null;
       this.videoGeometryKey = "";
       this.mrDimMesh = null;
@@ -85,6 +91,10 @@
       this.themeMovableDrag = null;
       this.themes = [];
       this.themeRevision = 0;
+      this.localDepthProcessor = String(this.options.localDepthProcessor || "");
+      this.localDepthTargetLayout = isKnownLayout(this.options.localDepthTargetLayout) ? this.options.localDepthTargetLayout : "";
+      this.localDepthStatus = this.describeLocalDepthStatus();
+      this.localDepthAdapter = null;
       this.videoTexture = null;
       this.backlightGroup = null;
       this.backlightMesh = null;
@@ -144,15 +154,75 @@
       this.bindInlineControls();
       this.refreshXrSupport();
       this.loadThemes();
+      this.configureLocalDepthAdapter();
       this.updateInlineStatus();
+      if (isKnownLayout(this.options.sourceLayout) && this.options.sourceLayout !== "mono") {
+        this.setLayout(this.options.sourceLayout, { persist: false });
+      }
     }
 
     updateOptions(options = {}) {
       this.options = { ...this.options, ...options };
+      if (isKnownLayout(options.sourceLayout) && options.sourceLayout !== "mono") {
+        this.setLayout(options.sourceLayout, { persist: false });
+      }
+      if ("localDepthProcessor" in options || "localDepthTargetLayout" in options) {
+        this.setLocalDepthProcessor(options.localDepthProcessor || "", options.localDepthTargetLayout || "");
+      }
       if (this.settings.spatialAudio && this.spatialAudioGraph?.mode === "spatial") {
         this.rebuildSpatialAudioGraph();
       }
       return this;
+    }
+
+    setLayout(layout, options = {}) {
+      if (!isKnownLayout(layout) || this.settings.layout === layout) return;
+      this.settings.layout = layout;
+      if (this.layoutSelect) this.layoutSelect.value = layout;
+      if (this.overlayLayoutSelect) this.overlayLayoutSelect.value = layout;
+      if (this.eyeField) this.eyeField.hidden = layout === "mono";
+      if (this.overlayEyeField) this.overlayEyeField.hidden = layout === "mono";
+      if (this.settings.aspectLocked) this.applyAspectRatioFrom("width");
+      if (options.persist !== false) this.saveSettings();
+      this.updateVideoMaterialUv();
+      this.updateVideoGeometry();
+      this.syncOverlayControls();
+      this.updateInlineStatus();
+    }
+
+    setLocalDepthProcessor(processor = "", targetLayout = "") {
+      this.localDepthProcessor = String(processor || "");
+      this.localDepthTargetLayout = isKnownLayout(targetLayout) ? targetLayout : "";
+      this.localDepthStatus = this.describeLocalDepthStatus();
+      this.configureLocalDepthAdapter();
+      this.updateInlineStatus();
+    }
+
+    describeLocalDepthStatus() {
+      if (!this.localDepthProcessor) return "";
+      if (this.localDepthProcessor !== "webgpu-depth-anything-v2-small") return "";
+      if (!navigator.gpu) return " Local WebGPU depth is selected, but WebGPU is unavailable in this browser.";
+      const target = LAYOUT_LABELS[this.localDepthTargetLayout] || "3D";
+      if (!window.FilePipeLocalDepth3dAdapter?.attach) return ` Local WebGPU depth is selected for ${target}; no local depth adapter is loaded.`;
+      return ` Local WebGPU depth adapter is active for ${target}.`;
+    }
+
+    configureLocalDepthAdapter() {
+      if (this.localDepthAdapter?.dispose) {
+        this.localDepthAdapter.dispose();
+      }
+      this.localDepthAdapter = null;
+      if (this.localDepthProcessor !== "webgpu-depth-anything-v2-small" || !navigator.gpu || !window.FilePipeLocalDepth3dAdapter?.attach) return;
+      try {
+        this.localDepthAdapter = window.FilePipeLocalDepth3dAdapter.attach(this.video, {
+          processor: this.localDepthProcessor,
+          targetLayout: this.localDepthTargetLayout,
+          xrPlayer: this,
+        });
+        if (this.localDepthAdapter?.status) this.localDepthStatus = ` ${this.localDepthAdapter.status}`;
+      } catch (error) {
+        this.localDepthStatus = ` Local WebGPU depth adapter failed: ${error.message || error}`;
+      }
     }
 
     readSettings() {
@@ -171,11 +241,10 @@
           screenCurve: clampNumber(Number(stored.screenCurve), 0, 100, DEFAULT_SETTINGS.screenCurve),
           distance: clampNumber(Number(stored.distance), 1.4, 6, DEFAULT_SETTINGS.distance),
           roomViewX: clampNumber(Number(stored.roomViewX), -2.8, 2.8, DEFAULT_SETTINGS.roomViewX),
-          roomViewY: clampNumber(Number(stored.roomViewY), -0.8, 1.8, DEFAULT_SETTINGS.roomViewY),
+          roomViewY: clampNumber(Number(stored.roomViewY), -0.8, 1.2, DEFAULT_SETTINGS.roomViewY),
           roomViewZ: clampNumber(Number(stored.roomViewZ), -3.7, 1.2, DEFAULT_SETTINGS.roomViewZ),
           roomViewYaw: normalizeDegrees(clampNumber(Number(stored.roomViewYaw), -180, 180, DEFAULT_SETTINGS.roomViewYaw)),
           roomViewPitch: clampNumber(Number(stored.roomViewPitch), -35, 35, DEFAULT_SETTINGS.roomViewPitch),
-          roomViewPresetVersion: clampNumber(Number(stored.roomViewPresetVersion), 0, 100, 0),
           roomDim: clampNumber(Number(stored.roomDim), 0, 100, DEFAULT_SETTINGS.roomDim),
           sidePanelVisible: Boolean(stored.sidePanelVisible ?? DEFAULT_SETTINGS.sidePanelVisible),
           aspectLocked: stored.aspectLocked !== false,
@@ -187,11 +256,6 @@
           themeValueRevisions: isPlainObject(stored.themeValueRevisions) ? stored.themeValueRevisions : {},
           themeObjectStates: isPlainObject(stored.themeObjectStates) ? stored.themeObjectStates : {},
         };
-        if (settings.roomViewPresetVersion < DEFAULT_SETTINGS.roomViewPresetVersion && isLegacyDesktopRoomView(stored)) {
-          settings.roomViewY = DEFAULT_SETTINGS.roomViewY;
-          settings.roomViewPitch = DEFAULT_SETTINGS.roomViewPitch;
-        }
-        settings.roomViewPresetVersion = DEFAULT_SETTINGS.roomViewPresetVersion;
         return settings;
       } catch (error) {
         return { ...DEFAULT_SETTINGS };
@@ -344,10 +408,11 @@
       const layout = LAYOUT_LABELS[this.settings.layout] || LAYOUT_LABELS.mono;
       const headset = this.settings.headsetMode === "mr" ? "MR passthrough" : "VR room";
       const spatial = this.settings.spatialAudio ? ` ${this.spatialAudioStatus || "Spatial audio on."}` : "";
+      const localDepth = this.localDepthStatus || "";
       const baseStatus = this.xrSupported
         ? `${layout}. ${headset}. Open the theater, then enter the headset from the top bar.`
         : `${layout}. Desktop theater is available; no WebXR headset is visible to this browser.`;
-      this.statusElement.textContent = `${baseStatus}${spatial}`;
+      this.statusElement.textContent = `${baseStatus}${spatial}${localDepth}`;
     }
 
     async loadThemes() {
@@ -920,6 +985,10 @@
         this.videoMesh.geometry?.dispose();
         this.videoMesh.material?.dispose();
       }
+      if (this.screenBackingMesh) {
+        this.screenBackingMesh.geometry?.dispose();
+        this.screenBackingMesh.material?.dispose();
+      }
       this.clearThemeObjects();
       if (this.backlightGroup) {
         this.disposeBacklight();
@@ -929,6 +998,7 @@
       this.scene = null;
       this.camera = null;
       this.videoMesh = null;
+      this.screenBackingMesh = null;
       this.videoGeometryKey = "";
       this.mrDimMesh = null;
       this.videoTexture = null;
@@ -972,6 +1042,12 @@
       this.activeGrab = null;
       this.desktopDrag = null;
       this.desktopKeys.clear();
+      this.fallbackCanvas = null;
+      this.fallbackContext = null;
+      this.renderSampleCanvas = null;
+      this.renderSampleContext = null;
+      this.fallbackActive = false;
+      this.lastRenderSampleAt = 0;
       this.overlayCleanups.forEach((cleanup) => cleanup());
       this.overlayCleanups = [];
       this.lastRenderAt = 0;
@@ -1023,6 +1099,7 @@
         <div class="fp-three-xr-main">
           <div class="fp-three-xr-stage-panel">
             <canvas class="fp-three-xr-canvas"></canvas>
+            <canvas class="fp-three-xr-fallback" data-role="render-fallback" hidden></canvas>
             <div class="fp-three-xr-playback">
               <button class="btn btn-sm btn-light" type="button" data-action="play-toggle"><i class="bi bi-play-fill"></i></button>
               <input class="form-range" type="range" min="0" max="1000" step="1" value="0" data-role="seek">
@@ -1101,6 +1178,8 @@
       `;
       document.body.appendChild(this.overlay);
       this.canvas = this.overlay.querySelector(".fp-three-xr-canvas");
+      this.fallbackCanvas = this.overlay.querySelector("[data-role='render-fallback']");
+      this.fallbackContext = this.fallbackCanvas?.getContext("2d") || null;
       this.theaterStatus = this.overlay.querySelector("[data-role='theater-status']");
       this.overlayHeadsetModeSelect = this.overlay.querySelector("[data-role='overlay-headset-mode']");
       this.themeSelect = this.overlay.querySelector("[data-role='theme']");
@@ -1633,7 +1712,7 @@
       this.settings.roomViewY = clampNumber(
         this.settings.roomViewY + vertical,
         -0.8,
-        1.8,
+        1.2,
         DEFAULT_SETTINGS.roomViewY,
       );
       this.settings.roomViewZ = clampNumber(
@@ -2061,7 +2140,7 @@
     }
 
     initThree() {
-      this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: true, alpha: true });
+      this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: true, alpha: true, preserveDrawingBuffer: true });
       this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
       this.renderer.setClearAlpha(0);
       this.renderer.xr.enabled = true;
@@ -2089,6 +2168,16 @@
       this.videoTexture.minFilter = THREE.LinearFilter;
       this.videoTexture.magFilter = THREE.LinearFilter;
       this.videoTexture.generateMipmaps = false;
+      this.screenBackingMesh = new THREE.Mesh(
+        new THREE.PlaneGeometry(1, 1),
+        new THREE.MeshBasicMaterial({
+          color: 0x121820,
+          side: THREE.DoubleSide,
+        }),
+      );
+      this.screenBackingMesh.position.set(0, 0, -0.015);
+      this.screenBackingMesh.renderOrder = 1;
+      this.screenSurfaceGroup.add(this.screenBackingMesh);
       const material = new THREE.MeshBasicMaterial({ map: this.videoTexture, side: THREE.DoubleSide, transparent: true, opacity: 1 });
       this.videoMesh = new THREE.Mesh(this.createVideoGeometry(), material);
       this.videoMesh.renderOrder = 2;
@@ -2171,6 +2260,9 @@
       }
       this.videoMesh.scale.set(this.settings.panelWidth, this.settings.panelHeight, 1);
       this.videoMesh.position.set(0, 0, 0);
+      if (this.screenBackingMesh) {
+        this.screenBackingMesh.scale.set(this.settings.panelWidth * 1.04, this.settings.panelHeight * 1.08, 1);
+      }
       if (this.screenGroup) {
         this.screenGroup.position.set(this.settings.panelX, this.settings.panelY, -this.settings.distance);
         this.screenGroup.rotation.set(0, 0, 0);
@@ -2960,6 +3052,105 @@
       }
     }
 
+    updateRenderFallback(now = performance.now()) {
+      if (!this.fallbackCanvas || !this.fallbackContext || !this.canvas) return;
+      const rect = this.canvas.getBoundingClientRect();
+      const width = Math.max(1, Math.floor(rect.width));
+      const height = Math.max(1, Math.floor(rect.height));
+      if (this.fallbackCanvas.width !== width || this.fallbackCanvas.height !== height) {
+        this.fallbackCanvas.width = width;
+        this.fallbackCanvas.height = height;
+      }
+      if (!this.lastRenderSampleAt || now - this.lastRenderSampleAt > 550) {
+        this.lastRenderSampleAt = now;
+        this.fallbackActive = this.isRenderedCanvasBlank();
+        this.fallbackCanvas.hidden = !this.fallbackActive;
+      }
+      if (this.fallbackActive) {
+        this.drawRenderFallback(width, height);
+      }
+    }
+
+    isRenderedCanvasBlank() {
+      if (!this.canvas) return false;
+      if (!this.renderSampleCanvas) {
+        this.renderSampleCanvas = document.createElement("canvas");
+        this.renderSampleCanvas.width = 24;
+        this.renderSampleCanvas.height = 14;
+        this.renderSampleContext = this.renderSampleCanvas.getContext("2d", { willReadFrequently: true });
+      }
+      const context = this.renderSampleContext;
+      if (!context) return false;
+      try {
+        context.clearRect(0, 0, this.renderSampleCanvas.width, this.renderSampleCanvas.height);
+        context.drawImage(this.canvas, 0, 0, this.renderSampleCanvas.width, this.renderSampleCanvas.height);
+        const data = context.getImageData(0, 0, this.renderSampleCanvas.width, this.renderSampleCanvas.height).data;
+        let litPixels = 0;
+        for (let index = 0; index < data.length; index += 4) {
+          if (data[index] + data[index + 1] + data[index + 2] > 24) litPixels += 1;
+          if (litPixels > 8) return false;
+        }
+        return true;
+      } catch (error) {
+        return true;
+      }
+    }
+
+    drawRenderFallback(width, height) {
+      const context = this.fallbackContext;
+      if (!context) return;
+      context.clearRect(0, 0, width, height);
+      const gradient = context.createLinearGradient(0, 0, 0, height);
+      gradient.addColorStop(0, "#070b12");
+      gradient.addColorStop(0.55, "#101826");
+      gradient.addColorStop(1, "#05070a");
+      context.fillStyle = gradient;
+      context.fillRect(0, 0, width, height);
+
+      const roomPad = Math.max(18, width * 0.035);
+      const horizonY = height * 0.64;
+      context.fillStyle = "rgba(31, 41, 55, 0.62)";
+      context.beginPath();
+      context.moveTo(roomPad, height);
+      context.lineTo(width * 0.33, horizonY);
+      context.lineTo(width * 0.67, horizonY);
+      context.lineTo(width - roomPad, height);
+      context.closePath();
+      context.fill();
+      context.strokeStyle = "rgba(148, 163, 184, 0.22)";
+      context.lineWidth = 2;
+      context.stroke();
+
+      const panelWidth = Math.min(width * 0.68, height * 1.45);
+      const panelHeight = panelWidth / Math.max(1.2, this.videoAspectRatio());
+      const panelX = (width - panelWidth) / 2;
+      const panelY = Math.max(height * 0.18, (height - panelHeight) * 0.42);
+      context.shadowColor = "rgba(147, 197, 253, 0.48)";
+      context.shadowBlur = 42;
+      context.fillStyle = "#172033";
+      context.fillRect(panelX - 14, panelY - 14, panelWidth + 28, panelHeight + 28);
+      context.shadowBlur = 0;
+
+      try {
+        if (this.video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+          context.drawImage(this.video, panelX, panelY, panelWidth, panelHeight);
+        } else {
+          context.fillStyle = "#0f172a";
+          context.fillRect(panelX, panelY, panelWidth, panelHeight);
+        }
+      } catch (error) {
+        context.fillStyle = "#0f172a";
+        context.fillRect(panelX, panelY, panelWidth, panelHeight);
+      }
+
+      context.strokeStyle = "rgba(226, 232, 240, 0.86)";
+      context.lineWidth = 2;
+      context.strokeRect(panelX, panelY, panelWidth, panelHeight);
+      context.fillStyle = "rgba(226, 232, 240, 0.9)";
+      context.font = "700 13px system-ui, -apple-system, BlinkMacSystemFont, sans-serif";
+      context.fillText("2D preview fallback", panelX + 12, panelY + panelHeight + 24);
+    }
+
     displayedVideoSampleWindow() {
       if (this.settings.layout === "half-sbs" || this.settings.layout === "full-sbs") {
         return this.settings.eye === "right"
@@ -2985,22 +3176,27 @@
 
     renderFrame() {
       if (!this.renderer || !this.scene || !this.camera) return;
-      if (this.videoTexture && this.video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
-        this.videoTexture.needsUpdate = true;
-      }
-      this.updateControllerDrag();
-      this.updateXrThumbstickScrub();
-      this.updateBacklight();
-      this.updateThemeVideoSampling();
-      this.updateSpatialAudio();
-      this.updateXrSidePanelTexture();
-      this.updatePlaybackControls();
       const now = performance.now();
       const deltaSeconds = this.lastRenderAt ? Math.min(0.05, (now - this.lastRenderAt) / 1000) : 0;
       this.lastRenderAt = now;
-      this.updateThemeAnimations(now / 1000);
-      this.updateDesktopKeyboardNavigation(deltaSeconds);
+      try {
+        if (this.videoTexture && this.video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+          this.videoTexture.needsUpdate = true;
+        }
+        this.updateControllerDrag();
+        this.updateXrThumbstickScrub();
+        this.updateBacklight();
+        this.updateThemeVideoSampling();
+        this.updateSpatialAudio();
+        this.updateXrSidePanelTexture();
+        this.updatePlaybackControls();
+        this.updateThemeAnimations(now / 1000);
+        this.updateDesktopKeyboardNavigation(deltaSeconds);
+      } catch (error) {
+        this.lastRenderError = error;
+      }
       this.renderer.render(this.scene, this.camera);
+      this.updateRenderFallback(now);
     }
 
     async enterWebXr() {
@@ -3302,6 +3498,8 @@
     }
 
     dispose() {
+      if (this.localDepthAdapter?.dispose) this.localDepthAdapter.dispose();
+      this.localDepthAdapter = null;
       this.closeTheater();
       this.cleanups.forEach((cleanup) => cleanup());
       this.cleanups = [];
@@ -3448,12 +3646,6 @@
     if (!listener.forwardX && typeof listener.setOrientation === "function") {
       listener.setOrientation(forward.x, forward.y, forward.z, up.x, up.y, up.z);
     }
-  }
-
-  function isLegacyDesktopRoomView(stored) {
-    const viewKeys = ["roomViewX", "roomViewY", "roomViewZ", "roomViewYaw", "roomViewPitch"];
-    if (!viewKeys.some((key) => Object.prototype.hasOwnProperty.call(stored, key))) return false;
-    return viewKeys.every((key) => Math.abs(Number(stored[key] || 0)) < 0.001);
   }
 
   function clampNumber(value, min, max, fallback) {

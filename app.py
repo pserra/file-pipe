@@ -515,6 +515,10 @@ def create_app():
     def watch(room_id: str):
         return render_template("watch.html", room_id=room_id)
 
+    @app.get("/watch-audio/<room_id>")
+    def watch_audio(room_id: str):
+        return render_template("watch_audio.html", room_id=room_id)
+
     @app.get("/bigscreen/<session_id>")
     def bigscreen(session_id: str):
         return render_template("bigscreen.html", session_id=session_id)
@@ -699,6 +703,8 @@ def create_app():
             {
                 "id": participant["id"],
                 "name": participant["name"],
+                "role": participant.get("role", "participant"),
+                "audioOutput": participant.get("audioOutput"),
                 "joinedAt": participant["joinedAt"],
                 "generation": participant.get("generation", 0),
                 "offer": participant.get("offer"),
@@ -724,10 +730,20 @@ def create_app():
         name = (payload.get("name") or "").strip()
         if not name:
             return jsonify({"error": "Name is required."}), 400
+        role = str(payload.get("role") or "participant").strip().lower()
+        if role not in {"participant", "audio-output"}:
+            role = "participant"
+        audio_output = payload.get("audioOutput") if isinstance(payload.get("audioOutput"), dict) else {}
         participant_id = secrets.token_urlsafe(12)
         room["participants"][participant_id] = {
             "id": participant_id,
             "name": name[:80],
+            "role": role,
+            "audioOutput": {
+                "channel": str(audio_output.get("channel") or "LFE")[:24],
+                "targetPeerId": str(audio_output.get("targetPeerId") or "host")[:120],
+                "targetLabel": str(audio_output.get("targetLabel") or "")[:120],
+            } if role == "audio-output" else None,
             "joinedAt": int(time.time()),
             "generation": 0,
             "offer": None,
@@ -824,6 +840,8 @@ def create_app():
             {
                 "id": participant["id"],
                 "name": participant["name"],
+                "role": participant.get("role", "participant"),
+                "audioOutput": participant.get("audioOutput"),
                 "joinedAt": participant["joinedAt"],
                 "generation": participant.get("generation", 0),
                 "offer": participant.get("offer"),

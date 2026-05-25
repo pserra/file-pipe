@@ -6,14 +6,16 @@
     <title>File Pipe</title>
     <link href="{{ local_static_or_cdn('vendor/bootstrap/bootstrap.min.css', 'https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css') }}" rel="stylesheet">
     <link href="{{ local_static_or_cdn('vendor/bootstrap-icons/bootstrap-icons.css', 'https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css') }}" rel="stylesheet">
-    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css', v='27') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css', v='29') }}">
     <script defer src="{{ local_static_or_cdn('vendor/spark-md5/spark-md5.min.js', 'https://cdn.jsdelivr.net/npm/spark-md5@3.0.2/spark-md5.min.js') }}"></script>
     <script defer src="{{ local_static_or_cdn('vendor/hls.js/hls.min.js', 'https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js') }}"></script>
     <script defer src="{{ local_static_or_cdn('vendor/qrcode-generator/qrcode.min.js', 'https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js') }}"></script>
     <script defer src="{{ local_static_or_cdn('vendor/three/three.min.js', 'https://cdn.jsdelivr.net/npm/three@0.160.1/build/three.min.js') }}"></script>
-    <script defer src="{{ url_for('static', filename='xr-player.js', v='27') }}"></script>
+    <script defer src="{{ url_for('static', filename='js/player/xr-player.js', v='39') }}"></script>
+    <script defer src="{{ url_for('static', filename='js/player/playback-progress.js', v='2') }}"></script>
     <script>window.FILE_PIPE_P2P_CONFIG = {{ p2p_config()|tojson }};</script>
-    <script defer src="{{ url_for('static', filename='app.js', v='72') }}"></script>
+    <script defer src="{{ url_for('static', filename='js/pages/app/helpers.js', v='1') }}"></script>
+    <script defer src="{{ url_for('static', filename='js/pages/app/index.js', v='77') }}"></script>
     <script defer src="{{ local_static_or_cdn('vendor/alpinejs/cdn.min.js', 'https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js') }}"></script>
     <script defer src="{{ local_static_or_cdn('vendor/bootstrap/bootstrap.bundle.min.js', 'https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js') }}"></script>
   </head>
@@ -88,33 +90,38 @@
         </div>
       </template>
 
-      <ul class="nav nav-tabs app-tabs" id="filePipeTabs" role="tablist">
-        <li class="nav-item" role="presentation">
-          <button class="nav-link active" id="explorer-tab" data-bs-toggle="tab" data-bs-target="#explorer-pane" type="button" role="tab">
-            <i class="bi bi-folder2-open"></i> Explorer
-          </button>
-        </li>
-        <li class="nav-item" role="presentation">
-          <button class="nav-link" id="sharing-tab" data-bs-toggle="tab" data-bs-target="#sharing-pane" type="button" role="tab">
-            <i class="bi bi-send-lock"></i> Sharing
-          </button>
-        </li>
-        <li class="nav-item" role="presentation">
-          <button class="nav-link" id="player-tab" data-bs-toggle="tab" data-bs-target="#player-pane" type="button" role="tab">
-            <i class="bi bi-play-btn"></i> Player
-          </button>
-        </li>
-        <li class="nav-item" role="presentation">
-          <button class="nav-link" id="activity-tab" data-bs-toggle="tab" data-bs-target="#activity-pane" type="button" role="tab">
-            <i class="bi bi-activity"></i> Activity
-          </button>
-        </li>
-        <li class="nav-item" role="presentation">
-          <button class="nav-link" id="connector-tab" data-bs-toggle="tab" data-bs-target="#connector-pane" type="button" role="tab">
-            <i class="bi bi-shield-lock"></i> Local Connector
-          </button>
-        </li>
-      </ul>
+      <div class="tabs-toolbar">
+        <ul class="nav nav-tabs app-tabs" id="filePipeTabs" role="tablist">
+          <li class="nav-item" role="presentation">
+            <button class="nav-link active" id="explorer-tab" data-bs-toggle="tab" data-bs-target="#explorer-pane" type="button" role="tab">
+              <i class="bi bi-folder2-open"></i> Explorer
+            </button>
+          </li>
+          <li class="nav-item" role="presentation">
+            <button class="nav-link" id="sharing-tab" data-bs-toggle="tab" data-bs-target="#sharing-pane" type="button" role="tab">
+              <i class="bi bi-send-lock"></i> Sharing
+            </button>
+          </li>
+          <li class="nav-item" role="presentation">
+            <button class="nav-link" id="player-tab" data-bs-toggle="tab" data-bs-target="#player-pane" type="button" role="tab">
+              <i class="bi bi-play-btn"></i> Player
+            </button>
+          </li>
+          <li class="nav-item" role="presentation">
+            <button class="nav-link" id="activity-tab" data-bs-toggle="tab" data-bs-target="#activity-pane" type="button" role="tab">
+              <i class="bi bi-activity"></i> Activity
+            </button>
+          </li>
+          <li class="nav-item" role="presentation">
+            <button class="nav-link" id="connector-tab" data-bs-toggle="tab" data-bs-target="#connector-pane" type="button" role="tab">
+              <i class="bi bi-shield-lock"></i> Local Connector
+            </button>
+          </li>
+        </ul>
+        <button class="btn btn-outline-primary btn-sm tabs-toolbar-action" type="button" @click="openHostXrTheater()" :disabled="!playerUrl">
+          <i class="bi bi-badge-vr"></i> Open XR Theater
+        </button>
+      </div>
 
       <div class="tab-content app-surface">
         <section class="tab-pane fade show active pane-section" id="explorer-pane" role="tabpanel" aria-labelledby="explorer-tab" tabindex="0">
@@ -211,8 +218,13 @@
                   <div class="list-group-item">
                     <div class="d-flex flex-column flex-lg-row gap-3 align-items-lg-center justify-content-between">
                       <button type="button" class="file-title btn btn-link text-start p-0 text-decoration-none" @click="openItem(item)">
-                        <span class="file-icon">
-                          <i class="bi" :class="item.type === 'container' ? 'bi-folder-fill text-warning' : iconForItem(item)"></i>
+                        <span class="media-thumb" :class="{ 'media-thumb-has-image': itemThumbnailUrl(item), 'media-thumb-folder': item.type === 'container' }">
+                          <template x-if="itemThumbnailUrl(item)">
+                            <img :src="itemThumbnailUrl(item)" :alt="`${item.title} preview`" loading="lazy">
+                          </template>
+                          <template x-if="!itemThumbnailUrl(item)">
+                            <i class="bi" :class="item.type === 'container' ? 'bi-folder-fill text-warning' : iconForItem(item)"></i>
+                          </template>
                         </span>
                         <span class="min-w-0">
                           <strong class="d-block text-body text-truncate" x-text="item.title"></strong>
@@ -223,13 +235,37 @@
                                 <span x-text="mediaStatusForItem(item).label"></span>
                               </span>
                             </template>
-                            <span class="text-truncate" x-text="item.class || item.resources?.[0]?.protocolInfo || ''"></span>
+                            <template x-if="itemPlaybackLabel(item)">
+                              <span class="media-status-pill text-primary">
+                                <i class="bi bi-clock-history"></i>
+                                <span x-text="itemPlaybackLabel(item)"></span>
+                              </span>
+                            </template>
+                            <span class="text-truncate" x-text="itemMediaSummary(item)"></span>
                           </small>
+                          <template x-if="itemPlaybackPercent(item) > 0">
+                            <span class="media-progress" :title="itemPlaybackLabel(item)">
+                              <span :style="`width: ${itemPlaybackPercent(item)}%`"></span>
+                            </span>
+                          </template>
+                          <span class="media-badges" x-show="itemMediaBadges(item).length">
+                            <template x-for="badge in itemMediaBadges(item)" :key="badge">
+                              <span class="media-format-badge" x-text="badge"></span>
+                            </template>
+                          </span>
                         </span>
                       </button>
 
 	                      <template x-if="item.type === 'item' && item.resources && item.resources.length">
-	                        <div class="dropdown">
+	                        <div class="media-row-actions">
+                            <template x-if="item.resources.length > 1">
+                              <select class="form-select form-select-sm resource-picker" :value="selectedResourceForItem(item)?.id" @click.stop @change.stop="selectResource(item, $event.target.value)" aria-label="Choose media version">
+                                <template x-for="resource in item.resources" :key="resource.id">
+                                  <option :value="resource.id" x-text="resourceLabel(resource)"></option>
+                                </template>
+                              </select>
+                            </template>
+	                          <div class="dropdown">
 	                          <button class="btn btn-outline-primary btn-sm dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false">
 	                            <span class="spinner-border spinner-border-sm" x-show="sharingItemId === item.id || transcodeItemId === item.id || (playerLoading && playerTitle === item.title)" aria-hidden="true"></span>
 	                            <i class="bi bi-lightning-charge" x-show="!(sharingItemId === item.id || transcodeItemId === item.id || (playerLoading && playerTitle === item.title))"></i>
@@ -244,6 +280,11 @@
 	                            <li>
 	                              <button class="dropdown-item" type="button" @click="launchVideoItem(item)" :disabled="!isVideoItem(item) || playerLoading">
 	                                <i class="bi bi-play-circle me-2"></i><span x-text="playerLoading && playerTitle === item.title ? 'Loading player' : 'Open in player'"></span>
+	                              </button>
+	                            </li>
+	                            <li>
+	                              <button class="dropdown-item" type="button" @click="addToWatchList(item)" :disabled="!isVideoItem(item)">
+	                                <i class="bi bi-bookmark-plus me-2"></i><span x-text="isInWatchList(item) ? 'Update watch list' : 'Add to watch list'"></span>
 	                              </button>
 	                            </li>
 	                            <li>
@@ -263,6 +304,7 @@
 	                              </a>
 	                            </li>
 	                          </ul>
+                            </div>
 	                        </div>
 	                      </template>
                     </div>
@@ -386,8 +428,13 @@
                         <div class="list-group-item">
                           <div class="d-flex flex-column flex-lg-row gap-3 align-items-lg-center justify-content-between">
                             <button type="button" class="file-title btn btn-link text-start p-0 text-decoration-none" @click="openItem(item)">
-                              <span class="file-icon">
-                                <i class="bi" :class="item.type === 'container' ? 'bi-folder-fill text-warning' : iconForItem(item)"></i>
+                              <span class="media-thumb" :class="{ 'media-thumb-has-image': itemThumbnailUrl(item), 'media-thumb-folder': item.type === 'container' }">
+                                <template x-if="itemThumbnailUrl(item)">
+                                  <img :src="itemThumbnailUrl(item)" :alt="`${item.title} preview`" loading="lazy">
+                                </template>
+                                <template x-if="!itemThumbnailUrl(item)">
+                                  <i class="bi" :class="item.type === 'container' ? 'bi-folder-fill text-warning' : iconForItem(item)"></i>
+                                </template>
                               </span>
                               <span class="min-w-0">
                                 <strong class="d-block text-body text-truncate" x-text="item.title"></strong>
@@ -398,12 +445,36 @@
                                       <span x-text="mediaStatusForItem(item).label"></span>
                                     </span>
                                   </template>
-                                  <span class="text-truncate" x-text="item.type === 'container' ? 'Folder' : formatBytes(Number(item.resources?.[0]?.size || 0))"></span>
+                                  <template x-if="itemPlaybackLabel(item)">
+                                    <span class="media-status-pill text-primary">
+                                      <i class="bi bi-clock-history"></i>
+                                      <span x-text="itemPlaybackLabel(item)"></span>
+                                    </span>
+                                  </template>
+                                  <span class="text-truncate" x-text="itemMediaSummary(item)"></span>
                                 </small>
+                                <template x-if="itemPlaybackPercent(item) > 0">
+                                  <span class="media-progress" :title="itemPlaybackLabel(item)">
+                                    <span :style="`width: ${itemPlaybackPercent(item)}%`"></span>
+                                  </span>
+                                </template>
+                                <span class="media-badges" x-show="itemMediaBadges(item).length">
+                                  <template x-for="badge in itemMediaBadges(item)" :key="badge">
+                                    <span class="media-format-badge" x-text="badge"></span>
+                                  </template>
+                                </span>
                               </span>
                             </button>
 	                            <template x-if="item.type === 'item' && item.resources && item.resources.length">
-	                              <div class="dropdown">
+	                              <div class="media-row-actions">
+                                  <template x-if="item.resources.length > 1">
+                                    <select class="form-select form-select-sm resource-picker" :value="selectedResourceForItem(item)?.id" @click.stop @change.stop="selectResource(item, $event.target.value)" aria-label="Choose media version">
+                                      <template x-for="resource in item.resources" :key="resource.id">
+                                        <option :value="resource.id" x-text="resourceLabel(resource)"></option>
+                                      </template>
+                                    </select>
+                                  </template>
+	                                <div class="dropdown">
 	                                <button class="btn btn-outline-primary btn-sm dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false">
 	                                  <span class="spinner-border spinner-border-sm" x-show="sharingItemId === item.id || transcodeItemId === item.id || (playerLoading && playerTitle === item.title)" aria-hidden="true"></span>
 	                                  <i class="bi bi-lightning-charge" x-show="!(sharingItemId === item.id || transcodeItemId === item.id || (playerLoading && playerTitle === item.title))"></i>
@@ -421,6 +492,11 @@
 	                                    </button>
 	                                  </li>
 	                                  <li>
+	                                    <button class="dropdown-item" type="button" @click="addToWatchList(item)" :disabled="!isVideoItem(item)">
+	                                      <i class="bi bi-bookmark-plus me-2"></i><span x-text="isInWatchList(item) ? 'Update watch list' : 'Add to watch list'"></span>
+	                                    </button>
+	                                  </li>
+	                                  <li>
 	                                    <button class="dropdown-item" type="button" @click="transcodeForLater(item)" :disabled="!isVideoItem(item) || transcodeItemId === item.id">
 	                                      <i class="bi bi-cpu me-2"></i><span x-text="transcodeItemId === item.id ? 'Transcoding' : 'Transcode for later'"></span>
 	                                    </button>
@@ -432,6 +508,7 @@
 	                                    </button>
 	                                  </li>
 	                                </ul>
+                                  </div>
 	                              </div>
 	                            </template>
                           </div>
@@ -548,7 +625,7 @@
 
         <section class="tab-pane fade pane-section" id="player-pane" role="tabpanel" aria-labelledby="player-tab" tabindex="0">
           <div class="row g-4 xr-theater-layout">
-            <div class="col-12 col-xl-8 xr-video-column">
+            <div class="xr-video-column" :class="playerSidePanelOpen ? 'col-12 col-xl-8' : 'col-12'">
               <div class="card xr-video-card">
                 <div class="card-header d-flex flex-column flex-md-row gap-2 align-items-md-center justify-content-between">
                   <div>
@@ -558,14 +635,18 @@
                       <i class="bi bi-check-circle-fill text-success ms-1" x-show="playerTranscodeComplete" title="Stable MP4 is fully available"></i>
                     </small>
                   </div>
-                  <div class="d-flex gap-2">
-                    <div class="input-group input-group-sm transcode-mode-picker">
-                      <span class="input-group-text"><i class="bi bi-cpu"></i></span>
-                      <select class="form-select" x-model="transcodePlaybackMode" @change="setTranscodePlaybackMode(transcodePlaybackMode)">
-                        <option value="full">Stable MP4 (waits until complete)</option>
-                        <option value="segmented">Fast segments (instant)</option>
-                      </select>
-                    </div>
+                  <div class="player-header-actions">
+                    <button class="btn btn-outline-secondary btn-sm player-settings-summary" type="button" @click="openPlayerSettingsModal()">
+                      <i class="bi bi-sliders"></i>
+                      <span x-text="playerSettingsSummary()"></span>
+                      <i class="bi bi-pencil-square"></i>
+                    </button>
+                    <button class="btn btn-outline-secondary btn-sm" type="button" @click="openSourceInfoModal()" :disabled="!playerSource && !playerRoomMetadata" title="More information">
+                      <i class="bi bi-info-circle"></i>
+                    </button>
+                    <button class="btn btn-outline-secondary btn-sm" type="button" @click="togglePlayerSidePanel()" :title="playerSidePanelOpen ? 'Hide side panel' : 'Show side panel'">
+                      <i class="bi" :class="playerSidePanelOpen ? 'bi-layout-sidebar-inset-reverse' : 'bi-layout-sidebar'"></i>
+                    </button>
                     <div class="dropdown">
                       <button class="btn btn-primary dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" :disabled="!playerSource || playerLoading || playerRoomCreating">
                         <i class="bi bi-people"></i> Share player
@@ -574,12 +655,17 @@
                         <li>
                           <button class="dropdown-item" type="button" @click="createWatchRoom()" :disabled="playerSource?.shareDisabledReason || !playerSource?.openStream">
                             <i class="bi bi-people me-2"></i>
-                            <span x-text="playerRoomId && connectorSettings.pinnedWatchRoom ? 'Update pinned room' : (playerRoomId && !playerRoomCreating ? 'New watch link' : 'Watch room link')"></span>
+                            <span x-text="playerRoomRestored ? 'Resume watch room' : (playerRoomId && connectorSettings.pinnedWatchRoom ? 'Update pinned room' : (playerRoomId && !playerRoomCreating ? 'New watch link' : 'Watch room link'))"></span>
                           </button>
                         </li>
                         <li>
                           <button class="dropdown-item" type="button" @click="createLiveWatchRoom()" :disabled="!canCreateLiveWatchRoom()">
                             <i class="bi bi-broadcast-pin me-2"></i>Live stream watch link
+                          </button>
+                        </li>
+                        <li>
+                          <button class="dropdown-item" type="button" @click="createHostAudioOutputLink('LFE')" :disabled="!playerSource || playerLoading || playerRoomCreating">
+                            <i class="bi bi-speaker me-2"></i>LFE audio output link
                           </button>
                         </li>
                         <li>
@@ -608,7 +694,7 @@
                   </template>
                   <template x-if="playerUrl">
                     <div class="xr-video-window">
-                      <video id="host-video-player" class="w-100 rounded border bg-black" :src="playerType === 'application/vnd.apple.mpegurl' ? '' : playerUrl" crossorigin="anonymous" :controls="!hostProgressivePlaybackLocked()" preload="auto" playsinline @loadedmetadata="prepareHostPlayerMedia()" @playing="setTimeout(() => { inspectHostPlayerAudio(); updateHostLinearPlaybackTime(); }, 1000)" @play="handleHostPlayerPlay()" @pause="handleHostPlayerPause()" @seeking="handleHostPlayerSeeking()" @seeked="handleHostPlayerSeeked()" @timeupdate.throttle.500ms="updateHostLinearPlaybackTime()" @timeupdate.throttle.1000ms="broadcastPlayerState('time')"></video>
+                      <video id="host-video-player" class="w-100 rounded border bg-black" :src="playerType === 'application/vnd.apple.mpegurl' ? '' : playerUrl" crossorigin="anonymous" :controls="!hostProgressivePlaybackLocked()" preload="auto" playsinline @loadedmetadata="prepareHostPlayerMedia()" @playing="setTimeout(() => { inspectHostPlayerAudio(); updateHostLinearPlaybackTime(); }, 1000)" @play="handleHostPlayerPlay()" @pause="handleHostPlayerPause()" @seeking="handleHostPlayerSeeking()" @seeked="handleHostPlayerSeeked()" @ended="watchListAutoAdvance && playNextWatchListItem()" @timeupdate.throttle.500ms="updateHostLinearPlaybackTime()" @timeupdate.throttle.1000ms="broadcastPlayerState('time')"></video>
                       <template x-if="hostProgressivePlaybackLocked()">
                         <div class="d-flex flex-wrap align-items-center gap-2 mt-3">
                           <button class="btn btn-primary" type="button" @click="toggleHostLinearPlayback()">
@@ -630,10 +716,104 @@
               </div>
             </div>
 
-            <div class="col-12 col-xl-4 xr-side-panel">
+            <div class="col-12 col-xl-4 xr-side-panel" x-show="playerSidePanelOpen" x-transition>
+              <div class="card mb-3 player-panel-card">
+                <div class="card-header player-panel-header">
+                  <button class="player-panel-toggle" type="button" @click="togglePlayerPanel('playback')">
+                    <i class="bi" :class="playerPanelOpen.playback ? 'bi-chevron-down' : 'bi-chevron-right'"></i>
+                    <span class="fw-semibold">Playback</span>
+                  </button>
+                  <button class="btn btn-sm btn-outline-secondary" type="button" @click="setPlayerSidePanelOpen(false)" aria-label="Close side panel">
+                    <i class="bi bi-x-lg"></i>
+                  </button>
+                </div>
+                <div class="card-body" x-show="playerPanelOpen.playback">
+                  <label class="form-check form-switch playback-switch">
+                    <input class="form-check-input" type="checkbox" :checked="hostSpatialAudioEnabled()" @change="toggleHostSpatialAudio($event.target.checked)" :disabled="!playerSource || playerLoading || !hostSpatialAudioAvailable()">
+                    <span class="form-check-label">
+                      <span class="fw-semibold">Spatial audio</span>
+                      <small class="text-secondary d-block" x-text="hostSpatialAudioAvailable() ? 'Use multichannel spatial playback when available.' : 'No multichannel audio detected for this source.'"></small>
+                    </span>
+                  </label>
+                  <div class="d-grid gap-2 mt-3">
+                    <button class="btn btn-outline-primary btn-sm" type="button" @click="openPlayerSettingsModal()">
+                      <i class="bi bi-sliders"></i> Edit playback settings
+                    </button>
+                    <button class="btn btn-outline-secondary btn-sm" type="button" @click="openSourceInfoModal()" :disabled="!playerSource && !playerRoomMetadata">
+                      <i class="bi bi-info-circle"></i> More information
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div class="card mb-3 watch-list-card">
+                <div class="card-header player-panel-header">
+                  <button class="player-panel-toggle" type="button" @click="togglePlayerPanel('watchList')">
+                    <i class="bi" :class="playerPanelOpen.watchList ? 'bi-chevron-down' : 'bi-chevron-right'"></i>
+                    <span class="fw-semibold">Watch list</span>
+                  </button>
+                  <div class="d-flex align-items-center gap-2">
+                    <span class="badge text-bg-secondary" x-text="watchList.length"></span>
+                    <button class="btn btn-sm btn-outline-secondary" type="button" @click="clearWatchList()" :disabled="watchList.length === 0">
+                      <i class="bi bi-trash"></i>
+                    </button>
+                  </div>
+                </div>
+                <div class="card-body" x-show="playerPanelOpen.watchList">
+                  <template x-if="watchList.length === 0">
+                    <p class="text-secondary mb-0">Queue videos from Explorer to review or play in order.</p>
+                  </template>
+                  <template x-if="watchList.length > 0">
+                    <div>
+                      <div class="watch-list-items">
+                        <template x-for="(entry, index) in watchList" :key="watchListResourceKey(entry)">
+                          <div class="watch-list-item" :class="{ 'watch-list-item-active': currentWatchListIndex() === index }">
+                            <span class="watch-list-thumb" :class="{ 'watch-list-thumb-has-image': watchListThumbnailUrl(entry) }">
+                              <template x-if="watchListThumbnailUrl(entry)">
+                                <img :src="watchListThumbnailUrl(entry)" :alt="`${entry.title} preview`" loading="lazy">
+                              </template>
+                              <template x-if="!watchListThumbnailUrl(entry)">
+                                <i class="bi bi-file-earmark-play text-danger"></i>
+                              </template>
+                            </span>
+                            <span class="min-w-0">
+                              <strong class="d-block text-truncate" x-text="entry.title"></strong>
+                              <small class="text-secondary text-truncate d-block" x-text="watchListEntryLabel(entry)"></small>
+                            </span>
+                            <span class="watch-list-actions">
+                              <button class="btn btn-sm btn-outline-primary" type="button" @click="playWatchListItem(entry)" :disabled="playerLoading" aria-label="Play watch-list item">
+                                <i class="bi bi-play-fill"></i>
+                              </button>
+                              <button class="btn btn-sm btn-outline-secondary" type="button" @click="removeWatchListItem(index)" aria-label="Remove watch-list item">
+                                <i class="bi bi-x-lg"></i>
+                              </button>
+                            </span>
+                          </div>
+                        </template>
+                      </div>
+                      <div class="d-flex flex-wrap align-items-center gap-2 mt-3">
+                        <button class="btn btn-primary btn-sm" type="button" @click="playNextWatchListItem()" :disabled="playerLoading || watchList.length === 0">
+                          <i class="bi bi-play-circle"></i> Play next
+                        </button>
+                        <label class="form-check form-switch mb-0 ms-auto">
+                          <input class="form-check-input" type="checkbox" x-model="watchListAutoAdvance" @change="toggleWatchListAutoAdvance()">
+                          <span class="form-check-label small text-secondary">Auto-advance</span>
+                        </label>
+                      </div>
+                    </div>
+                  </template>
+                </div>
+              </div>
+
               <div class="card mb-3">
-                <div class="card-header fw-semibold">Watch room</div>
-                <div class="card-body">
+                <div class="card-header player-panel-header">
+                  <button class="player-panel-toggle" type="button" @click="togglePlayerPanel('watchRoom')">
+                    <i class="bi" :class="playerPanelOpen.watchRoom ? 'bi-chevron-down' : 'bi-chevron-right'"></i>
+                    <span class="fw-semibold">Watch room</span>
+                  </button>
+                  <span class="badge" :class="playerRoomLink ? 'text-bg-success' : 'text-bg-secondary'" x-text="playerRoomLink ? 'Ready' : 'Idle'"></span>
+                </div>
+                <div class="card-body" x-show="playerPanelOpen.watchRoom">
                   <div class="alert py-2 mb-3" :class="connectorSettings.pinnedWatchRoom ? 'alert-primary' : 'alert-secondary'">
                     <i class="bi" :class="connectorSettings.pinnedWatchRoom ? 'bi-pin-angle-fill' : 'bi-pin-angle'"></i>
                     <span class="ms-1" x-text="connectorSettings.pinnedWatchRoom ? 'Pinned room is on. New videos update this same link.' : 'Pinned room is off. New watch links create new rooms.'"></span>
@@ -656,6 +836,27 @@
                       <div class="form-text">The key after # is required to decrypt the video stream and metadata.</div>
                     </div>
                   </template>
+                  <template x-if="playerRoomLink">
+                    <div class="mt-3">
+                      <label class="form-label">External LFE output</label>
+                      <div class="input-group">
+                        <button class="btn btn-outline-primary" type="button" @click="createHostAudioOutputLink('LFE')">
+                          <i class="bi bi-speaker"></i> Create
+                        </button>
+                        <input class="form-control" type="text" readonly :value="playerAudioOutputLink" placeholder="Create an LFE output link" @focus="$event.target.select()">
+                        <button class="btn btn-outline-primary" type="button" @click="openQrModal('LFE audio output QR code', playerAudioOutputLink)" :disabled="!playerAudioOutputLink" aria-label="Show LFE audio output QR code">
+                          <i class="bi bi-qr-code"></i> QR
+                        </button>
+                        <button class="btn btn-success" type="button" @click="copyToClipboard(playerAudioOutputLink)" :disabled="!playerAudioOutputLink">
+                          <i class="bi bi-clipboard"></i> Copy
+                        </button>
+                      </div>
+                      <div class="form-text">Open this on the browser connected to the subwoofer or surround processor. It follows the host playback clock.</div>
+                    </div>
+                  </template>
+                  <template x-if="playerAudioOutputStatus">
+                    <div class="alert alert-secondary mt-3 mb-0" x-text="playerAudioOutputStatus"></div>
+                  </template>
                   <template x-if="playerStatus">
                     <div class="alert alert-info mt-3 mb-0" x-text="playerStatus"></div>
                   </template>
@@ -664,8 +865,13 @@
 
               <template x-if="bigscreenLink || bigscreenStatus">
                 <div class="card mb-3">
-                  <div class="card-header fw-semibold">Bigscreen</div>
-                  <div class="card-body">
+                  <div class="card-header player-panel-header">
+                    <button class="player-panel-toggle" type="button" @click="togglePlayerPanel('bigscreen')">
+                      <i class="bi" :class="playerPanelOpen.bigscreen ? 'bi-chevron-down' : 'bi-chevron-right'"></i>
+                      <span class="fw-semibold">Bigscreen</span>
+                    </button>
+                  </div>
+                  <div class="card-body" x-show="playerPanelOpen.bigscreen">
                     <template x-if="bigscreenLink">
                       <div>
                         <label class="form-label">Bigscreen player link</label>
@@ -694,56 +900,74 @@
               </template>
 
               <div class="card">
-                <div class="card-header fw-semibold">Viewers</div>
-                <div class="list-group list-group-flush">
+                <div class="card-header player-panel-header">
+                  <button class="player-panel-toggle" type="button" @click="togglePlayerPanel('viewers')">
+                    <i class="bi" :class="playerPanelOpen.viewers ? 'bi-chevron-down' : 'bi-chevron-right'"></i>
+                    <span class="fw-semibold">Viewers</span>
+                  </button>
+                  <span class="badge text-bg-secondary" x-text="Object.keys(playerPeers).length"></span>
+                </div>
+                <div class="list-group list-group-flush" x-show="playerPanelOpen.viewers">
                   <template x-if="Object.keys(playerPeers).length === 0">
                     <div class="list-group-item text-secondary">No viewers connected.</div>
                   </template>
 		                  <template x-for="peer in Object.values(playerPeers)" :key="peer.id">
 		                    <div class="list-group-item">
-		                      <div class="d-flex align-items-center justify-content-between gap-2 mb-2">
-		                        <div class="voice-name-row min-w-0">
-		                          <span class="text-truncate" x-text="peer.name"></span>
-		                          <div class="voice-activity" :class="{ 'voice-activity-muted': peer.localVoiceMuted || peer.micMuted || !peer.voiceAvailable }">
-		                            <i class="bi" :class="voiceActivityIconClass(peer.voiceLevel, peer.localVoiceMuted || peer.micMuted, peer.voiceAvailable)"></i>
-		                            <span class="voice-activity-bar"><span :style="voiceLevelStyle(peer.voiceLevel)"></span></span>
-		                          </div>
-		                        </div>
-		                        <span class="badge" :class="peer.status === 'Connected' || peer.status === 'Synced' || peer.status === 'Control allowed' ? 'text-bg-success' : 'text-bg-secondary'" x-text="peer.status"></span>
-		                      </div>
-		                      <div class="d-flex gap-2">
-		                        <button class="btn btn-sm flex-fill" :class="peer.allowControl ? 'btn-primary' : 'btn-outline-primary'" type="button" @click="toggleParticipantControl(peer)" :disabled="peer.status === 'Kicked'">
-		                          <i class="bi" :class="peer.allowControl ? 'bi-unlock' : 'bi-lock'"></i>
-		                          <span x-text="peer.allowControl ? 'Shared control' : 'Allow control'"></span>
-		                        </button>
+			                      <div class="d-flex align-items-center justify-content-between gap-2 mb-2">
+			                        <div class="voice-name-row min-w-0">
+			                          <span class="text-truncate" x-text="peer.name"></span>
+			                          <span class="badge text-bg-primary" x-show="peer.role === 'audio-output'">Audio output</span>
+			                          <div class="voice-activity" x-show="peer.role !== 'audio-output'" :class="{ 'voice-activity-muted': peer.localVoiceMuted || peer.micMuted || !peer.voiceAvailable }">
+			                            <i class="bi" :class="voiceActivityIconClass(peer.voiceLevel, peer.localVoiceMuted || peer.micMuted, peer.voiceAvailable)"></i>
+			                            <span class="voice-activity-bar"><span :style="voiceLevelStyle(peer.voiceLevel)"></span></span>
+			                          </div>
+			                        </div>
+			                        <span class="badge" :class="peer.status === 'Connected' || peer.status === 'Synced' || peer.status === 'Control allowed' || peer.status === 'Audio output ready' ? 'text-bg-success' : 'text-bg-secondary'" x-text="peer.status"></span>
+			                      </div>
+			                      <div class="d-flex gap-2" x-show="peer.role !== 'audio-output'">
+			                        <button class="btn btn-sm flex-fill" :class="peer.allowControl ? 'btn-primary' : 'btn-outline-primary'" type="button" @click="toggleParticipantControl(peer)" :disabled="peer.status === 'Kicked'">
+			                          <i class="bi" :class="peer.allowControl ? 'bi-unlock' : 'bi-lock'"></i>
+			                          <span x-text="peer.allowControl ? 'Shared control' : 'Allow control'"></span>
+			                        </button>
 		                        <button class="btn btn-sm btn-outline-danger" type="button" @click="kickParticipant(peer)" :disabled="peer.status === 'Kicked'">
-		                          <i class="bi bi-person-x"></i>
-		                        </button>
-		                      </div>
-		                      <div class="d-flex gap-2 mt-2">
-		                        <button class="btn btn-sm flex-fill" :class="peer.localVoiceMuted ? 'btn-secondary' : 'btn-outline-secondary'" type="button" @click="toggleParticipantAudioMute(peer)" :disabled="peer.status === 'Kicked'">
-		                          <i class="bi" :class="peer.localVoiceMuted ? 'bi-volume-mute' : 'bi-volume-up'"></i>
-		                          <span x-text="peer.localVoiceMuted ? 'Unmute here' : 'Mute here'"></span>
+			                          <i class="bi bi-person-x"></i>
+			                        </button>
+			                      </div>
+			                      <div class="d-flex gap-2" x-show="peer.role === 'audio-output'">
+			                        <button class="btn btn-sm btn-outline-danger ms-auto" type="button" @click="kickParticipant(peer)" :disabled="peer.status === 'Kicked'">
+			                          <i class="bi bi-person-x"></i>
+			                        </button>
+			                      </div>
+			                      <div class="d-flex gap-2 mt-2" x-show="peer.role !== 'audio-output'">
+			                        <button class="btn btn-sm flex-fill" :class="peer.localVoiceMuted ? 'btn-secondary' : 'btn-outline-secondary'" type="button" @click="toggleParticipantAudioMute(peer)" :disabled="peer.status === 'Kicked'">
+			                          <i class="bi" :class="peer.localVoiceMuted ? 'bi-volume-mute' : 'bi-volume-up'"></i>
+			                          <span x-text="peer.localVoiceMuted ? 'Unmute here' : 'Mute here'"></span>
 		                        </button>
 		                        <button class="btn btn-sm flex-fill" :class="peer.remoteMicMuted ? 'btn-warning' : 'btn-outline-warning'" type="button" @click="toggleParticipantMicMute(peer)" :disabled="peer.status === 'Kicked' || !peer.channel || peer.channel.readyState !== 'open'">
 		                          <i class="bi" :class="peer.remoteMicMuted ? 'bi-mic' : 'bi-mic-mute'"></i>
 		                          <span x-text="peer.remoteMicMuted ? 'Allow mic' : 'Mute mic'"></span>
 		                        </button>
 		                      </div>
-		                      <div class="small text-secondary mt-2">
-		                        <span x-text="peer.voiceAvailable ? (peer.micMuted ? 'Participant mic muted' : 'Participant mic live') : 'Participant mic not connected'"></span>
-		                      </div>
+			                      <div class="small text-secondary mt-2" x-show="peer.role === 'audio-output'">
+			                        <span x-text="`${peer.audioOutput?.channel || 'Audio'} follows ${peer.audioOutput?.targetLabel || (peer.audioOutput?.targetPeerId === 'host' ? 'Host' : 'selected participant')}`"></span>
+			                      </div>
+			                      <div class="small text-secondary mt-2" x-show="peer.role !== 'audio-output'">
+			                        <span x-text="peer.voiceAvailable ? (peer.micMuted ? 'Participant mic muted' : 'Participant mic live') : 'Participant mic not connected'"></span>
+			                      </div>
 		                    </div>
 		                  </template>
                 </div>
               </div>
 
               <div class="card mt-3 voice-chat-card">
-	                <div class="card-header d-flex align-items-center justify-content-between">
-	                  <span class="fw-semibold">Voice audio</span>
+	                <div class="card-header player-panel-header">
+	                  <button class="player-panel-toggle" type="button" @click="togglePlayerPanel('voice')">
+	                    <i class="bi" :class="playerPanelOpen.voice ? 'bi-chevron-down' : 'bi-chevron-right'"></i>
+	                    <span class="fw-semibold">Voice audio</span>
+	                  </button>
 	                  <span class="badge" :class="voiceEnabled ? 'text-bg-success' : 'text-bg-secondary'" x-text="hostVoiceLabel()"></span>
 	                </div>
-	                <div class="card-body">
+	                <div class="card-body" x-show="playerPanelOpen.voice">
 	                  <div class="voice-name-row mb-3">
 	                    <span class="fw-semibold">You</span>
 	                    <div class="voice-activity" :class="{ 'voice-activity-muted': selfMuted || !hostMicStream }">
@@ -981,6 +1205,103 @@
         </section>
       </div>
     </main>
+    <div class="qr-modal-layer" x-cloak x-show="playerSettingsModalOpen" x-transition.opacity @keydown.escape.window="closePlayerSettingsModal()" role="presentation">
+      <div class="qr-modal-backdrop" @click="closePlayerSettingsModal()"></div>
+      <section class="qr-modal-dialog app-modal-dialog-wide" role="dialog" aria-modal="true" aria-labelledby="player-settings-modal-title">
+        <div class="qr-modal-header">
+          <h2 class="h5 mb-0" id="player-settings-modal-title">Playback settings</h2>
+          <button class="btn-close" type="button" @click="closePlayerSettingsModal()" aria-label="Close playback settings"></button>
+        </div>
+        <div class="qr-modal-body app-modal-body">
+          <div class="settings-grid">
+            <label class="form-label">
+              <span>Playback mode</span>
+              <select class="form-select" x-model="transcodePlaybackMode" @change="setTranscodePlaybackMode(transcodePlaybackMode)">
+                <option value="segmented">Fast segments</option>
+                <option value="full">Stable MP4</option>
+              </select>
+            </label>
+            <label class="form-label">
+              <span>Host display</span>
+              <select class="form-select" x-model="hostVideoMode" @change="setHostVideoMode(hostVideoMode)" :disabled="!canPlayHostStereo3dStream()">
+                <option value="normal">Normal stream</option>
+                <option value="hls3d">3D Stream</option>
+              </select>
+              <small class="text-secondary" x-text="canPlayHostStereo3dStream() ? 'Switches this host player between normal and generated 3D HLS.' : '3D host playback needs a connector video with live stream support.'"></small>
+            </label>
+            <label class="form-label">
+              <span>3D output</span>
+              <select class="form-select" x-model="stereo3dLayout" @change="setStereo3dLayout(stereo3dLayout)" :disabled="!canCreateLiveWatchRoom()">
+                <option value="half-sbs">Half SBS</option>
+                <option value="full-sbs">Full SBS</option>
+              </select>
+            </label>
+            <label class="form-label settings-grid-wide">
+              <span>3D processor</span>
+              <select class="form-select" x-model="stereo3dProcessor" @change="setStereo3dProcessor(stereo3dProcessor)" :disabled="!canCreateLiveWatchRoom()">
+                <template x-for="option in stereo3dProcessorOptions" :key="option.id">
+                  <option :value="option.id" x-text="option.label"></option>
+                </template>
+              </select>
+            </label>
+            <label class="form-check form-switch settings-grid-wide playback-switch">
+              <input class="form-check-input" type="checkbox" :checked="hostSpatialAudioEnabled()" @change="toggleHostSpatialAudio($event.target.checked)" :disabled="!playerSource || playerLoading || !hostSpatialAudioAvailable()">
+              <span class="form-check-label">
+                <span class="fw-semibold">Spatial audio</span>
+                <small class="text-secondary d-block" x-text="hostSpatialAudioAvailable() ? 'Available for this source and shared with XR Theater settings.' : 'No multichannel audio detected for this source.'"></small>
+              </span>
+            </label>
+          </div>
+        </div>
+        <div class="qr-modal-footer">
+          <span class="small text-secondary">Changes apply immediately.</span>
+          <button class="btn btn-primary" type="button" @click="closePlayerSettingsModal()">Done</button>
+        </div>
+      </section>
+    </div>
+
+    <div class="qr-modal-layer" x-cloak x-show="sourceInfoModalOpen" x-transition.opacity @keydown.escape.window="closeSourceInfoModal()" role="presentation">
+      <div class="qr-modal-backdrop" @click="closeSourceInfoModal()"></div>
+      <section class="qr-modal-dialog app-modal-dialog-wide" role="dialog" aria-modal="true" aria-labelledby="source-info-modal-title">
+        <div class="qr-modal-header">
+          <h2 class="h5 mb-0" id="source-info-modal-title">Source information</h2>
+          <button class="btn-close" type="button" @click="closeSourceInfoModal()" aria-label="Close source information"></button>
+        </div>
+        <div class="qr-modal-body app-modal-body">
+          <div class="source-info-section">
+            <h3 class="h6 mb-2">Source</h3>
+            <template x-for="row in playerSourceInfoRows()" :key="row[0]">
+              <div class="source-info-row">
+                <span x-text="row[0]"></span>
+                <strong x-text="row[1]"></strong>
+              </div>
+            </template>
+          </div>
+          <div class="source-info-section">
+            <h3 class="h6 mb-2">Tracks</h3>
+            <template x-for="row in playerMediaInfoRows()" :key="row[0]">
+              <div class="source-info-row">
+                <span x-text="row[0]"></span>
+                <strong x-text="row[1]"></strong>
+              </div>
+            </template>
+          </div>
+          <div class="source-info-section">
+            <h3 class="h6 mb-2">Playback and cache</h3>
+            <template x-for="row in playerCacheInfoRows()" :key="row[0]">
+              <div class="source-info-row">
+                <span x-text="row[0]"></span>
+                <strong x-text="row[1]"></strong>
+              </div>
+            </template>
+          </div>
+        </div>
+        <div class="qr-modal-footer">
+          <button class="btn btn-outline-secondary ms-auto" type="button" @click="closeSourceInfoModal()">Close</button>
+        </div>
+      </section>
+    </div>
+
     <div class="qr-modal-layer" x-cloak x-show="qrModalOpen" x-transition.opacity @keydown.escape.window="closeQrModal()" role="presentation">
       <div class="qr-modal-backdrop" @click="closeQrModal()"></div>
       <section class="qr-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="qr-modal-title">

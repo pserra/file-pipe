@@ -2,7 +2,7 @@
 
 Themes are defined with a `theme.yaml` file in a folder under `static/xr-themes`.
 The Flask theme endpoint resolves local files and returns the theme as JSON for
-`static/xr-player.js`.
+`static/js/player/xr-player.js`.
 
 ## Top-Level Fields
 
