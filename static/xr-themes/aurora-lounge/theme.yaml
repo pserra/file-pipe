@@ -5,9 +5,69 @@ floor:
   color: "#1f2428"
   accent: "#e5edf5"
   grid: true
-  size: 10
-  divisions: 20
+  size: 8.8
+  divisions: 18
   y: -1.72
+settings:
+  - id: glyphs_on
+    label: Glyph lights
+    type: boolean
+    default: true
+  - id: glyph_brightness
+    label: Glyph brightness
+    type: number
+    min: 0
+    max: 1.6
+    step: 0.05
+    default: 0.9
+  - id: lounge_key_light
+    label: Lounge key light
+    type: number
+    min: 0
+    max: 2.5
+    step: 0.1
+    default: 1.1
+  - id: floor_accent
+    label: Floor accents
+    type: number
+    min: 0
+    max: 1.4
+    step: 0.05
+    default: 0.75
+  - id: surface_detail
+    label: Surface detail
+    type: number
+    min: 0
+    max: 1
+    step: 0.05
+    default: 0.55
+lights:
+  - id: lounge-fill
+    type: ambient
+    color: "#aeb8c7"
+    intensity: 0.42
+  - id: display-wash
+    type: point
+    position: [0, 0.9, -3.25]
+    color: "#9ecfff"
+    intensitySetting: lounge_key_light
+    distance: 5.8
+    decay: 2
+  - id: glyph-wash
+    type: point
+    position: [0, 1.6, -3.5]
+    color: "#e7f7ff"
+    intensitySetting: glyph_brightness
+    visibleSetting: glyphs_on
+    distance: 6
+    decay: 2
+  - id: floor-accent-wash
+    type: point
+    position: [0, -1.18, -0.9]
+    color: "#8edcff"
+    intensitySetting: floor_accent
+    distance: 4.4
+    decay: 2
 assets:
   - type: image
     file: assets/aurora-panel.svg
@@ -16,32 +76,133 @@ assets:
     scale: [6.7, 3.35, 1]
     opacity: 0.94
   - type: image
-    file: assets/glyph-band.svg
-    position: [0, 2.06, -4.18]
+    id: back-wall-panel-lines
+    file: assets/wall-panel-lines.svg
+    position: [0, 0.34, -4.08]
     rotation: [0, 0, 0]
-    scale: [6.25, 0.34, 1]
-    opacity: 0.96
+    scale: [6.08, 2.68, 1]
+    opacitySetting: surface_detail
+    opacityMultiplier: 0.55
+    depthWrite: false
+    renderOrder: 3
   - type: image
-    file: assets/glyph-band.svg
-    position: [-3.18, 1.9, -2.72]
-    rotation: [0, 63, 0]
-    scale: [3.25, 0.3, 1]
-    opacity: 0.92
+    id: left-wall-panel-lines
+    file: assets/wall-panel-lines.svg
+    position: [-3.04, 0.32, -2.56]
+    rotation: [0, 90, 0]
+    scale: [3.8, 2.64, 1]
+    opacitySetting: surface_detail
+    opacityMultiplier: 0.42
+    depthWrite: false
+    renderOrder: 3
   - type: image
+    id: right-wall-panel-lines
+    file: assets/wall-panel-lines.svg
+    position: [3.04, 0.32, -2.56]
+    rotation: [0, -90, 0]
+    scale: [3.8, 2.64, 1]
+    opacitySetting: surface_detail
+    opacityMultiplier: 0.42
+    depthWrite: false
+    renderOrder: 3
+  - type: image
+    id: back-glyph-primary
     file: assets/glyph-band.svg
-    position: [3.18, 1.9, -2.72]
-    rotation: [0, -63, 0]
-    scale: [3.25, 0.3, 1]
-    opacity: 0.92
+    position: [0, 1.62, -4.12]
+    rotation: [0, 0, 0]
+    scale: [5.8, 0.36, 1]
+    opacity: 0.9
+    opacitySetting: glyph_brightness
+    glow: true
+    visibleSetting: glyphs_on
+    depthWrite: false
+    renderOrder: 8
+    animation:
+      type: pulse
+      speed: 0.2
+      amplitude: 0.06
+  - type: image
+    id: back-glyph-secondary
+    file: assets/glyph-band.svg
+    position: [0, 1.36, -4.11]
+    rotation: [0, 0, 0]
+    scale: [4.95, 0.18, 1]
+    opacity: 0.52
+    opacitySetting: glyph_brightness
+    opacityMultiplier: 0.58
+    glow: true
+    visibleSetting: glyphs_on
+    depthWrite: false
+    renderOrder: 7
+  - type: image
+    id: left-glyph-primary
+    file: assets/glyph-band.svg
+    position: [-3.02, 1.58, -2.5]
+    rotation: [0, 90, 0]
+    scale: [3.22, 0.34, 1]
+    opacity: 0.9
+    opacitySetting: glyph_brightness
+    glow: true
+    visibleSetting: glyphs_on
+    depthWrite: false
+    renderOrder: 8
+    animation:
+      type: pulse
+      speed: 0.22
+      amplitude: 0.05
+      phase: 0.9
+  - type: image
+    id: left-glyph-secondary
+    file: assets/glyph-band.svg
+    position: [-3.01, 1.34, -2.5]
+    rotation: [0, 90, 0]
+    scale: [2.72, 0.16, 1]
+    opacity: 0.48
+    opacitySetting: glyph_brightness
+    opacityMultiplier: 0.53
+    glow: true
+    visibleSetting: glyphs_on
+    depthWrite: false
+    renderOrder: 7
+  - type: image
+    id: right-glyph-primary
+    file: assets/glyph-band.svg
+    position: [3.02, 1.58, -2.5]
+    rotation: [0, -90, 0]
+    scale: [3.22, 0.34, 1]
+    opacity: 0.9
+    opacitySetting: glyph_brightness
+    glow: true
+    visibleSetting: glyphs_on
+    depthWrite: false
+    renderOrder: 8
+    animation:
+      type: pulse
+      speed: 0.18
+      amplitude: 0.05
+      phase: 1.8
+  - type: image
+    id: right-glyph-secondary
+    file: assets/glyph-band.svg
+    position: [3.01, 1.34, -2.5]
+    rotation: [0, -90, 0]
+    scale: [2.72, 0.16, 1]
+    opacity: 0.48
+    opacitySetting: glyph_brightness
+    opacityMultiplier: 0.53
+    glow: true
+    visibleSetting: glyphs_on
+    depthWrite: false
+    renderOrder: 7
   - type: image
     file: assets/pylon-light.svg
-    position: [-2.72, 0.18, -3.18]
+    position: [-2.88, 0.18, -3.38]
     rotation: [0, 0, 0]
     scale: [0.42, 2.35, 1]
     opacity: 0.96
   - type: image
     file: assets/pylon-light.svg
-    position: [2.72, 0.18, -3.18]
+    position: [2.88, 0.18, -3.38]
     rotation: [0, 0, 0]
     scale: [0.42, 2.35, 1]
     opacity: 0.96
@@ -57,59 +218,229 @@ assets:
     rotation: [90, 0, 26]
     scale: [1.05, 0.48, 1]
     opacity: 0.78
+  - type: image
+    id: floor-plate-lines
+    file: assets/floor-plates.svg
+    position: [0, -1.665, -1.88]
+    rotation: [90, 0, 0]
+    scale: [5.9, 4.05, 1]
+    opacitySetting: surface_detail
+    opacityMultiplier: 0.72
+    depthWrite: false
+    renderOrder: 4
+  - type: image
+    id: floor-light-grates
+    file: assets/floor-plates.svg
+    position: [0, -1.655, -1.88]
+    rotation: [90, 0, 0]
+    scale: [5.9, 4.05, 1]
+    opacitySetting: floor_accent
+    opacityMultiplier: 0.46
+    glow: true
+    depthWrite: false
+    renderOrder: 6
+    animation:
+      type: pulse
+      speed: 0.16
+      amplitude: 0.08
   - type: box
-    size: [6.6, 0.08, 4.5]
-    position: [0, -1.72, -2.58]
+    size: [6.2, 0.08, 4.2]
+    position: [0, -1.72, -2.62]
     color: "#171717"
+    lit: true
+    roughness: 0.72
+    metalness: 0.22
   - type: box
-    size: [6.6, 0.1, 4.6]
-    position: [0, 2.34, -2.6]
+    size: [6.2, 0.1, 4.2]
+    position: [0, 2.34, -2.62]
     color: "#15120f"
+    lit: true
+    roughness: 0.86
+    metalness: 0.18
   - type: box
-    size: [0.1, 2.8, 3.8]
-    position: [-3.35, 0.26, -2.55]
+    size: [0.1, 3.98, 4.1]
+    position: [-3.15, 0.31, -2.62]
     color: "#23201d"
+    lit: true
+    roughness: 0.84
+    metalness: 0.18
   - type: box
-    size: [0.1, 2.8, 3.8]
-    position: [3.35, 0.26, -2.55]
+    size: [0.1, 3.98, 4.1]
+    position: [3.15, 0.31, -2.62]
     color: "#23201d"
+    lit: true
+    roughness: 0.84
+    metalness: 0.18
   - type: box
-    size: [0.18, 2.75, 0.18]
-    position: [-2.73, 0.14, -3.22]
+    size: [0.16, 2.72, 0.16]
+    position: [-2.88, 0.12, -3.36]
     color: "#050607"
+    lit: true
+    roughness: 0.65
+    metalness: 0.38
   - type: box
-    size: [0.18, 2.75, 0.18]
-    position: [2.73, 0.14, -3.22]
+    size: [0.16, 2.72, 0.16]
+    position: [2.88, 0.12, -3.36]
     color: "#050607"
+    lit: true
+    roughness: 0.65
+    metalness: 0.38
   - type: box
-    size: [1.75, 0.42, 0.68]
-    position: [-1.65, -1.38, -2.08]
-    rotation: [0, 12, 0]
-    color: "#2b261c"
+    id: back-floor-trim
+    size: [6.28, 0.08, 0.08]
+    position: [0, -1.62, -4.72]
+    color: "#07090a"
+    lit: true
+    roughness: 0.5
+    metalness: 0.46
   - type: box
-    size: [1.75, 0.42, 0.68]
-    position: [1.65, -1.38, -2.08]
-    rotation: [0, -12, 0]
-    color: "#2b261c"
+    id: left-floor-trim
+    size: [0.08, 0.08, 4.22]
+    position: [-3.08, -1.62, -2.62]
+    color: "#07090a"
+    lit: true
+    roughness: 0.5
+    metalness: 0.46
   - type: box
-    size: [1.9, 0.72, 0.24]
-    position: [-1.68, -1.02, -2.38]
-    rotation: [0, 12, 0]
-    color: "#18150f"
+    id: right-floor-trim
+    size: [0.08, 0.08, 4.22]
+    position: [3.08, -1.62, -2.62]
+    color: "#07090a"
+    lit: true
+    roughness: 0.5
+    metalness: 0.46
   - type: box
-    size: [1.9, 0.72, 0.24]
-    position: [1.68, -1.02, -2.38]
-    rotation: [0, -12, 0]
-    color: "#18150f"
+    id: back-ceiling-trim
+    size: [6.28, 0.08, 0.08]
+    position: [0, 2.23, -4.72]
+    color: "#090b0d"
+    lit: true
+    roughness: 0.48
+    metalness: 0.48
+  - type: box
+    id: left-ceiling-trim
+    size: [0.08, 0.08, 4.22]
+    position: [-3.08, 2.23, -2.62]
+    color: "#090b0d"
+    lit: true
+    roughness: 0.48
+    metalness: 0.48
+  - type: box
+    id: right-ceiling-trim
+    size: [0.08, 0.08, 4.22]
+    position: [3.08, 2.23, -2.62]
+    color: "#090b0d"
+    lit: true
+    roughness: 0.48
+    metalness: 0.48
+  - type: box
+    id: glyph-switch
+    size: [0.18, 0.24, 0.05]
+    position: [-2.9, 0.48, -3.08]
+    color: "#12202a"
+    lit: true
+    roughness: 0.42
+    metalness: 0.36
+    emissive: "#bcecff"
+    emissiveIntensity: 0.75
+    interaction:
+      action: toggleSetting
+      setting: glyphs_on
+  - type: box
+    id: glyph-dimmer
+    size: [0.18, 0.08, 0.05]
+    position: [-2.9, 0.22, -3.08]
+    color: "#d9f5ff"
+    lit: true
+    roughness: 0.3
+    metalness: 0.2
+    emissive: "#d9f5ff"
+    emissiveIntensity: 1.2
+    interaction:
+      action: incrementSetting
+      setting: glyph_brightness
+      step: 0.2
+      wrap: true
+    animation:
+      type: pulse
+      speed: 0.35
+      amplitude: 0.15
+  - type: box
+    size: [2.9, 0.38, 0.9]
+    position: [0, -1.38, 0.18]
+    color: "#2a2927"
+    lit: true
+    roughness: 0.92
+    metalness: 0.02
+  - type: box
+    size: [2.98, 0.9, 0.26]
+    position: [0, -1.02, 0.72]
+    color: "#171717"
+    lit: true
+    roughness: 0.9
+    metalness: 0.02
+  - type: box
+    size: [0.24, 0.72, 0.98]
+    position: [-1.58, -1.18, 0.18]
+    color: "#1b1b1a"
+    lit: true
+    roughness: 0.88
+    metalness: 0.04
+  - type: box
+    size: [0.24, 0.72, 0.98]
+    position: [1.58, -1.18, 0.18]
+    color: "#1b1b1a"
+    lit: true
+    roughness: 0.88
+    metalness: 0.04
+  - type: box
+    size: [2.62, 0.08, 0.82]
+    position: [0, -1.16, 0.1]
+    color: "#3a3834"
+    lit: true
+    roughness: 0.94
+    metalness: 0.02
+  - type: image
+    id: couch-seat-stitching
+    file: assets/couch-stitching.svg
+    position: [0, -1.165, 0.08]
+    rotation: [90, 0, 0]
+    scale: [2.58, 0.74, 1]
+    opacitySetting: surface_detail
+    opacityMultiplier: 0.48
+    depthWrite: false
+    renderOrder: 5
+  - type: image
+    id: couch-back-stitching
+    file: assets/couch-stitching.svg
+    position: [0, -0.88, 0.58]
+    rotation: [0, 0, 0]
+    scale: [2.62, 0.72, 1]
+    opacitySetting: surface_detail
+    opacityMultiplier: 0.42
+    depthWrite: false
+    renderOrder: 5
   - type: obj
     file: assets/ship-console.obj
     position: [0, -1.52, -2.68]
     rotation: [0, 0, 0]
     scale: [0.78, 0.78, 0.78]
     color: "#5c5141"
+    lit: true
+    roughness: 0.58
+    metalness: 0.34
+    emissive: "#20384a"
+    emissiveIntensity: 0.12
   - type: obj
+    id: side-table
     file: assets/side-table.obj
     position: [0, -1.55, -1.62]
     rotation: [0, 0, 0]
     scale: [0.38, 0.38, 0.38]
     color: "#373027"
+    lit: true
+    roughness: 0.62
+    metalness: 0.26
+    movable: true
+    moveAxis: xz
+    moveBounds: [-2.2, 2.2, -1.55, -1.55, -2.4, -0.6]

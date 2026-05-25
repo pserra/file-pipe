@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 620">
+  <rect width="1400" height="620" fill="none"/>
+  <g fill="none" stroke-linecap="square">
+    <path d="M70 70 H1330 V550 H70 Z" stroke="#59616a" stroke-width="6" opacity="0.42"/>
+    <path d="M168 116 H1232 V504 H168 Z" stroke="#3f4750" stroke-width="4" opacity="0.45"/>
+    <path d="M302 160 H1098 V460 H302 Z" stroke="#6b747e" stroke-width="3" opacity="0.25"/>
+    <path d="M168 116 L302 160 M1232 116 L1098 160 M168 504 L302 460 M1232 504 L1098 460" stroke="#727b84" stroke-width="3" opacity="0.28"/>
+    <path d="M70 244 H168 M1232 244 H1330 M70 376 H168 M1232 376 H1330" stroke="#7b8792" stroke-width="4" opacity="0.3"/>
+    <path d="M430 70 V116 M700 70 V116 M970 70 V116 M430 504 V550 M700 504 V550 M970 504 V550" stroke="#818b96" stroke-width="4" opacity="0.24"/>
+  </g>
+  <g fill="#07090d" opacity="0.48">
+    <rect x="92" y="260" width="54" height="100" rx="4"/>
+    <rect x="1254" y="260" width="54" height="100" rx="4"/>
+  </g>
+  <g fill="#cfefff" opacity="0.56">
+    <rect x="107" y="278" width="24" height="16"/>
+    <rect x="107" y="310" width="24" height="16"/>
+    <rect x="107" y="342" width="24" height="16"/>
+    <rect x="1269" y="278" width="24" height="16"/>
+    <rect x="1269" y="310" width="24" height="16"/>
+    <rect x="1269" y="342" width="24" height="16"/>
+  </g>
+</svg>

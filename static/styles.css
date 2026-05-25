@@ -923,10 +923,16 @@ progress {
 }
 
 .fp-three-xr-canvas {
+  cursor: grab;
   display: block;
   height: 100%;
   min-height: 24rem;
+  touch-action: none;
   width: 100%;
+}
+
+.fp-three-xr-canvas-dragging {
+  cursor: grabbing;
 }
 
 .fp-three-xr-playback {
@@ -993,6 +999,16 @@ progress {
 }
 
 .fp-three-xr-tool-card .fp-xr-check {
+  margin-bottom: 0.65rem;
+}
+
+.fp-three-xr-theme-settings {
+  border-bottom: 1px solid rgba(248, 250, 252, 0.1);
+  margin-bottom: 0.65rem;
+  padding-bottom: 0.15rem;
+}
+
+.fp-three-xr-theme-setting {
   margin-bottom: 0.65rem;
 }
 

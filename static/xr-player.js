@@ -59,6 +59,13 @@
       this.gridMesh = null;
       this.themeGroup = null;
       this.themeObjects = [];
+      this.themeObjectById = new Map();
+      this.themeInteractiveObjects = [];
+      this.themeAnimatedObjects = [];
+      this.themeSettingRenderKey = "";
+      this.themeRaycaster = null;
+      this.themePointer = null;
+      this.themeMovableDrag = null;
       this.themes = [];
       this.themeRevision = 0;
       this.videoTexture = null;
@@ -148,6 +155,8 @@
           backlightMode: isKnownBacklightMode(stored.backlightMode) ? stored.backlightMode : DEFAULT_SETTINGS.backlightMode,
           backlightIntensity: clampNumber(Number(stored.backlightIntensity), 0, 150, DEFAULT_SETTINGS.backlightIntensity),
           theme: typeof stored.theme === "string" && stored.theme ? stored.theme : DEFAULT_SETTINGS.theme,
+          themeValues: isPlainObject(stored.themeValues) ? stored.themeValues : {},
+          themeObjectStates: isPlainObject(stored.themeObjectStates) ? stored.themeObjectStates : {},
         };
       } catch (error) {
         return { ...DEFAULT_SETTINGS };
@@ -334,8 +343,130 @@
         name: "Default room",
         background: "#01040a",
         floor: { color: "#162033", grid: true },
+        settings: [],
+        lights: [],
         assets: [],
       };
+    }
+
+    themeSettingDefinitions(theme = this.currentTheme()) {
+      return Array.isArray(theme.settings)
+        ? theme.settings.filter((setting) => isPlainObject(setting) && setting.id)
+        : [];
+    }
+
+    themeValueStore(themeId = this.currentTheme().id) {
+      if (!isPlainObject(this.settings.themeValues)) this.settings.themeValues = {};
+      if (!isPlainObject(this.settings.themeValues[themeId])) this.settings.themeValues[themeId] = {};
+      return this.settings.themeValues[themeId];
+    }
+
+    themeSettingDefinition(id, theme = this.currentTheme()) {
+      return this.themeSettingDefinitions(theme).find((setting) => setting.id === id) || null;
+    }
+
+    themeSettingValue(id, fallback = null, theme = this.currentTheme()) {
+      const definition = this.themeSettingDefinition(id, theme);
+      const store = this.themeValueStore(theme.id);
+      if (Object.prototype.hasOwnProperty.call(store, id)) return store[id];
+      if (definition && Object.prototype.hasOwnProperty.call(definition, "default")) return definition.default;
+      return fallback;
+    }
+
+    setThemeSettingValue(id, value, options = {}) {
+      const theme = this.currentTheme();
+      const definition = this.themeSettingDefinition(id, theme);
+      const store = this.themeValueStore(theme.id);
+      store[id] = coerceThemeSettingValue(value, definition);
+      this.saveSettings();
+      this.syncThemeSettingsControls();
+      if (options.rebuild !== false) this.applyTheme();
+    }
+
+    syncThemeSettingsControls() {
+      if (!this.themeSettingsContainer) return;
+      const theme = this.currentTheme();
+      const definitions = this.themeSettingDefinitions(theme);
+      const renderKey = `${theme.id}:${definitions.map((item) => `${item.id}:${item.type || "number"}`).join("|")}`;
+      if (!definitions.length) {
+        this.themeSettingsContainer.hidden = true;
+        this.themeSettingsContainer.innerHTML = "";
+        this.themeSettingRenderKey = renderKey;
+        return;
+      }
+      this.themeSettingsContainer.hidden = false;
+      if (this.themeSettingRenderKey !== renderKey) {
+        this.themeSettingsContainer.innerHTML = "";
+        for (const definition of definitions) {
+          this.themeSettingsContainer.appendChild(this.createThemeSettingControl(definition));
+        }
+        this.themeSettingRenderKey = renderKey;
+      }
+      for (const definition of definitions) {
+        this.syncThemeSettingControl(definition);
+      }
+    }
+
+    createThemeSettingControl(definition) {
+      const type = String(definition.type || "number").toLowerCase();
+      const label = document.createElement("label");
+      label.className = type === "boolean" ? "fp-xr-check fp-three-xr-theme-setting" : "fp-xr-range fp-three-xr-theme-setting";
+      label.dataset.settingId = definition.id;
+      if (type === "boolean") {
+        const input = document.createElement("input");
+        input.className = "form-check-input";
+        input.type = "checkbox";
+        input.dataset.settingInput = definition.id;
+        input.addEventListener("change", () => this.setThemeSettingValue(definition.id, input.checked));
+        const text = document.createElement("span");
+        text.textContent = definition.label || definition.id;
+        label.append(input, text);
+        return label;
+      }
+      const span = document.createElement("span");
+      span.textContent = `${definition.label || definition.id} `;
+      const output = document.createElement("output");
+      output.dataset.settingOutput = definition.id;
+      span.appendChild(output);
+      label.appendChild(span);
+      if (type === "select" || type === "enum") {
+        const select = document.createElement("select");
+        select.className = "form-select form-select-sm";
+        select.dataset.settingInput = definition.id;
+        const options = Array.isArray(definition.options) ? definition.options : [];
+        for (const optionValue of options) {
+          const option = document.createElement("option");
+          option.value = String(optionValue);
+          option.textContent = String(optionValue);
+          select.appendChild(option);
+        }
+        select.addEventListener("change", () => this.setThemeSettingValue(definition.id, select.value));
+        label.className = "fp-xr-field fp-three-xr-theme-setting";
+        label.appendChild(select);
+        return label;
+      }
+      const input = document.createElement("input");
+      input.className = "form-range";
+      input.type = "range";
+      input.min = String(definition.min ?? 0);
+      input.max = String(definition.max ?? 1);
+      input.step = String(definition.step ?? 0.05);
+      input.dataset.settingInput = definition.id;
+      input.addEventListener("input", () => this.setThemeSettingValue(definition.id, input.value));
+      label.appendChild(input);
+      return label;
+    }
+
+    syncThemeSettingControl(definition) {
+      const input = this.themeSettingsContainer.querySelector(`[data-setting-input="${cssEscape(definition.id)}"]`);
+      const output = this.themeSettingsContainer.querySelector(`[data-setting-output="${cssEscape(definition.id)}"]`);
+      const value = this.themeSettingValue(definition.id, definition.default);
+      if (input?.type === "checkbox") {
+        input.checked = Boolean(value);
+      } else if (input) {
+        input.value = String(value);
+      }
+      if (output) output.textContent = formatThemeSettingValue(value, definition);
     }
 
     applyTheme() {
@@ -362,6 +493,9 @@
       for (const asset of Array.isArray(theme.assets) ? theme.assets : []) {
         this.addThemeAsset(asset, revision);
       }
+      for (const light of Array.isArray(theme.lights) ? theme.lights : []) {
+        this.addThemeLight(light, revision);
+      }
       this.updateSceneLighting();
     }
 
@@ -381,6 +515,10 @@
         object.material?.dispose?.();
       }
       this.themeObjects = [];
+      this.themeObjectById = new Map();
+      this.themeInteractiveObjects = [];
+      this.themeAnimatedObjects = [];
+      this.themeMovableDrag = null;
       if (this.themeGroup) this.themeGroup.clear();
     }
 
@@ -390,14 +528,20 @@
         if (!asset.url) return;
         const texture = new THREE.TextureLoader().load(asset.url);
         texture.colorSpace = THREE.SRGBColorSpace;
+        const additive = asset.blending === "additive" || asset.glow === true;
+        const opacity = this.resolveThemeOpacity(asset, 1);
         const material = new THREE.MeshBasicMaterial({
           map: texture,
-          transparent: Number(asset.opacity ?? 1) < 1,
-          opacity: clampNumber(Number(asset.opacity ?? 1), 0, 1, 1),
+          transparent: additive || opacity < 1,
+          opacity: clampNumber(opacity, 0, additive ? 3 : 1, 1),
           side: THREE.DoubleSide,
+          depthWrite: additive ? false : asset.depthWrite !== false,
+          depthTest: asset.depthTest === false ? false : true,
+          blending: additive ? THREE.AdditiveBlending : THREE.NormalBlending,
         });
         const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), material);
-        this.applyThemeTransform(mesh, asset);
+        mesh.renderOrder = Number(asset.renderOrder || 0);
+        this.configureThemeObject(mesh, asset, revision);
         if (revision === this.themeRevision) {
           this.themeGroup.add(mesh);
           this.themeObjects.push(mesh);
@@ -410,18 +554,24 @@
             if (!text || !this.themeGroup || revision !== this.themeRevision) return;
             const geometry = parseObjGeometry(text);
             if (!geometry) return;
-            const material = new THREE.MeshBasicMaterial({
-              color: colorFromTheme(asset.color || "#94a3b8", new THREE.Color("#94a3b8")),
-              wireframe: Boolean(asset.wireframe),
-            });
+            const material = this.createThemeSurfaceMaterial(asset, "#94a3b8");
             const mesh = new THREE.Mesh(geometry, material);
-            this.applyThemeTransform(mesh, asset);
+            this.configureThemeObject(mesh, asset, revision);
             if (revision === this.themeRevision) {
               this.themeGroup.add(mesh);
               this.themeObjects.push(mesh);
             }
           })
           .catch(() => {});
+      } else if (asset.type === "light") {
+        this.addThemeLight(asset, revision);
+      } else if (asset.type === "empty") {
+        const group = new THREE.Group();
+        this.configureThemeObject(group, asset, revision);
+        if (revision === this.themeRevision) {
+          this.themeGroup.add(group);
+          this.themeObjects.push(group);
+        }
       } else if (asset.type === "box") {
         const size = Array.isArray(asset.size) ? asset.size : [1, 1, 1];
         const geometry = new THREE.BoxGeometry(
@@ -429,13 +579,16 @@
           Number(size[1] ?? 1),
           Number(size[2] ?? 1),
         );
-        const material = new THREE.MeshBasicMaterial({
-          color: colorFromTheme(asset.color || "#334155", new THREE.Color("#334155")),
-          transparent: Number(asset.opacity ?? 1) < 1,
-          opacity: clampNumber(Number(asset.opacity ?? 1), 0, 1, 1),
-        });
+        const useLitMaterial = asset.material !== "basic" && (asset.lit === true || asset.roughness !== undefined || asset.metalness !== undefined || asset.emissive !== undefined);
+        const material = useLitMaterial && THREE.MeshStandardMaterial
+          ? this.createThemeSurfaceMaterial(asset, "#334155")
+          : new THREE.MeshBasicMaterial({
+              color: this.resolveThemeColor(asset.color, "#334155"),
+              transparent: this.resolveThemeOpacity(asset, 1) < 1,
+              opacity: clampNumber(this.resolveThemeOpacity(asset, 1), 0, 1, 1),
+            });
         const mesh = new THREE.Mesh(geometry, material);
-        this.applyThemeTransform(mesh, asset);
+        this.configureThemeObject(mesh, asset, revision);
         if (revision === this.themeRevision) {
           this.themeGroup.add(mesh);
           this.themeObjects.push(mesh);
@@ -443,17 +596,166 @@
       }
     }
 
+    createThemeSurfaceMaterial(asset, fallbackColor) {
+      const opacity = clampNumber(this.resolveThemeOpacity(asset, 1), 0, 1, 1);
+      const color = this.resolveThemeColor(asset.color, fallbackColor);
+      if (asset.material === "basic" || !THREE.MeshStandardMaterial) {
+        return new THREE.MeshBasicMaterial({
+          color,
+          wireframe: Boolean(asset.wireframe),
+          transparent: opacity < 1,
+          opacity,
+        });
+      }
+      return new THREE.MeshStandardMaterial({
+        color,
+        roughness: clampNumber(this.resolveThemeNumber(asset.roughness, 0.82), 0, 1, 0.82),
+        metalness: clampNumber(this.resolveThemeNumber(asset.metalness, 0.18), 0, 1, 0.18),
+        emissive: this.resolveThemeColor(asset.emissive, "#000000"),
+        emissiveIntensity: clampNumber(this.resolveThemeNumber(asset.emissiveIntensity, 0), 0, 8, 0),
+        wireframe: Boolean(asset.wireframe),
+        transparent: opacity < 1,
+        opacity,
+      });
+    }
+
+    addThemeLight(light, revision = this.themeRevision) {
+      if (!isPlainObject(light)) return;
+      const type = String(light.type || "point").toLowerCase();
+      const color = this.resolveThemeColor(light.color, "#ffffff");
+      const intensity = this.resolveThemeNumber(light.intensitySetting ? `$${light.intensitySetting}` : light.intensity, 1);
+      let object = null;
+      if (type === "ambient") {
+        object = new THREE.AmbientLight(color, intensity);
+      } else if (type === "directional") {
+        object = new THREE.DirectionalLight(color, intensity);
+      } else if (type === "spot") {
+        object = new THREE.SpotLight(
+          color,
+          intensity,
+          this.resolveThemeNumber(light.distance, 0),
+          THREE.MathUtils.degToRad(this.resolveThemeNumber(light.angle, 35)),
+          clampNumber(this.resolveThemeNumber(light.penumbra, 0.35), 0, 1, 0.35),
+        );
+      } else if (type === "hemisphere") {
+        object = new THREE.HemisphereLight(
+          color,
+          this.resolveThemeColor(light.groundColor, "#0f172a"),
+          intensity,
+        );
+      } else {
+        object = new THREE.PointLight(
+          color,
+          intensity,
+          this.resolveThemeNumber(light.distance, 0),
+          this.resolveThemeNumber(light.decay, 2),
+        );
+      }
+      this.configureThemeObject(object, light, revision);
+      if (Array.isArray(light.target) && object.target) {
+        object.target.position.set(
+          this.resolveThemeNumber(light.target[0], 0),
+          this.resolveThemeNumber(light.target[1], 0),
+          this.resolveThemeNumber(light.target[2], -1),
+        );
+        this.themeGroup.add(object.target);
+        this.themeObjects.push(object.target);
+      }
+      if (revision === this.themeRevision) {
+        this.themeGroup.add(object);
+        this.themeObjects.push(object);
+      }
+    }
+
+    configureThemeObject(object, config, revision) {
+      this.applyThemeTransform(object, config);
+      object.visible = this.resolveThemeBoolean(config.visibleSetting ? `$${config.visibleSetting}` : config.visible, true);
+      object.userData.themeConfig = config;
+      object.userData.themeRevision = revision;
+      object.userData.themeBasePosition = object.position.clone();
+      object.userData.themeBaseRotation = object.rotation.clone();
+      object.userData.themeBaseScale = object.scale.clone();
+      object.userData.themeBaseIntensity = Number(object.intensity ?? 0);
+      object.userData.themeBaseOpacity = Array.isArray(object.material)
+        ? Number(object.material[0]?.opacity ?? 1)
+        : Number(object.material?.opacity ?? 1);
+      if (config.id) {
+        this.themeObjectById.set(String(config.id), object);
+      }
+      if (config.interaction || config.movable) {
+        object.userData.themeInteractive = true;
+        this.themeInteractiveObjects.push(object);
+      }
+      if (config.animation) {
+        this.themeAnimatedObjects.push(object);
+      }
+    }
+
     applyThemeTransform(object, asset) {
       const position = Array.isArray(asset.position) ? asset.position : [0, 0, -4];
       const scale = Array.isArray(asset.scale) ? asset.scale : [1, 1, 1];
       const rotation = Array.isArray(asset.rotation) ? asset.rotation : [0, 0, 0];
-      object.position.set(Number(position[0] ?? 0), Number(position[1] ?? 0), Number(position[2] ?? -4));
-      object.scale.set(Number(scale[0] ?? 1), Number(scale[1] ?? scale[0] ?? 1), Number(scale[2] ?? 1));
-      object.rotation.set(
-        THREE.MathUtils.degToRad(Number(rotation[0] ?? 0)),
-        THREE.MathUtils.degToRad(Number(rotation[1] ?? 0)),
-        THREE.MathUtils.degToRad(Number(rotation[2] ?? 0)),
+      const state = asset.id ? this.themeObjectState(asset.id) : null;
+      const finalPosition = Array.isArray(state?.position) ? state.position : position;
+      object.position.set(
+        this.resolveThemeNumber(finalPosition[0], 0),
+        this.resolveThemeNumber(finalPosition[1], 0),
+        this.resolveThemeNumber(finalPosition[2], -4),
       );
+      object.scale.set(
+        this.resolveThemeNumber(scale[0], 1),
+        this.resolveThemeNumber(scale[1], scale[0] ?? 1),
+        this.resolveThemeNumber(scale[2], 1),
+      );
+      object.rotation.set(
+        THREE.MathUtils.degToRad(this.resolveThemeNumber(rotation[0], 0)),
+        THREE.MathUtils.degToRad(this.resolveThemeNumber(rotation[1], 0)),
+        THREE.MathUtils.degToRad(this.resolveThemeNumber(rotation[2], 0)),
+      );
+    }
+
+    resolveThemeValue(value, fallback = null) {
+      if (typeof value === "string" && value.startsWith("$")) {
+        return this.themeSettingValue(value.slice(1), fallback);
+      }
+      if (value === undefined || value === null || value === "") return fallback;
+      return value;
+    }
+
+    resolveThemeNumber(value, fallback = 0) {
+      const resolved = this.resolveThemeValue(value, fallback);
+      return clampNumber(Number(resolved), -100000, 100000, fallback);
+    }
+
+    resolveThemeBoolean(value, fallback = true) {
+      const resolved = this.resolveThemeValue(value, fallback);
+      if (typeof resolved === "boolean") return resolved;
+      if (typeof resolved === "string") return !["false", "0", "off", "no"].includes(resolved.toLowerCase());
+      return Boolean(resolved);
+    }
+
+    resolveThemeOpacity(config, fallback = 1) {
+      const base = config.opacitySetting ? this.themeSettingValue(config.opacitySetting, fallback) : this.resolveThemeValue(config.opacity, fallback);
+      return this.resolveThemeNumber(Number(base) * this.resolveThemeNumber(config.opacityMultiplier, 1), fallback);
+    }
+
+    resolveThemeColor(value, fallback) {
+      return colorFromTheme(this.resolveThemeValue(value, fallback), new THREE.Color(fallback));
+    }
+
+    themeObjectState(id) {
+      const themeId = this.currentTheme().id;
+      const allStates = isPlainObject(this.settings.themeObjectStates) ? this.settings.themeObjectStates : {};
+      const themeStates = isPlainObject(allStates[themeId]) ? allStates[themeId] : {};
+      return isPlainObject(themeStates[id]) ? themeStates[id] : null;
+    }
+
+    setThemeObjectState(id, state) {
+      const themeId = this.currentTheme().id;
+      if (!isPlainObject(this.settings.themeObjectStates)) this.settings.themeObjectStates = {};
+      if (!isPlainObject(this.settings.themeObjectStates[themeId])) this.settings.themeObjectStates[themeId] = {};
+      this.settings.themeObjectStates[themeId][id] = state;
+      this.saveSettings();
     }
 
     openTheater() {
@@ -515,6 +817,13 @@
       this.gridMesh = null;
       this.themeGroup = null;
       this.themeObjects = [];
+      this.themeObjectById = new Map();
+      this.themeInteractiveObjects = [];
+      this.themeAnimatedObjects = [];
+      this.themeSettingRenderKey = "";
+      this.themeRaycaster = null;
+      this.themePointer = null;
+      this.themeMovableDrag = null;
       this.backlightGroup = null;
       this.backlightMesh = null;
       this.backlightMaskMesh = null;
@@ -602,6 +911,7 @@
                   <option value="default">Default room</option>
                 </select>
               </label>
+              <div class="fp-three-xr-theme-settings" data-role="theme-settings" hidden></div>
               <label class="fp-xr-field">
                 <span>Backlight</span>
                 <select class="form-select form-select-sm" data-role="backlight">
@@ -653,6 +963,7 @@
       this.theaterStatus = this.overlay.querySelector("[data-role='theater-status']");
       this.overlayHeadsetModeSelect = this.overlay.querySelector("[data-role='overlay-headset-mode']");
       this.themeSelect = this.overlay.querySelector("[data-role='theme']");
+      this.themeSettingsContainer = this.overlay.querySelector("[data-role='theme-settings']");
       this.backlightSelect = this.overlay.querySelector("[data-role='backlight']");
       this.backlightIntensityInput = this.overlay.querySelector("[data-role='backlight-intensity']");
       this.backlightDebug = this.overlay.querySelector("[data-role='backlight-debug']");
@@ -716,6 +1027,7 @@
       this.themeSelect.addEventListener("change", () => {
         this.settings.theme = this.themeSelect.value || DEFAULT_SETTINGS.theme;
         this.saveSettings();
+        this.themeSettingRenderKey = "";
         this.syncOverlayControls();
         this.applyTheme();
       });
@@ -771,6 +1083,7 @@
       this.overlayHeadsetModeSelect.querySelector("option[value='mr']").disabled = !this.xrArSupported;
       this.syncThemeOptions();
       this.themeSelect.value = this.settings.theme;
+      this.syncThemeSettingsControls();
       this.backlightSelect.value = this.settings.backlightMode;
       this.backlightIntensityInput.value = String(this.settings.backlightIntensity);
       this.aspectLockInput.checked = Boolean(this.settings.aspectLocked);
@@ -876,6 +1189,7 @@
       this.settings.panelX = 0;
       this.settings.panelY = 0;
       this.settings.panelYaw = 0;
+      this.settings.panelPitch = 0;
       if (options.resetDistance) {
         this.settings.distance = DEFAULT_SETTINGS.distance;
         this.settings.panelWidth = DEFAULT_SETTINGS.panelWidth;
@@ -897,6 +1211,321 @@
       if (this.sideSlot) this.sideSlot.hidden = !this.settings.sidePanelVisible;
     }
 
+    zoomScreen(distanceDelta) {
+      this.updateNumericSetting("distance", this.settings.distance + distanceDelta);
+    }
+
+    resetRoomView() {
+      this.settings.roomViewX = DEFAULT_SETTINGS.roomViewX;
+      this.settings.roomViewY = DEFAULT_SETTINGS.roomViewY;
+      this.settings.roomViewZ = DEFAULT_SETTINGS.roomViewZ;
+      this.settings.roomViewYaw = DEFAULT_SETTINGS.roomViewYaw;
+      this.settings.roomViewPitch = DEFAULT_SETTINGS.roomViewPitch;
+      this.desktopKeys.clear();
+      this.saveSettings();
+      this.updateDesktopCamera();
+    }
+
+    bindDesktopStageControls() {
+      if (!this.canvas) return;
+      this.canvas.tabIndex = 0;
+      this.listenOverlay(this.canvas, "contextmenu", (event) => event.preventDefault());
+      this.listenOverlay(this.canvas, "pointerdown", (event) => this.startDesktopDrag(event));
+      this.listenOverlay(this.canvas, "pointermove", (event) => this.updateDesktopDrag(event));
+      this.listenOverlay(this.canvas, "pointerup", (event) => this.endDesktopDrag(event));
+      this.listenOverlay(this.canvas, "pointercancel", (event) => this.endDesktopDrag(event));
+      this.listenOverlay(this.canvas, "lostpointercapture", (event) => this.endDesktopDrag(event));
+      this.listenOverlay(window, "keydown", (event) => this.handleDesktopKeyDown(event));
+      this.listenOverlay(window, "keyup", (event) => this.handleDesktopKeyUp(event));
+    }
+
+    listenOverlay(target, eventName, handler) {
+      target.addEventListener(eventName, handler);
+      this.overlayCleanups.push(() => target.removeEventListener(eventName, handler));
+    }
+
+    startDesktopDrag(event) {
+      if (!this.canvas || this.xrSession || (event.button !== 0 && event.button !== 2)) return;
+      event.preventDefault();
+      this.canvas.focus?.({ preventScroll: true });
+      const hit = event.button === 0 && !event.shiftKey ? this.themeHitFromPointer(event) : null;
+      if (hit?.object?.userData?.themeInteractive) {
+        const config = hit.object.userData.themeConfig || {};
+        this.desktopDrag = {
+          pointerId: event.pointerId,
+          mode: config.movable ? "object-move" : "object-interact",
+          object: hit.object,
+          startClientX: event.clientX,
+          startClientY: event.clientY,
+          startPosition: hit.object.position.clone(),
+        };
+        this.canvas.setPointerCapture?.(event.pointerId);
+        this.canvas.classList.add("fp-three-xr-canvas-dragging");
+        return;
+      }
+      this.desktopDrag = {
+        pointerId: event.pointerId,
+        mode: this.desktopDragModeForEvent(event),
+        startClientX: event.clientX,
+        startClientY: event.clientY,
+        startPanelX: this.settings.panelX,
+        startPanelY: this.settings.panelY,
+        startPanelYaw: this.settings.panelYaw,
+        startPanelPitch: this.settings.panelPitch,
+        startRoomViewX: this.settings.roomViewX,
+        startRoomViewY: this.settings.roomViewY,
+        startRoomViewZ: this.settings.roomViewZ,
+        startRoomViewYaw: this.settings.roomViewYaw,
+        startRoomViewPitch: this.settings.roomViewPitch,
+      };
+      this.canvas.setPointerCapture?.(event.pointerId);
+      this.canvas.classList.add("fp-three-xr-canvas-dragging");
+    }
+
+    desktopDragModeForEvent(event) {
+      if (event.shiftKey && event.button === 2) return "room-look";
+      if (event.shiftKey) return "room-move";
+      return event.button === 2 ? "screen-rotate" : "screen-move";
+    }
+
+    updateDesktopDrag(event) {
+      if (!this.desktopDrag || this.desktopDrag.pointerId !== event.pointerId || !this.canvas) return;
+      event.preventDefault();
+      const dx = event.clientX - this.desktopDrag.startClientX;
+      const dy = event.clientY - this.desktopDrag.startClientY;
+      if (this.desktopDrag.mode === "object-move") {
+        this.moveThemeObjectFromDrag(dx, dy);
+      } else if (this.desktopDrag.mode === "object-interact") {
+        return;
+      } else if (this.desktopDrag.mode === "room-move") {
+        this.moveRoomViewFromDrag(dx, dy);
+        this.updateDesktopCamera();
+      } else if (this.desktopDrag.mode === "room-look") {
+        this.settings.roomViewYaw = normalizeDegrees(this.desktopDrag.startRoomViewYaw - dx * 0.16);
+        this.settings.roomViewPitch = clampNumber(this.desktopDrag.startRoomViewPitch - dy * 0.12, -35, 35, DEFAULT_SETTINGS.roomViewPitch);
+        this.updateDesktopCamera();
+      } else if (this.desktopDrag.mode === "screen-rotate") {
+        this.settings.panelYaw = clampNumber(this.desktopDrag.startPanelYaw + dx * 0.18, -35, 35, DEFAULT_SETTINGS.panelYaw);
+        this.settings.panelPitch = clampNumber(this.desktopDrag.startPanelPitch + dy * 0.12, -20, 20, DEFAULT_SETTINGS.panelPitch);
+        this.syncOverlayControls();
+        this.updateVideoGeometry();
+      } else {
+        const rect = this.canvas.getBoundingClientRect();
+        const viewHeight = 2 * this.settings.distance * Math.tan(THREE.MathUtils.degToRad(60) / 2);
+        const viewWidth = viewHeight * (rect.width / Math.max(1, rect.height));
+        this.settings.panelX = clampNumber(
+          this.desktopDrag.startPanelX + (dx / Math.max(1, rect.width)) * viewWidth,
+          -3,
+          3,
+          DEFAULT_SETTINGS.panelX,
+        );
+        this.settings.panelY = clampNumber(
+          this.desktopDrag.startPanelY - (dy / Math.max(1, rect.height)) * viewHeight,
+          -1.4,
+          1.4,
+          DEFAULT_SETTINGS.panelY,
+        );
+        this.syncOverlayControls();
+        this.updateVideoGeometry();
+      }
+    }
+
+    moveRoomViewFromDrag(dx, dy) {
+      const yaw = THREE.MathUtils.degToRad(this.desktopDrag.startRoomViewYaw);
+      const rightX = Math.cos(yaw);
+      const rightZ = -Math.sin(yaw);
+      const forwardX = -Math.sin(yaw);
+      const forwardZ = -Math.cos(yaw);
+      const strafe = dx * 0.006;
+      const forward = -dy * 0.006;
+      this.settings.roomViewX = clampNumber(
+        this.desktopDrag.startRoomViewX + rightX * strafe + forwardX * forward,
+        -2.8,
+        2.8,
+        DEFAULT_SETTINGS.roomViewX,
+      );
+      this.settings.roomViewZ = clampNumber(
+        this.desktopDrag.startRoomViewZ + rightZ * strafe + forwardZ * forward,
+        -3.7,
+        1.2,
+        DEFAULT_SETTINGS.roomViewZ,
+      );
+    }
+
+    endDesktopDrag(event) {
+      if (!this.desktopDrag || this.desktopDrag.pointerId !== event.pointerId) return;
+      if (this.canvas?.hasPointerCapture?.(event.pointerId)) {
+        this.canvas.releasePointerCapture(event.pointerId);
+      }
+      this.canvas?.classList.remove("fp-three-xr-canvas-dragging");
+      const moved = Math.hypot(
+        event.clientX - this.desktopDrag.startClientX,
+        event.clientY - this.desktopDrag.startClientY,
+      );
+      if (this.desktopDrag.mode === "object-interact" && moved < 6) {
+        this.activateThemeObjectInteraction(this.desktopDrag.object);
+      }
+      if (this.desktopDrag.mode === "object-move") {
+        const object = this.desktopDrag.object;
+        const id = object?.userData?.themeConfig?.id;
+        if (id) {
+          this.setThemeObjectState(id, {
+            position: [object.position.x, object.position.y, object.position.z],
+          });
+        }
+      }
+      this.desktopDrag = null;
+      this.saveSettings();
+      this.syncOverlayControls();
+    }
+
+    themeHitFromPointer(event) {
+      if (!this.themeRaycaster || !this.themePointer || !this.camera || !this.canvas || !this.themeInteractiveObjects.length) return null;
+      const rect = this.canvas.getBoundingClientRect();
+      this.themePointer.set(
+        ((event.clientX - rect.left) / Math.max(1, rect.width)) * 2 - 1,
+        -(((event.clientY - rect.top) / Math.max(1, rect.height)) * 2 - 1),
+      );
+      this.themeRaycaster.setFromCamera(this.themePointer, this.camera);
+      return this.themeRaycaster.intersectObjects(this.themeInteractiveObjects.filter((object) => object.visible), true)[0] || null;
+    }
+
+    moveThemeObjectFromDrag(dx, dy) {
+      const object = this.desktopDrag?.object;
+      if (!object) return;
+      const config = object.userData.themeConfig || {};
+      const axis = String(config.moveAxis || "xz").toLowerCase();
+      const amountX = dx * this.resolveThemeNumber(config.moveScale, 0.006);
+      const amountY = -dy * this.resolveThemeNumber(config.moveScale, 0.006);
+      const yaw = THREE.MathUtils.degToRad(this.settings.roomViewYaw);
+      const right = new THREE.Vector3(Math.cos(yaw), 0, -Math.sin(yaw));
+      const forward = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw));
+      const next = this.desktopDrag.startPosition.clone();
+      if (axis === "xy") {
+        next.x += amountX;
+        next.y += amountY;
+      } else if (axis === "x") {
+        next.x += amountX;
+      } else if (axis === "z") {
+        next.z += amountY;
+      } else if (axis === "y") {
+        next.y += amountY;
+      } else {
+        next.add(right.multiplyScalar(amountX));
+        next.add(forward.multiplyScalar(amountY));
+      }
+      const bounds = Array.isArray(config.moveBounds) ? config.moveBounds : null;
+      if (bounds?.length >= 6) {
+        next.x = clampNumber(next.x, Number(bounds[0]), Number(bounds[1]), next.x);
+        next.y = clampNumber(next.y, Number(bounds[2]), Number(bounds[3]), next.y);
+        next.z = clampNumber(next.z, Number(bounds[4]), Number(bounds[5]), next.z);
+      }
+      object.position.copy(next);
+    }
+
+    handleDesktopKeyDown(event) {
+      if (this.xrSession || isEditableTarget(event.target)) return;
+      const key = normalizedNavigationKey(event);
+      if (!key) return;
+      event.preventDefault();
+      this.desktopKeys.add(key);
+    }
+
+    handleDesktopKeyUp(event) {
+      const key = normalizedNavigationKey(event);
+      if (!key) return;
+      this.desktopKeys.delete(key);
+      this.saveSettings();
+    }
+
+    updateDesktopKeyboardNavigation(deltaSeconds) {
+      if (this.xrSession || !this.desktopKeys.size) return;
+      const speed = this.desktopKeys.has("shift") ? 3.0 : 1.45;
+      const amount = speed * deltaSeconds;
+      let forward = 0;
+      let strafe = 0;
+      let vertical = 0;
+      let yawDelta = 0;
+      if (this.desktopKeys.has("arrowup") || this.desktopKeys.has("w")) forward += amount;
+      if (this.desktopKeys.has("arrowdown") || this.desktopKeys.has("s")) forward -= amount;
+      if (this.desktopKeys.has("a")) strafe -= amount;
+      if (this.desktopKeys.has("d")) strafe += amount;
+      if (this.desktopKeys.has("arrowleft")) yawDelta += 80 * deltaSeconds;
+      if (this.desktopKeys.has("arrowright")) yawDelta -= 80 * deltaSeconds;
+      if (this.desktopKeys.has("q")) vertical -= amount;
+      if (this.desktopKeys.has("e")) vertical += amount;
+      if (!forward && !strafe && !vertical && !yawDelta) return;
+      if (yawDelta) this.settings.roomViewYaw = normalizeDegrees(this.settings.roomViewYaw + yawDelta);
+      const yaw = THREE.MathUtils.degToRad(this.settings.roomViewYaw);
+      const rightX = Math.cos(yaw);
+      const rightZ = -Math.sin(yaw);
+      const forwardX = -Math.sin(yaw);
+      const forwardZ = -Math.cos(yaw);
+      this.settings.roomViewX = clampNumber(
+        this.settings.roomViewX + rightX * strafe + forwardX * forward,
+        -2.8,
+        2.8,
+        DEFAULT_SETTINGS.roomViewX,
+      );
+      this.settings.roomViewY = clampNumber(
+        this.settings.roomViewY + vertical,
+        -0.8,
+        1.2,
+        DEFAULT_SETTINGS.roomViewY,
+      );
+      this.settings.roomViewZ = clampNumber(
+        this.settings.roomViewZ + rightZ * strafe + forwardZ * forward,
+        -3.7,
+        1.2,
+        DEFAULT_SETTINGS.roomViewZ,
+      );
+      this.updateDesktopCamera();
+    }
+
+    updateDesktopCamera() {
+      if (!this.camera || this.xrSession) return;
+      this.camera.position.set(this.settings.roomViewX, this.settings.roomViewY, this.settings.roomViewZ);
+      this.camera.rotation.set(
+        THREE.MathUtils.degToRad(this.settings.roomViewPitch),
+        THREE.MathUtils.degToRad(this.settings.roomViewYaw),
+        0,
+      );
+    }
+
+    updateThemeAnimations(elapsedSeconds) {
+      for (const object of this.themeAnimatedObjects) {
+        const config = object.userData.themeConfig || {};
+        const animation = isPlainObject(config.animation) ? config.animation : { type: config.animation };
+        const type = String(animation.type || "pulse");
+        const speed = this.resolveThemeNumber(animation.speed, 1);
+        const phase = this.resolveThemeNumber(animation.phase, 0);
+        const wave = Math.sin(elapsedSeconds * speed * Math.PI * 2 + phase);
+        if (type === "rotate") {
+          const axis = String(animation.axis || "y").toLowerCase();
+          const amount = THREE.MathUtils.degToRad(this.resolveThemeNumber(animation.amount, 35) * elapsedSeconds * speed);
+          object.rotation.copy(object.userData.themeBaseRotation);
+          if (axis.includes("x")) object.rotation.x += amount;
+          if (axis.includes("y")) object.rotation.y += amount;
+          if (axis.includes("z")) object.rotation.z += amount;
+        } else if (type === "bob" || type === "sway") {
+          const amplitude = this.resolveThemeNumber(animation.amplitude, 0.05);
+          const axis = String(animation.axis || "y").toLowerCase();
+          object.position.copy(object.userData.themeBasePosition);
+          if (axis.includes("x")) object.position.x += wave * amplitude;
+          if (axis.includes("y")) object.position.y += wave * amplitude;
+          if (axis.includes("z")) object.position.z += wave * amplitude;
+        } else {
+          const amplitude = this.resolveThemeNumber(animation.amplitude, 0.25);
+          const factor = 1 + wave * amplitude;
+          if (typeof object.intensity === "number") {
+            object.intensity = Math.max(0, object.userData.themeBaseIntensity * factor);
+          }
+          const opacity = clampNumber(object.userData.themeBaseOpacity * factor, 0, config.glow ? 3 : 1, object.userData.themeBaseOpacity);
+          setObjectOpacity(object, opacity);
+        }
+      }
+    }
+
     initThree() {
       this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: true, alpha: true });
       this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
@@ -905,10 +1534,13 @@
       this.renderer.xr.setReferenceSpaceType("local-floor");
       this.scene = new THREE.Scene();
       this.camera = new THREE.PerspectiveCamera(60, 1, 0.1, 100);
+      this.camera.rotation.order = "YXZ";
       this.camera.position.set(0, 0, 0);
       this.xrRaycaster = new THREE.Raycaster();
       this.xrControllerRayMatrix = new THREE.Matrix4();
-      const ambient = new THREE.AmbientLight(0xffffff, 1);
+      this.themeRaycaster = new THREE.Raycaster();
+      this.themePointer = new THREE.Vector2();
+      const ambient = new THREE.AmbientLight(0xffffff, 0.55);
       this.scene.add(ambient);
       this.screenGroup = new THREE.Group();
       this.scene.add(this.screenGroup);
@@ -928,6 +1560,7 @@
       this.initXrControllers();
       this.applyTheme();
       this.updateSceneLighting();
+      this.updateDesktopCamera();
     }
 
     updateSceneLighting() {
@@ -1021,6 +1654,10 @@
         this.pulseController(controller);
         return;
       }
+      if (this.activateThemeInteractionForController(controller)) {
+        this.pulseController(controller);
+        return;
+      }
       this.toggleSidePanel();
       this.pulseController(controller);
     }
@@ -1048,6 +1685,50 @@
       this.xrRaycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
       this.xrRaycaster.ray.direction.set(0, 0, -1).applyMatrix4(this.xrControllerRayMatrix);
       return this.xrRaycaster.intersectObject(this.xrSidePanelMesh, false)[0] || null;
+    }
+
+    activateThemeInteractionForController(controller) {
+      if (!this.xrSession || !this.xrRaycaster || !this.xrControllerRayMatrix || !this.themeInteractiveObjects.length) return false;
+      this.xrControllerRayMatrix.identity().extractRotation(controller.matrixWorld);
+      this.xrRaycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
+      this.xrRaycaster.ray.direction.set(0, 0, -1).applyMatrix4(this.xrControllerRayMatrix);
+      const hit = this.xrRaycaster.intersectObjects(this.themeInteractiveObjects.filter((object) => object.visible), true)[0];
+      if (!hit?.object?.userData?.themeInteractive) return false;
+      return this.activateThemeObjectInteraction(hit.object);
+    }
+
+    activateThemeObjectInteraction(object) {
+      const config = object?.userData?.themeConfig || {};
+      const interaction = isPlainObject(config.interaction) ? config.interaction : null;
+      if (!interaction) return false;
+      const action = String(interaction.action || interaction.type || "toggleSetting");
+      if (action === "toggleSetting" || action === "toggle") {
+        const setting = interaction.setting;
+        if (!setting) return false;
+        const definition = this.themeSettingDefinition(setting);
+        const current = this.themeSettingValue(setting, definition?.default ?? false);
+        this.setThemeSettingValue(setting, !Boolean(current));
+        return true;
+      }
+      if (action === "incrementSetting" || action === "dim") {
+        const setting = interaction.setting;
+        if (!setting) return false;
+        const definition = this.themeSettingDefinition(setting) || {};
+        const current = Number(this.themeSettingValue(setting, definition.default ?? 0));
+        const step = Number(interaction.step ?? definition.step ?? 0.1);
+        const min = Number(definition.min ?? 0);
+        const max = Number(definition.max ?? 1);
+        const next = current + step > max && interaction.wrap !== false ? min : clampNumber(current + step, min, max, current);
+        this.setThemeSettingValue(setting, next);
+        return true;
+      }
+      if (action === "toggleVisible") {
+        const target = this.themeObjectById.get(String(interaction.target || ""));
+        if (!target) return false;
+        target.visible = !target.visible;
+        return true;
+      }
+      return false;
     }
 
     activateXrHotspot(hotspot) {
@@ -1652,6 +2333,11 @@
       this.updateBacklight();
       this.updateXrSidePanelTexture();
       this.updatePlaybackControls();
+      const now = performance.now();
+      const deltaSeconds = this.lastRenderAt ? Math.min(0.05, (now - this.lastRenderAt) / 1000) : 0;
+      this.lastRenderAt = now;
+      this.updateThemeAnimations(now / 1000);
+      this.updateDesktopKeyboardNavigation(deltaSeconds);
       this.renderer.render(this.scene, this.camera);
     }
 
@@ -1673,6 +2359,8 @@
           this.xrSessionMode = "";
           this.xrSessionEndHandler = null;
           this.activeGrab = null;
+          this.desktopKeys.clear();
+          this.updateDesktopCamera();
           this.updateSceneLighting();
           this.syncOverlayControls();
         };
@@ -1955,6 +2643,60 @@
   function clampNumber(value, min, max, fallback) {
     if (!Number.isFinite(value)) return fallback;
     return Math.min(max, Math.max(min, value));
+  }
+
+  function isPlainObject(value) {
+    return Boolean(value && typeof value === "object" && !Array.isArray(value));
+  }
+
+  function coerceThemeSettingValue(value, definition = null) {
+    const type = String(definition?.type || "number").toLowerCase();
+    if (type === "boolean") return Boolean(value);
+    if (type === "select" || type === "enum") return String(value);
+    const min = Number(definition?.min ?? -100000);
+    const max = Number(definition?.max ?? 100000);
+    return clampNumber(Number(value), min, max, Number(definition?.default ?? 0));
+  }
+
+  function formatThemeSettingValue(value, definition = null) {
+    const type = String(definition?.type || "number").toLowerCase();
+    if (type === "boolean") return Boolean(value) ? "On" : "Off";
+    if (type === "select" || type === "enum") return String(value);
+    const number = Number(value);
+    if (!Number.isFinite(number)) return "";
+    const suffix = definition?.suffix ? String(definition.suffix) : "";
+    return `${Number.isInteger(number) ? number : number.toFixed(2).replace(/\.?0+$/, "")}${suffix}`;
+  }
+
+  function cssEscape(value) {
+    if (window.CSS?.escape) return window.CSS.escape(String(value));
+    return String(value).replace(/["\\]/g, "\\$&");
+  }
+
+  function setObjectOpacity(object, opacity) {
+    const materials = Array.isArray(object.material) ? object.material : [object.material];
+    for (const material of materials) {
+      if (!material) continue;
+      material.opacity = opacity;
+      material.transparent = opacity < 1 || material.blending === THREE.AdditiveBlending;
+    }
+  }
+
+  function normalizeDegrees(value) {
+    if (!Number.isFinite(value)) return 0;
+    return ((value + 180) % 360 + 360) % 360 - 180;
+  }
+
+  function isEditableTarget(target) {
+    if (!(target instanceof Element)) return false;
+    const tagName = target.tagName.toLowerCase();
+    return target.isContentEditable || ["input", "select", "textarea", "button"].includes(tagName);
+  }
+
+  function normalizedNavigationKey(event) {
+    const key = String(event.key || "").toLowerCase();
+    const navigationKeys = ["arrowup", "arrowdown", "arrowleft", "arrowright", "w", "a", "s", "d", "q", "e", "shift"];
+    return navigationKeys.includes(key) ? key : "";
   }
 
   function isBacklightCornerSide(side) {
