@@ -3263,6 +3263,7 @@ document.addEventListener("alpine:init", () => {
         const audioOutputWarning = await this.ensureWatchRoomSpatialAudioSourceForOutput();
         this.playerAudioOutputLink = this.hostAudioOutputLink(channel);
         this.playerAudioOutputStatus = audioOutputWarning || `${channel} audio output link ready. Open it on the browser connected to the audio device.`;
+        if (!this.playerPollActive) this.pollWatchRoomParticipants();
       } catch (error) {
         this.error = error.message;
         this.playerAudioOutputStatus = "";

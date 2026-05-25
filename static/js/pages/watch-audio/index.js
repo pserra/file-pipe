@@ -430,12 +430,14 @@ document.addEventListener("alpine:init", () => {
       }
       const playbackMetadata = this.playbackMetadata();
       const hlsStream = isHlsPlaybackMetadata(playbackMetadata);
-      if (!hlsStream && playbackMetadata?.progressiveTranscode && !playbackMetadata.progressiveTranscode.complete) {
-        throw new Error("This room's random-access stream is still preparing. Ask the host to create a live stream watch room or wait for Stable MP4.");
-      }
+      const linearProgressive = !hlsStream && playbackMetadata?.progressiveTranscode && !playbackMetadata.progressiveTranscode.complete;
       this.pendingRangeBytes = {};
       this.pendingHlsBytes = {};
-      this.status = hlsStream ? "Preparing encrypted live audio stream..." : "Preparing encrypted range audio stream...";
+      this.status = hlsStream
+        ? "Preparing encrypted live audio stream..."
+        : linearProgressive
+          ? "Preparing linear audio output while Stable MP4 continues transcoding..."
+          : "Preparing encrypted range audio stream...";
       await this.registerServiceWorker();
       navigator.serviceWorker.controller.postMessage({
         type: "watch-metadata",
@@ -900,4 +902,3 @@ document.addEventListener("alpine:init", () => {
     },
   }));
 });
-
