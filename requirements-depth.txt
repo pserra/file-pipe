@@ -1,0 +1,8 @@
+torch>=2.2
+torchvision>=0.17
+transformers>=4.43
+huggingface_hub>=0.24
+numpy>=1.26
+Pillow>=10.0
+opencv-python-headless>=4.10
+coremltools>=8.0; sys_platform == "darwin"

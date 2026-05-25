@@ -216,6 +216,18 @@ The sender tab must stay open until transfers complete.
 
 When a DLNA video's default audio track is not browser-playable, the local connector can transcode it once to a cached MP4/AAC file under `instance/transcodes/`. The standalone connector uses its configured cache folder instead. Completed transcodes keep a stable source-key cache path and, once the source MD5 is known, an MD5-keyed cache alias so the same cached file can be reused across connector restarts. The player, watch rooms, and Bigscreen links then use that stable cached file for checksum and range-based streaming.
 
+Connector live-stream watch rooms can also offer an optional generated `3D Stream` mode. Participants who choose it receive on-demand Half SBS or Full SBS HLS segments created from the 2D source and cached separately from normal 2D segments. The default near-real-time path uses ffmpeg stereo synthesis; tune the horizontal depth offset with `FILE_PIPE_HLS_STEREO3D_DEPTH_PERCENT` when needed.
+
+Depth-aware stereo processors are selected from the Player controls or by setting `FILE_PIPE_HLS_STEREO3D_PROCESSOR`. Supported IDs are `ffmpeg-shift`, `depth-anything-v2-small`, `depth-anything-v2-base`, `coreml-depth-anything-v2-small`, and experimental `webgpu-depth-anything-v2-small`. The WebGPU option is viewer-side and looks for a browser adapter at `window.FilePipeLocalDepth3dAdapter`.
+
+To enable the local Depth Anything helpers used by `depth-anything-v2-small` and `coreml-depth-anything-v2-small`, run:
+
+```bash
+scripts/setup_depth_processors.sh
+```
+
+The setup script installs a dedicated helper under `~/Library/Application Support/File Pipe/depth-processors` on macOS, creates a separate Python virtualenv, installs the optional ML dependencies, and warms up the Depth Anything V2 Small and Apple Core ML Depth Anything V2 Small models. The Local connector auto-discovers that helper, including when launched from `File Pipe Connector.app`. Manual command hooks are still supported with `FILE_PIPE_DEPTH_ANYTHING_V2_SMALL_COMMAND`, `FILE_PIPE_DEPTH_ANYTHING_V2_BASE_COMMAND`, `FILE_PIPE_COREML_DEPTH_ANYTHING_V2_SMALL_COMMAND`, or the generic `FILE_PIPE_STEREO3D_COMMAND`. Command templates receive `{input}`, `{output}`, `{start}`, `{duration}`, `{layout}`, `{video_profile}`, `{processor}`, and `{depth_percent}`.
+
 ## Security model
 
 File Pipe is designed so the hosted Flask app never receives the decryption key and never needs plaintext media.

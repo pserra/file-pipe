@@ -7,9 +7,11 @@ import math
 import mimetypes
 import os
 import secrets
+import shlex
 import shutil
 import socket
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -200,6 +202,7 @@ class ReadAheadFileCache:
 SERVER_CACHE: Dict[str, DlnaServer] = {}
 RESOURCE_CACHE: Dict[str, object] = {}
 RESOURCE_METADATA_CACHE: Dict[str, Dict[str, object]] = {}
+ART_CACHE: Dict[str, str] = {}
 CHECKSUM_CACHE: Dict[str, Dict[str, object]] = {}
 MEDIA_INFO_CACHE: Dict[str, Dict[str, object]] = {}
 RESOURCE_CHECKSUM_CACHE: Dict[str, Dict[str, object]] = {}
@@ -216,11 +219,33 @@ TRANSCODE_CACHE_VERSION = "v5"
 TRANSCODE_AUDIO_PROFILE_STEREO = "stereo"
 TRANSCODE_AUDIO_PROFILE_SPATIAL = "spatial"
 TRANSCODE_AUDIO_PROFILES = {TRANSCODE_AUDIO_PROFILE_STEREO, TRANSCODE_AUDIO_PROFILE_SPATIAL}
+TRANSCODE_VIDEO_PROFILE_2D = "2d"
+TRANSCODE_VIDEO_PROFILE_STEREO_SBS = "3d-sbs"
+TRANSCODE_VIDEO_PROFILE_STEREO_FULL_SBS = "3d-full-sbs"
+TRANSCODE_VIDEO_PROFILES = {
+    TRANSCODE_VIDEO_PROFILE_2D,
+    TRANSCODE_VIDEO_PROFILE_STEREO_SBS,
+    TRANSCODE_VIDEO_PROFILE_STEREO_FULL_SBS,
+}
+TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT = "ffmpeg-shift"
+TRANSCODE_STEREO_PROCESSOR_DA_V2_SMALL = "depth-anything-v2-small"
+TRANSCODE_STEREO_PROCESSOR_DA_V2_BASE = "depth-anything-v2-base"
+TRANSCODE_STEREO_PROCESSOR_COREML_DA_V2_SMALL = "coreml-depth-anything-v2-small"
+TRANSCODE_STEREO_PROCESSOR_WEBGPU_DA_V2_SMALL = "webgpu-depth-anything-v2-small"
+TRANSCODE_STEREO_PROCESSORS = {
+    TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT,
+    TRANSCODE_STEREO_PROCESSOR_DA_V2_SMALL,
+    TRANSCODE_STEREO_PROCESSOR_DA_V2_BASE,
+    TRANSCODE_STEREO_PROCESSOR_COREML_DA_V2_SMALL,
+    TRANSCODE_STEREO_PROCESSOR_WEBGPU_DA_V2_SMALL,
+}
 TRANSCODE_CACHE_DIR = Path(os.environ.get("FILE_PIPE_TRANSCODE_CACHE_DIR", "instance/transcodes"))
 HLS_SEGMENT_SECONDS = int(os.environ.get("FILE_PIPE_HLS_SEGMENT_SECONDS", "6"))
 HLS_PREFETCH_SEGMENTS = int(os.environ.get("FILE_PIPE_HLS_PREFETCH_SEGMENTS", "4"))
 HLS_ACCURATE_SEEK_WINDOW_SECONDS = float(os.environ.get("FILE_PIPE_HLS_ACCURATE_SEEK_WINDOW_SECONDS", "8"))
 HLS_SEGMENT_CACHE_VERSION = "hls-v2"
+HLS_STEREO3D_DEPTH_PERCENT = float(os.environ.get("FILE_PIPE_HLS_STEREO3D_DEPTH_PERCENT", "3.5"))
+HLS_STEREO3D_PROCESSOR = os.environ.get("FILE_PIPE_HLS_STEREO3D_PROCESSOR", TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT)
 PROGRESSIVE_TRANSCODE_START_PERCENT = int(os.environ.get("FILE_PIPE_PROGRESSIVE_TRANSCODE_START_PERCENT", "3"))
 PROGRESSIVE_TRANSCODE_MIN_BYTES = int(os.environ.get("FILE_PIPE_PROGRESSIVE_TRANSCODE_MIN_BYTES", str(2 * 1024 * 1024)))
 TRANSCODE_LOCKS: Dict[str, threading.Lock] = {}
@@ -477,26 +502,27 @@ def browse_local_directory(source_id: str, object_id: str) -> Dict[str, object]:
             continue
         content_type = mimetypes.guess_type(child.name)[0] or "application/octet-stream"
         resource_id = register_local_resource(child)
-        items.append(
-            {
-                "id": encode_object_id(relative),
-                "parentId": object_id,
-                "type": "item",
-                "title": child.name,
-                "class": f"object.item.{content_type.split('/', 1)[0]}Item",
-                "childCount": "0",
-                "resources": [
-                    {
-                        "id": resource_id,
-                        "url": f"/resources/{resource_id}",
-                        "proxyPath": f"/resources/{resource_id}",
-                        "protocolInfo": f"http-get:*:{content_type}:*",
-                        "size": str(stat.st_size),
-                        "duration": "",
-                    }
-                ],
-            }
-        )
+        item = {
+            "id": encode_object_id(relative),
+            "parentId": object_id,
+            "type": "item",
+            "title": child.name,
+            "class": f"object.item.{content_type.split('/', 1)[0]}Item",
+            "childCount": "0",
+            "resources": [
+                {
+                    "id": resource_id,
+                    "url": f"/resources/{resource_id}",
+                    "proxyPath": f"/resources/{resource_id}",
+                    "protocolInfo": f"http-get:*:{content_type}:*",
+                    "size": str(stat.st_size),
+                    "duration": "",
+                }
+            ],
+        }
+        if content_type.startswith("image/"):
+            item["thumbnailProxyPath"] = f"/resources/{resource_id}"
+        items.append(item)
 
     if folder == root:
         path_label = "Root"
@@ -554,6 +580,60 @@ def child_text(node: ET.Element, name: str) -> str:
         if ns_name(child.tag) == name:
             return child.text or ""
     return ""
+
+
+def first_descendant_text(node: ET.Element, names: set[str]) -> str:
+    normalized = {name.lower() for name in names}
+    for element in node.iter():
+        if ns_name(element.tag).lower() in normalized and element.text:
+            return element.text.strip()
+    return ""
+
+
+def node_attr(node: ET.Element, names: set[str]) -> str:
+    normalized = {name.lower() for name in names}
+    for key, value in node.attrib.items():
+        if ns_name(key).lower() in normalized and value:
+            return value
+    return ""
+
+
+def register_art_url(url: str, base_url: str = "") -> Optional[str]:
+    if not url:
+        return None
+    resolved_url = urljoin(base_url, url) if base_url else url
+    if not resolved_url.startswith(("http://", "https://")):
+        return None
+    art_id = str(uuid.uuid5(uuid.NAMESPACE_URL, resolved_url))
+    ART_CACHE[art_id] = resolved_url
+    return art_id
+
+
+def didl_metadata(node: ET.Element) -> Tuple[Dict[str, object], Dict[str, object]]:
+    metadata_fields = {
+        "creator": {"creator", "artist", "author"},
+        "album": {"album"},
+        "genre": {"genre"},
+        "date": {"date", "originalairdate"},
+        "description": {"description", "longdescription", "summary"},
+        "rating": {"rating", "contentrating"},
+    }
+    playback_fields = {
+        "viewOffset": {"viewoffset", "resumeoffset", "bookmark", "lastplaybackposition"},
+        "viewCount": {"viewcount", "playcount"},
+        "lastViewedAt": {"lastviewedat", "lastplayedat"},
+    }
+    metadata: Dict[str, object] = {}
+    playback: Dict[str, object] = {}
+    for key, names in metadata_fields.items():
+        value = first_descendant_text(node, names) or node_attr(node, names)
+        if value:
+            metadata[key] = value
+    for key, names in playback_fields.items():
+        value = first_descendant_text(node, names) or node_attr(node, names)
+        if value:
+            playback[key] = value
+    return metadata, playback
 
 
 def parse_float(value: object) -> Optional[float]:
@@ -672,48 +752,62 @@ def soap_browse(server: DlnaServer, object_id: str) -> ET.Element:
     return ET.fromstring(result_node.text.encode("utf-8"))
 
 
-def parse_didl(didl: ET.Element) -> List[Dict[str, object]]:
+def parse_didl(didl: ET.Element, base_url: str = "") -> List[Dict[str, object]]:
     items = []
     for node in list(didl):
         kind = ns_name(node.tag)
         if kind not in {"container", "item"}:
             continue
 
+        metadata, playback = didl_metadata(node)
+        art_url = first_descendant_text(
+            node,
+            {"albumArtURI", "albumarturi", "thumbnail", "icon", "iconUri", "coverArt"},
+        )
+        art_id = register_art_url(art_url, base_url)
         resources = []
         for child in node:
             if ns_name(child.tag) != "res":
                 continue
-            url = child.text or ""
+            raw_url = (child.text or "").strip()
+            url = urljoin(base_url, raw_url) if raw_url and base_url else raw_url
             resource_id = str(uuid.uuid5(uuid.NAMESPACE_URL, url)) if url else ""
+            attributes = {ns_name(key): value for key, value in child.attrib.items()}
             if url:
                 RESOURCE_CACHE[resource_id] = url
                 RESOURCE_METADATA_CACHE[resource_id] = {
-                    "protocolInfo": child.attrib.get("protocolInfo", ""),
-                    "size": child.attrib.get("size"),
-                    "duration": child.attrib.get("duration"),
+                    **attributes,
+                    "sourceUrl": url,
                 }
             resources.append(
                 {
                     "id": resource_id,
                     "url": url,
                     "proxyPath": f"/resources/{resource_id}" if resource_id else "",
-                    "protocolInfo": child.attrib.get("protocolInfo", ""),
-                    "size": child.attrib.get("size"),
-                    "duration": child.attrib.get("duration"),
+                    **attributes,
+                    "protocolInfo": attributes.get("protocolInfo", ""),
+                    "size": attributes.get("size"),
+                    "duration": attributes.get("duration"),
                 }
             )
 
-        items.append(
-            {
-                "id": node.attrib.get("id", ""),
-                "parentId": node.attrib.get("parentID", ""),
-                "type": kind,
-                "title": child_text(node, "title") or "(untitled)",
-                "class": child_text(node, "class"),
-                "childCount": node.attrib.get("childCount"),
-                "resources": resources,
-            }
-        )
+        item = {
+            "id": node.attrib.get("id", ""),
+            "parentId": node.attrib.get("parentID", ""),
+            "type": kind,
+            "title": child_text(node, "title") or "(untitled)",
+            "class": child_text(node, "class"),
+            "childCount": node.attrib.get("childCount"),
+            "resources": resources,
+        }
+        if metadata:
+            item["metadata"] = metadata
+        if playback:
+            item["playback"] = playback
+        if art_id:
+            item["artworkUrl"] = ART_CACHE.get(art_id, "")
+            item["thumbnailProxyPath"] = f"/art/{art_id}"
+        items.append(item)
     return items
 
 
@@ -1000,12 +1094,97 @@ def normalize_transcode_audio_profile(value: object) -> str:
     return TRANSCODE_AUDIO_PROFILE_STEREO
 
 
+def normalize_transcode_video_profile(value: object) -> str:
+    profile = str(value or "").strip().lower().replace("_", "-")
+    if profile in {
+        "1",
+        "true",
+        "yes",
+        "on",
+        "3d",
+        "sbs",
+        "half-sbs",
+        "stereo-sbs",
+        "sbs-3d",
+        "3d-sbs",
+        "stereoscopic",
+    }:
+        return TRANSCODE_VIDEO_PROFILE_STEREO_SBS
+    if profile in {"full-sbs", "fsbs", "3d-full", "full-3d", "3d-full-sbs", "stereo-full-sbs"}:
+        return TRANSCODE_VIDEO_PROFILE_STEREO_FULL_SBS
+    return TRANSCODE_VIDEO_PROFILE_2D
+
+
+def normalize_stereo_processor(value: object) -> str:
+    processor = str(value or "").strip().lower().replace("_", "-")
+    aliases = {
+        "": TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT,
+        "0": TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT,
+        "false": TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT,
+        "shift": TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT,
+        "ffmpeg": TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT,
+        "ffmpeg-shift": TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT,
+        "depth-anything-small": TRANSCODE_STEREO_PROCESSOR_DA_V2_SMALL,
+        "da-v2-small": TRANSCODE_STEREO_PROCESSOR_DA_V2_SMALL,
+        "depth-anything-v2-small": TRANSCODE_STEREO_PROCESSOR_DA_V2_SMALL,
+        "depth-anything-base": TRANSCODE_STEREO_PROCESSOR_DA_V2_BASE,
+        "da-v2-base": TRANSCODE_STEREO_PROCESSOR_DA_V2_BASE,
+        "depth-anything-v2-base": TRANSCODE_STEREO_PROCESSOR_DA_V2_BASE,
+        "coreml": TRANSCODE_STEREO_PROCESSOR_COREML_DA_V2_SMALL,
+        "coreml-small": TRANSCODE_STEREO_PROCESSOR_COREML_DA_V2_SMALL,
+        "apple-coreml": TRANSCODE_STEREO_PROCESSOR_COREML_DA_V2_SMALL,
+        "coreml-depth-anything-v2-small": TRANSCODE_STEREO_PROCESSOR_COREML_DA_V2_SMALL,
+        "webgpu": TRANSCODE_STEREO_PROCESSOR_WEBGPU_DA_V2_SMALL,
+        "webgpu-small": TRANSCODE_STEREO_PROCESSOR_WEBGPU_DA_V2_SMALL,
+        "webgpu-depth-anything-v2-small": TRANSCODE_STEREO_PROCESSOR_WEBGPU_DA_V2_SMALL,
+    }
+    return aliases.get(processor, TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT)
+
+
+def transcode_video_layout(video_profile: str) -> str:
+    profile = normalize_transcode_video_profile(video_profile)
+    if profile == TRANSCODE_VIDEO_PROFILE_STEREO_FULL_SBS:
+        return "full-sbs"
+    if profile == TRANSCODE_VIDEO_PROFILE_STEREO_SBS:
+        return "half-sbs"
+    return "mono"
+
+
+def is_stereo_video_profile(video_profile: str) -> bool:
+    return normalize_transcode_video_profile(video_profile) != TRANSCODE_VIDEO_PROFILE_2D
+
+
 def request_transcode_audio_profile() -> str:
     return normalize_transcode_audio_profile(
         request.args.get("audio_profile")
         or request.args.get("audioProfile")
         or request.args.get("spatial_audio")
         or request.args.get("spatialAudio")
+    )
+
+
+def request_transcode_video_profile() -> str:
+    requested = normalize_transcode_video_profile(
+        request.args.get("video_profile")
+        or request.args.get("videoProfile")
+        or request.args.get("stereo_video")
+        or request.args.get("stereoVideo")
+        or request.args.get("three_d")
+        or request.args.get("threeD")
+    )
+    layout = str(request.args.get("sbs_layout") or request.args.get("sbsLayout") or "").strip().lower().replace("_", "-")
+    if requested == TRANSCODE_VIDEO_PROFILE_STEREO_SBS and layout in {"full", "full-sbs", "fsbs"}:
+        return TRANSCODE_VIDEO_PROFILE_STEREO_FULL_SBS
+    return requested
+
+
+def request_stereo_processor() -> str:
+    return normalize_stereo_processor(
+        request.args.get("stereo_processor")
+        or request.args.get("stereoProcessor")
+        or request.args.get("depth_processor")
+        or request.args.get("depthProcessor")
+        or HLS_STEREO3D_PROCESSOR
     )
 
 
@@ -1065,6 +1244,59 @@ def spatial_audio_candidate(media_info: Dict[str, object]) -> bool:
     return channels > 2
 
 
+def stereo_processor_options() -> List[Dict[str, object]]:
+    return [
+        {
+            "id": TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT,
+            "label": "Fast ffmpeg shift",
+            "bestUse": "Near real-time fallback and broad CPU compatibility.",
+            "m3Practicality": "Excellent; no model runtime required.",
+            "local": True,
+            "requiresCommand": False,
+        },
+        {
+            "id": TRANSCODE_STEREO_PROCESSOR_DA_V2_SMALL,
+            "label": "Depth Anything V2 Small",
+            "bestUse": "Better depth-aware stereo when latency still matters.",
+            "m3Practicality": "Good with Metal/MPS or a tuned local helper.",
+            "model": "depth-anything/Depth-Anything-V2-Small-hf",
+            "local": True,
+            "requiresCommand": True,
+            "commandAvailable": bool(stereo_processor_command_template(TRANSCODE_STEREO_PROCESSOR_DA_V2_SMALL)),
+        },
+        {
+            "id": TRANSCODE_STEREO_PROCESSOR_DA_V2_BASE,
+            "label": "Depth Anything V2 Base",
+            "bestUse": "Higher quality depth for prepared/cache-ahead segments.",
+            "m3Practicality": "Moderate; use when extra latency is acceptable.",
+            "model": "depth-anything/Depth-Anything-V2-Base-hf",
+            "local": True,
+            "requiresCommand": True,
+            "commandAvailable": bool(stereo_processor_command_template(TRANSCODE_STEREO_PROCESSOR_DA_V2_BASE)),
+        },
+        {
+            "id": TRANSCODE_STEREO_PROCESSOR_COREML_DA_V2_SMALL,
+            "label": "Apple Core ML Depth Anything V2 Small",
+            "bestUse": "Best Apple Silicon path for local depth inference.",
+            "m3Practicality": "Excellent after the Core ML helper is installed.",
+            "model": "apple/coreml-depth-anything-v2-small",
+            "local": True,
+            "requiresCommand": True,
+            "commandAvailable": bool(stereo_processor_command_template(TRANSCODE_STEREO_PROCESSOR_COREML_DA_V2_SMALL)),
+        },
+        {
+            "id": TRANSCODE_STEREO_PROCESSOR_WEBGPU_DA_V2_SMALL,
+            "label": "Local WebGPU Depth Anything V2 Small",
+            "bestUse": "Experimental viewer-side local depth on supported browsers.",
+            "m3Practicality": "Experimental; avoids connector ML work but depends on browser WebGPU.",
+            "model": "onnx-community/depth-anything-v2-small-ONNX",
+            "local": True,
+            "requiresCommand": False,
+            "browserOnly": True,
+        },
+    ]
+
+
 def probe_media(url: str) -> Dict[str, object]:
     ffprobe_path = find_media_tool("ffprobe")
     ffmpeg_available = bool(find_media_tool("ffmpeg"))
@@ -1122,6 +1354,8 @@ def probe_media(url: str) -> Dict[str, object]:
         "ffmpegAvailable": ffmpeg_available,
         "defaultAudio": default_audio,
         "defaultVideo": default_video,
+        "audioStreams": audio_streams,
+        "videoStreams": video_streams,
         "audioCodec": audio_codec,
         "audioChannels": audio_channels,
         "audioChannelLayout": audio_channel_layout,
@@ -1136,6 +1370,18 @@ def probe_media(url: str) -> Dict[str, object]:
         "playableVideoCodecs": sorted(PLAYABLE_BROWSER_VIDEO_CODECS),
     }
     media_info["spatialAudioCandidate"] = spatial_audio_candidate(media_info)
+    media_info["stereo3dCandidate"] = bool(default_video)
+    media_info["stereo3dProfiles"] = {
+        "default": TRANSCODE_VIDEO_PROFILE_2D,
+        "available": sorted(TRANSCODE_VIDEO_PROFILES),
+        "generatedLayouts": {
+            TRANSCODE_VIDEO_PROFILE_STEREO_SBS: "half-sbs",
+            TRANSCODE_VIDEO_PROFILE_STEREO_FULL_SBS: "full-sbs",
+        },
+        "defaultProcessor": normalize_stereo_processor(HLS_STEREO3D_PROCESSOR),
+        "processors": stereo_processor_options(),
+        "depthPercent": hls_stereo3d_depth_fraction() * 100,
+    }
     return media_info
 
 
@@ -1236,6 +1482,24 @@ def default_stream_indexes(probe: Dict[str, object]) -> Tuple[Optional[int], Opt
     return default_video.get("index"), default_audio.get("index")
 
 
+def hls_stereo3d_depth_fraction() -> float:
+    return max(0.005, min(0.08, HLS_STEREO3D_DEPTH_PERCENT / 100.0))
+
+
+def stereo_sbs_filter(input_label: str, video_profile: str = TRANSCODE_VIDEO_PROFILE_STEREO_SBS, output_label: str = "[v]") -> str:
+    depth = hls_stereo3d_depth_fraction()
+    offset = f"floor(iw*{depth:.4f}/2)*2"
+    crop_width = f"iw-2*{offset}"
+    divisor = (1 - (2 * depth)) if normalize_transcode_video_profile(video_profile) == TRANSCODE_VIDEO_PROFILE_STEREO_FULL_SBS else 2 * (1 - (2 * depth))
+    eye_width = f"trunc(iw/{divisor:.6f}/2)*2"
+    return (
+        f"{input_label}scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p,split=2[fp3dl][fp3dr];"
+        f"[fp3dl]crop={crop_width}:ih:{offset}:0,scale={eye_width}:ih[fp3dleft];"
+        f"[fp3dr]crop={crop_width}:ih:0:0,scale={eye_width}:ih[fp3dright];"
+        f"[fp3dleft][fp3dright]hstack=inputs=2,setsar=1,format=yuv420p{output_label}"
+    )
+
+
 def build_hls_segment_command(
     url: str,
     probe: Dict[str, object],
@@ -1244,7 +1508,9 @@ def build_hls_segment_command(
     duration: float,
     ffmpeg_path: str = "ffmpeg",
     audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
+    video_profile: str = TRANSCODE_VIDEO_PROFILE_2D,
 ) -> List[str]:
+    normalized_video_profile = normalize_transcode_video_profile(video_profile)
     video_index, audio_index = default_stream_indexes(probe)
     input_seek = max(0.0, float(start_time) - max(0.0, HLS_ACCURATE_SEEK_WINDOW_SECONDS))
     accurate_seek = max(0.0, float(start_time) - input_seek)
@@ -1260,8 +1526,11 @@ def build_hls_segment_command(
     if accurate_seek > 0:
         command.extend(["-ss", f"{accurate_seek:.3f}"])
     command.extend(["-t", f"{duration:.3f}"])
+    use_stereo_sbs = video_index is not None and is_stereo_video_profile(normalized_video_profile)
+    if use_stereo_sbs:
+        command.extend(["-filter_complex", stereo_sbs_filter(f"[0:{video_index}]", normalized_video_profile)])
     if video_index is not None:
-        command.extend(["-map", f"0:{video_index}"])
+        command.extend(["-map", "[v]" if use_stereo_sbs else f"0:{video_index}"])
     if audio_index is not None:
         command.extend(["-map", f"0:{audio_index}"])
     command.extend(["-sn", "-dn"])
@@ -1279,11 +1548,11 @@ def build_hls_segment_command(
                 "-profile:v",
                 "main",
                 "-level",
-                "4.1",
-                "-vf",
-                "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p",
+                "5.1" if normalized_video_profile == TRANSCODE_VIDEO_PROFILE_STEREO_FULL_SBS else "4.1",
             ]
         )
+        if not use_stereo_sbs:
+            command.extend(["-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p"])
     if audio_index is not None:
         command.extend(audio_transcode_options(probe.get("defaultAudio") or {}, audio_profile))
     command.extend(
@@ -1302,14 +1571,137 @@ def build_hls_segment_command(
     return command
 
 
-def transcode_profile_cache_suffix(audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO) -> str:
-    profile = normalize_transcode_audio_profile(audio_profile)
-    return "" if profile == TRANSCODE_AUDIO_PROFILE_STEREO else f"-{profile}"
+def stereo_processor_command_template(stereo_processor: str) -> str:
+    processor = normalize_stereo_processor(stereo_processor)
+    env_by_processor = {
+        TRANSCODE_STEREO_PROCESSOR_DA_V2_SMALL: "FILE_PIPE_DEPTH_ANYTHING_V2_SMALL_COMMAND",
+        TRANSCODE_STEREO_PROCESSOR_DA_V2_BASE: "FILE_PIPE_DEPTH_ANYTHING_V2_BASE_COMMAND",
+        TRANSCODE_STEREO_PROCESSOR_COREML_DA_V2_SMALL: "FILE_PIPE_COREML_DEPTH_ANYTHING_V2_SMALL_COMMAND",
+    }
+    return (
+        os.environ.get(env_by_processor.get(processor, ""), "")
+        or os.environ.get("FILE_PIPE_STEREO3D_COMMAND", "")
+        or default_stereo_processor_command_template(processor)
+    ).strip()
 
 
-def transcode_profile_cache_key(audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO) -> str:
-    profile = normalize_transcode_audio_profile(audio_profile)
-    return "" if profile == TRANSCODE_AUDIO_PROFILE_STEREO else f":{profile}"
+def depth_processor_home() -> Path:
+    override = os.environ.get("FILE_PIPE_DEPTH_PROCESSOR_HOME")
+    if override:
+        return Path(override).expanduser()
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "File Pipe" / "depth-processors"
+    if sys.platform == "win32":
+        root = os.environ.get("APPDATA")
+        if root:
+            return Path(root) / "File Pipe" / "depth-processors"
+        return Path.home() / "AppData" / "Roaming" / "File Pipe" / "depth-processors"
+    root = os.environ.get("XDG_CONFIG_HOME")
+    if root:
+        return Path(root) / "file-pipe" / "depth-processors"
+    return Path.home() / ".config" / "file-pipe" / "depth-processors"
+
+
+def default_stereo_processor_command_template(processor: str) -> str:
+    normalized = normalize_stereo_processor(processor)
+    if normalized not in {
+        TRANSCODE_STEREO_PROCESSOR_DA_V2_SMALL,
+        TRANSCODE_STEREO_PROCESSOR_DA_V2_BASE,
+        TRANSCODE_STEREO_PROCESSOR_COREML_DA_V2_SMALL,
+    }:
+        return ""
+    home = depth_processor_home()
+    helper = home / "depth_anything_stereo.py"
+    python_path = Path(os.environ.get("FILE_PIPE_DEPTH_PROCESSOR_PYTHON") or home / ".venv" / "bin" / "python").expanduser()
+    if not helper.exists() or not python_path.exists():
+        return ""
+    return " ".join(
+        [
+            shlex.quote(str(python_path)),
+            shlex.quote(str(helper)),
+            "--processor",
+            shlex.quote(normalized),
+            "--input",
+            "{input}",
+            "--output",
+            "{output}",
+            "--start",
+            "{start}",
+            "--duration",
+            "{duration}",
+            "--layout",
+            "{layout}",
+            "--video-profile",
+            "{video_profile}",
+            "--depth-percent",
+            "{depth_percent}",
+        ]
+    )
+
+
+def build_external_stereo_segment_command(
+    url: str,
+    output_path: str,
+    start_time: float,
+    duration: float,
+    video_profile: str,
+    stereo_processor: str,
+) -> List[str]:
+    processor = normalize_stereo_processor(stereo_processor)
+    template = stereo_processor_command_template(processor)
+    if not template:
+        raise RuntimeError(
+            f"{processor} requires a local stereo processor command. Set FILE_PIPE_STEREO3D_COMMAND "
+            "or the processor-specific command environment variable."
+        )
+    values = {
+        "input": url,
+        "output": output_path,
+        "start": f"{float(start_time):.3f}",
+        "duration": f"{float(duration):.3f}",
+        "layout": transcode_video_layout(video_profile),
+        "video_profile": normalize_transcode_video_profile(video_profile),
+        "processor": processor,
+        "depth_percent": f"{hls_stereo3d_depth_fraction() * 100:.3f}",
+    }
+    quoted = {key: shlex.quote(str(value)) for key, value in values.items()}
+    return shlex.split(template.format(**quoted))
+
+
+def transcode_profile_cache_suffix(
+    audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
+    video_profile: str = TRANSCODE_VIDEO_PROFILE_2D,
+    stereo_processor: str = TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT,
+) -> str:
+    audio = normalize_transcode_audio_profile(audio_profile)
+    video = normalize_transcode_video_profile(video_profile)
+    processor = normalize_stereo_processor(stereo_processor)
+    parts = []
+    if audio != TRANSCODE_AUDIO_PROFILE_STEREO:
+        parts.append(audio)
+    if video != TRANSCODE_VIDEO_PROFILE_2D:
+        parts.append(video)
+        if processor != TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT:
+            parts.append(processor)
+    return f"-{'-'.join(parts)}" if parts else ""
+
+
+def transcode_profile_cache_key(
+    audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
+    video_profile: str = TRANSCODE_VIDEO_PROFILE_2D,
+    stereo_processor: str = TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT,
+) -> str:
+    audio = normalize_transcode_audio_profile(audio_profile)
+    video = normalize_transcode_video_profile(video_profile)
+    processor = normalize_stereo_processor(stereo_processor)
+    parts = []
+    if audio != TRANSCODE_AUDIO_PROFILE_STEREO:
+        parts.append(audio)
+    if video != TRANSCODE_VIDEO_PROFILE_2D:
+        parts.append(video)
+        if processor != TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT:
+            parts.append(processor)
+    return f":{':'.join(parts)}" if parts else ""
 
 
 def source_transcode_cache_path(
@@ -1326,10 +1718,12 @@ def source_hls_cache_dir(
     resource_id: str,
     url: str,
     audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
+    video_profile: str = TRANSCODE_VIDEO_PROFILE_2D,
+    stereo_processor: str = TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT,
 ) -> Path:
-    profile_key = transcode_profile_cache_key(audio_profile)
+    profile_key = transcode_profile_cache_key(audio_profile, video_profile, stereo_processor)
     url_hash = hashlib.sha256(f"{TRANSCODE_CACHE_VERSION}{profile_key}:{HLS_SEGMENT_CACHE_VERSION}:{HLS_SEGMENT_SECONDS}:{url}".encode("utf-8")).hexdigest()[:16]
-    return TRANSCODE_CACHE_DIR / f"{resource_id}-{url_hash}{transcode_profile_cache_suffix(audio_profile)}-hls"
+    return TRANSCODE_CACHE_DIR / f"{resource_id}-{url_hash}{transcode_profile_cache_suffix(audio_profile, video_profile, stereo_processor)}-hls"
 
 
 def cached_resource_md5(resource_id: str) -> str:
@@ -1343,9 +1737,13 @@ def md5_transcode_cache_path(md5: str, audio_profile: str = TRANSCODE_AUDIO_PROF
     return TRANSCODE_CACHE_DIR / f"md5-{TRANSCODE_CACHE_VERSION}{profile_part}-{md5}.mp4"
 
 
-def md5_hls_cache_dir(md5: str, audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO) -> Path:
-    profile = normalize_transcode_audio_profile(audio_profile)
-    profile_part = "" if profile == TRANSCODE_AUDIO_PROFILE_STEREO else f"-{profile}"
+def md5_hls_cache_dir(
+    md5: str,
+    audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
+    video_profile: str = TRANSCODE_VIDEO_PROFILE_2D,
+    stereo_processor: str = TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT,
+) -> Path:
+    profile_part = transcode_profile_cache_suffix(audio_profile, video_profile, stereo_processor)
     return TRANSCODE_CACHE_DIR / f"md5-{TRANSCODE_CACHE_VERSION}{profile_part}-{HLS_SEGMENT_CACHE_VERSION}-{HLS_SEGMENT_SECONDS}s-{md5}-hls"
 
 
@@ -1366,12 +1764,14 @@ def hls_cache_candidates(
     resource_id: str,
     url: str,
     audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
+    video_profile: str = TRANSCODE_VIDEO_PROFILE_2D,
+    stereo_processor: str = TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT,
 ) -> List[Path]:
     candidates: List[Path] = []
     md5 = cached_resource_md5(resource_id)
     if md5:
-        candidates.append(md5_hls_cache_dir(md5, audio_profile))
-    candidates.append(source_hls_cache_dir(resource_id, url, audio_profile))
+        candidates.append(md5_hls_cache_dir(md5, audio_profile, video_profile, stereo_processor))
+    candidates.append(source_hls_cache_dir(resource_id, url, audio_profile, video_profile, stereo_processor))
     return candidates
 
 
@@ -1417,11 +1817,13 @@ def hls_cache_dir(
     resource_id: str,
     url: str,
     audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
+    video_profile: str = TRANSCODE_VIDEO_PROFILE_2D,
+    stereo_processor: str = TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT,
 ) -> Path:
-    for path in hls_cache_candidates(resource_id, url, audio_profile):
+    for path in hls_cache_candidates(resource_id, url, audio_profile, video_profile, stereo_processor):
         if path.exists():
             return path
-    return hls_cache_candidates(resource_id, url, audio_profile)[0]
+    return hls_cache_candidates(resource_id, url, audio_profile, video_profile, stereo_processor)[0]
 
 
 def hls_segment_path(
@@ -1429,8 +1831,10 @@ def hls_segment_path(
     url: str,
     segment_index: int,
     audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
+    video_profile: str = TRANSCODE_VIDEO_PROFILE_2D,
+    stereo_processor: str = TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT,
 ) -> Path:
-    return hls_cache_dir(resource_id, url, audio_profile) / f"segment-{segment_index:06d}.ts"
+    return hls_cache_dir(resource_id, url, audio_profile, video_profile, stereo_processor) / f"segment-{segment_index:06d}.ts"
 
 
 def remember_resource_checksum(resource_id: str, checksum: Dict[str, object]) -> None:
@@ -1489,6 +1893,8 @@ def hls_playlist(
     media_info: Dict[str, object],
     access_token: str = "",
     audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
+    video_profile: str = TRANSCODE_VIDEO_PROFILE_2D,
+    stereo_processor: str = TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT,
 ) -> str:
     info = hls_duration_info(media_info)
     duration = float(info["duration"])
@@ -1499,6 +1905,13 @@ def hls_playlist(
         query_parts.append(f"access_token={access_token}")
     if normalize_transcode_audio_profile(audio_profile) == TRANSCODE_AUDIO_PROFILE_SPATIAL:
         query_parts.append("audio_profile=spatial")
+    if is_stereo_video_profile(video_profile):
+        query_parts.append("video_profile=3d")
+        if normalize_transcode_video_profile(video_profile) == TRANSCODE_VIDEO_PROFILE_STEREO_FULL_SBS:
+            query_parts.append("sbs_layout=full")
+        processor = normalize_stereo_processor(stereo_processor)
+        if processor != TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT:
+            query_parts.append(f"stereo_processor={processor}")
     token_query = f"?{'&'.join(query_parts)}" if query_parts else ""
     lines = [
         "#EXTM3U",
@@ -1525,9 +1938,11 @@ def ensure_hls_segment(
     media_info: Dict[str, object],
     segment_index: int,
     audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
+    video_profile: str = TRANSCODE_VIDEO_PROFILE_2D,
+    stereo_processor: str = TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT,
 ) -> Dict[str, object]:
-    artifact = create_hls_segment(resource_id, url, media_info, segment_index, audio_profile)
-    prefetch_hls_segments(resource_id, url, media_info, segment_index + 1, audio_profile)
+    artifact = create_hls_segment(resource_id, url, media_info, segment_index, audio_profile, video_profile, stereo_processor)
+    prefetch_hls_segments(resource_id, url, media_info, segment_index + 1, audio_profile, video_profile, stereo_processor)
     return artifact
 
 
@@ -1537,7 +1952,11 @@ def create_hls_segment(
     media_info: Dict[str, object],
     segment_index: int,
     audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
+    video_profile: str = TRANSCODE_VIDEO_PROFILE_2D,
+    stereo_processor: str = TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT,
 ) -> Dict[str, object]:
+    normalized_video_profile = normalize_transcode_video_profile(video_profile)
+    normalized_stereo_processor = normalize_stereo_processor(stereo_processor) if is_stereo_video_profile(normalized_video_profile) else TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT
     ffmpeg_path = find_media_tool("ffmpeg")
     if not ffmpeg_path:
         raise RuntimeError("ffmpeg is not installed or is not on PATH.")
@@ -1549,7 +1968,7 @@ def create_hls_segment(
     segment_duration = int(info["segmentDuration"])
     start_time = segment_index * segment_duration
     segment_length = max(0.1, min(segment_duration, duration - start_time))
-    path = hls_segment_path(resource_id, url, segment_index, audio_profile)
+    path = hls_segment_path(resource_id, url, segment_index, audio_profile, normalized_video_profile, normalized_stereo_processor)
     lock = lock_for_transcode(path)
     with lock:
         if not path.exists() or path.stat().st_size == 0:
@@ -1557,15 +1976,26 @@ def create_hls_segment(
             temp_path = path.with_suffix(f".{os.getpid()}.part")
             if temp_path.exists():
                 temp_path.unlink()
-            command = build_hls_segment_command(
-                url,
-                media_info,
-                str(temp_path),
-                start_time,
-                segment_length,
-                ffmpeg_path,
-                audio_profile,
-            )
+            if normalized_stereo_processor == TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT:
+                command = build_hls_segment_command(
+                    url,
+                    media_info,
+                    str(temp_path),
+                    start_time,
+                    segment_length,
+                    ffmpeg_path,
+                    audio_profile,
+                    normalized_video_profile,
+                )
+            else:
+                command = build_external_stereo_segment_command(
+                    url,
+                    str(temp_path),
+                    start_time,
+                    segment_length,
+                    normalized_video_profile,
+                    normalized_stereo_processor,
+                )
             try:
                 subprocess.run(command, capture_output=True, text=True, check=True)
                 temp_path.replace(path)
@@ -1573,7 +2003,8 @@ def create_hls_segment(
                 if temp_path.exists():
                     temp_path.unlink()
                 detail = (exc.stderr or exc.stdout or str(exc)).strip()
-                raise RuntimeError(f"ffmpeg could not create HLS segment {segment_index}: {detail}") from exc
+                tool_name = "ffmpeg" if normalized_stereo_processor == TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT else normalized_stereo_processor
+                raise RuntimeError(f"{tool_name} could not create HLS segment {segment_index}: {detail}") from exc
             except Exception:
                 if temp_path.exists():
                     temp_path.unlink()
@@ -1586,6 +2017,9 @@ def create_hls_segment(
         "cached": True,
         "segmentIndex": segment_index,
         "audioProfile": normalize_transcode_audio_profile(audio_profile),
+        "videoProfile": normalized_video_profile,
+        "videoLayout": transcode_video_layout(normalized_video_profile),
+        "stereoProcessor": normalized_stereo_processor,
         **info,
     }
 
@@ -1596,6 +2030,8 @@ def prefetch_hls_segments(
     media_info: Dict[str, object],
     start_index: int,
     audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
+    video_profile: str = TRANSCODE_VIDEO_PROFILE_2D,
+    stereo_processor: str = TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT,
 ) -> None:
     if HLS_PREFETCH_SEGMENTS <= 0:
         return
@@ -1604,7 +2040,7 @@ def prefetch_hls_segments(
     except RuntimeError:
         return
     for segment_index in range(start_index, min(segment_count, start_index + HLS_PREFETCH_SEGMENTS)):
-        path = hls_segment_path(resource_id, url, segment_index, audio_profile)
+        path = hls_segment_path(resource_id, url, segment_index, audio_profile, video_profile, stereo_processor)
         try:
             if path.exists() and path.stat().st_size > 0:
                 continue
@@ -1618,7 +2054,7 @@ def prefetch_hls_segments(
 
         def worker(index=segment_index, prefetch_key=key) -> None:
             try:
-                create_hls_segment(resource_id, url, media_info, index, audio_profile)
+                create_hls_segment(resource_id, url, media_info, index, audio_profile, video_profile, stereo_processor)
             except Exception:
                 pass
             finally:
@@ -2504,7 +2940,37 @@ def create_connector_app(security: Optional[ConnectorSecurity] = None):
         except (requests.RequestException, ET.ParseError) as exc:
             return jsonify({"error": str(exc)}), 502
 
-        return jsonify({"objectId": object_id, "items": parse_didl(didl)})
+        return jsonify({"objectId": object_id, "items": parse_didl(didl, server.location)})
+
+    @app.get("/art/<art_id>")
+    def artwork(art_id: str):
+        auth_error = require_auth(security)
+        if auth_error:
+            return auth_error
+        art_url = ART_CACHE.get(art_id)
+        if not art_url:
+            return jsonify({"error": "Unknown artwork. Browse the item again."}), 404
+
+        try:
+            upstream = requests.get(art_url, stream=True, timeout=10)
+            upstream.raise_for_status()
+        except requests.RequestException as exc:
+            return jsonify({"error": str(exc)}), 502
+
+        def generate():
+            with upstream:
+                for chunk in upstream.iter_content(chunk_size=64 * 1024):
+                    if chunk:
+                        yield chunk
+
+        headers = {}
+        if upstream.headers.get("Content-Length"):
+            headers["Content-Length"] = upstream.headers["Content-Length"]
+        return Response(
+            stream_with_context(generate()),
+            headers=headers,
+            content_type=upstream.headers.get("Content-Type", mimetypes.guess_type(art_url)[0] or "image/jpeg"),
+        )
 
     @app.get("/resources/<resource_id>")
     def resource(resource_id: str):
@@ -2576,6 +3042,16 @@ def create_connector_app(security: Optional[ConnectorSecurity] = None):
             "default": TRANSCODE_AUDIO_PROFILE_STEREO,
             "available": sorted(TRANSCODE_AUDIO_PROFILES),
         }
+        media_info["transcodeVideoProfiles"] = {
+            "default": TRANSCODE_VIDEO_PROFILE_2D,
+            "available": sorted(TRANSCODE_VIDEO_PROFILES),
+            "generatedLayouts": {
+                TRANSCODE_VIDEO_PROFILE_STEREO_SBS: "half-sbs",
+                TRANSCODE_VIDEO_PROFILE_STEREO_FULL_SBS: "full-sbs",
+            },
+            "defaultProcessor": normalize_stereo_processor(HLS_STEREO3D_PROCESSOR),
+            "processors": stereo_processor_options(),
+        }
         return jsonify(media_info)
 
     @app.get("/resources/<resource_id>/transcode-status")
@@ -2628,9 +3104,11 @@ def create_connector_app(security: Optional[ConnectorSecurity] = None):
             return jsonify({"error": "Unknown resource. Browse the file again."}), 404
         try:
             audio_profile = request_transcode_audio_profile()
+            video_profile = request_transcode_video_profile()
+            stereo_processor = request_stereo_processor()
             media_info = cached_probe_media(url)
             info = hls_duration_info(media_info)
-            prefetch_hls_segments(resource_id, url, media_info, 0, audio_profile)
+            prefetch_hls_segments(resource_id, url, media_info, 0, audio_profile, video_profile, stereo_processor)
         except subprocess.TimeoutExpired:
             return jsonify({"error": "Timed out while probing media tracks."}), 504
         except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
@@ -2643,6 +3121,9 @@ def create_connector_app(security: Optional[ConnectorSecurity] = None):
                 "type": "application/vnd.apple.mpegurl",
                 "playlistPath": f"/resources/{resource_id}/hls/playlist.m3u8",
                 "audioProfile": audio_profile,
+                "videoProfile": video_profile,
+                "videoLayout": transcode_video_layout(video_profile),
+                "stereoProcessor": normalize_stereo_processor(stereo_processor) if is_stereo_video_profile(video_profile) else "",
                 "mediaInfo": media_info,
                 **info,
             }
@@ -2658,9 +3139,11 @@ def create_connector_app(security: Optional[ConnectorSecurity] = None):
             return jsonify({"error": "Unknown resource. Browse the file again."}), 404
         try:
             audio_profile = request_transcode_audio_profile()
+            video_profile = request_transcode_video_profile()
+            stereo_processor = request_stereo_processor()
             media_info = cached_probe_media(url)
-            playlist = hls_playlist(resource_id, media_info, request.args.get("access_token", ""), audio_profile)
-            prefetch_hls_segments(resource_id, url, media_info, 0, audio_profile)
+            playlist = hls_playlist(resource_id, media_info, request.args.get("access_token", ""), audio_profile, video_profile, stereo_processor)
+            prefetch_hls_segments(resource_id, url, media_info, 0, audio_profile, video_profile, stereo_processor)
         except subprocess.TimeoutExpired:
             return jsonify({"error": "Timed out while probing media tracks."}), 504
         except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
@@ -2683,8 +3166,10 @@ def create_connector_app(security: Optional[ConnectorSecurity] = None):
             return jsonify({"error": "Unknown resource. Browse the file again."}), 404
         try:
             audio_profile = request_transcode_audio_profile()
+            video_profile = request_transcode_video_profile()
+            stereo_processor = request_stereo_processor()
             media_info = cached_probe_media(url)
-            artifact = ensure_hls_segment(resource_id, url, media_info, segment_index, audio_profile)
+            artifact = ensure_hls_segment(resource_id, url, media_info, segment_index, audio_profile, video_profile, stereo_processor)
         except IndexError as exc:
             return jsonify({"error": str(exc)}), 416
         except subprocess.TimeoutExpired:

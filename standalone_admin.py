@@ -1,5 +1,6 @@
 import datetime as dt
 import json
+import socket
 import shutil
 import subprocess
 import sys
@@ -15,6 +16,30 @@ from standalone_config import normalize_config, public_config, public_connector_
 
 
 ADMIN_HEADER = "X-File-Pipe-Admin"
+CACHE_CATEGORY_LABELS = {
+    "stable-mp4": "Stable MP4",
+    "stable-mp4-spatial": "Spatial MP4",
+    "hls-2d": "HLS 2D",
+    "hls-3d-half": "HLS 3D Half SBS",
+    "hls-3d-full": "HLS 3D Full SBS",
+    "in-progress": "In progress",
+    "other": "Other transcodes",
+}
+CACHE_CATEGORY_ORDER = {
+    "hls-3d-full": 0,
+    "hls-3d-half": 1,
+    "hls-2d": 2,
+    "stable-mp4-spatial": 3,
+    "stable-mp4": 4,
+    "in-progress": 5,
+    "other": 6,
+}
+TRANSCODE_PROFILE_SUFFIX_PARTS = [
+    local_connector.TRANSCODE_AUDIO_PROFILE_SPATIAL,
+    local_connector.TRANSCODE_VIDEO_PROFILE_STEREO_FULL_SBS,
+    local_connector.TRANSCODE_VIDEO_PROFILE_STEREO_SBS,
+    *sorted(local_connector.TRANSCODE_STEREO_PROCESSORS, key=len, reverse=True),
+]
 
 
 def is_loopback_address(value: str) -> bool:
@@ -26,6 +51,54 @@ def is_loopback_address(value: str) -> bool:
         return True
     mapped = getattr(address, "ipv4_mapped", None)
     return bool(mapped and mapped.is_loopback)
+
+
+def is_local_admin_address(value: str, bound_host: str = "") -> bool:
+    if is_loopback_address(value):
+        return True
+    if not value:
+        return False
+    local_addresses = set(system_lan_ips())
+    if is_bindable_lan_address(bound_host):
+        local_addresses.add(bound_host)
+    return value in local_addresses
+
+
+def system_lan_ip() -> str:
+    addresses = system_lan_ips()
+    return addresses[0] if addresses else ""
+
+
+def system_lan_ips() -> List[str]:
+    addresses: List[str] = []
+
+    def add(value: str) -> None:
+        if is_bindable_lan_address(value) and value not in addresses:
+            addresses.append(value)
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("8.8.8.8", 80))
+            add(sock.getsockname()[0])
+    except OSError:
+        pass
+
+    try:
+        candidates = socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET, socket.SOCK_STREAM)
+    except OSError:
+        return addresses
+
+    for candidate in candidates:
+        add(candidate[4][0])
+    return addresses
+
+
+def is_bindable_lan_address(value: str) -> bool:
+    try:
+        address = ip_address(value)
+    except ValueError:
+        return False
+    return not (address.is_loopback or address.is_link_local or address.is_multicast or address.is_unspecified)
 
 
 def format_timestamp(timestamp: float) -> str:
@@ -49,15 +122,125 @@ def path_size(path: Path) -> int:
     return total
 
 
-def cache_entry_kind(path: Path) -> str:
+def is_hls_cache_dir(path: Path) -> bool:
     name = path.name
+    return path.is_dir() and (
+        name.endswith("-hls")
+        or name.startswith(local_connector.HLS_SEGMENT_CACHE_VERSION)
+    )
+
+
+def processor_label(processor_id: str) -> str:
+    for option in local_connector.stereo_processor_options():
+        if option.get("id") == processor_id:
+            return str(option.get("label") or processor_id)
+    return processor_id
+
+
+def cache_entry_details(path: Path) -> Dict[str, object]:
+    name = path.name
+    lower_name = name.lower()
     if path.is_dir():
-        return "HLS segments"
-    if ".part" in name:
-        return "In progress"
-    if name.endswith(".mp4"):
-        return "Stable MP4"
-    return "Transcode"
+        segment_count = 0
+        try:
+            segment_count = sum(1 for child in path.iterdir() if child.is_file() and child.suffix == ".ts")
+        except OSError:
+            segment_count = 0
+        layout = "2d"
+        category = "hls-2d"
+        profile_label = "HLS 2D"
+        if local_connector.TRANSCODE_VIDEO_PROFILE_STEREO_FULL_SBS in lower_name:
+            layout = "full-sbs"
+            category = "hls-3d-full"
+            profile_label = "Full SBS"
+        elif local_connector.TRANSCODE_VIDEO_PROFILE_STEREO_SBS in lower_name:
+            layout = "half-sbs"
+            category = "hls-3d-half"
+            profile_label = "Half SBS"
+        processor = ""
+        if layout != "2d":
+            processor = local_connector.TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT
+            for option in sorted(
+                local_connector.stereo_processor_options(),
+                key=lambda item: len(str(item.get("id") or "")),
+                reverse=True,
+            ):
+                candidate = str(option.get("id") or "")
+                if candidate and candidate in lower_name:
+                    processor = candidate
+                    break
+        return {
+            "kind": "HLS segments",
+            "category": category,
+            "categoryLabel": CACHE_CATEGORY_LABELS[category],
+            "profileLabel": profile_label,
+            "layout": layout,
+            "processor": processor,
+            "processorLabel": processor_label(processor) if processor else "",
+            "segmentCount": segment_count,
+        }
+    if ".part" in lower_name:
+        return {
+            "kind": "In progress",
+            "category": "in-progress",
+            "categoryLabel": CACHE_CATEGORY_LABELS["in-progress"],
+            "profileLabel": "Partial transcode",
+            "layout": "",
+            "processor": "",
+            "processorLabel": "",
+            "segmentCount": 0,
+        }
+    if lower_name.endswith(".mp4"):
+        category = "stable-mp4-spatial" if "-spatial-" in lower_name or lower_name.endswith("-spatial.mp4") else "stable-mp4"
+        return {
+            "kind": "Stable MP4",
+            "category": category,
+            "categoryLabel": CACHE_CATEGORY_LABELS[category],
+            "profileLabel": CACHE_CATEGORY_LABELS[category],
+            "layout": "2d",
+            "processor": "",
+            "processorLabel": "",
+            "segmentCount": 0,
+        }
+    return {
+        "kind": "Transcode",
+        "category": "other",
+        "categoryLabel": CACHE_CATEGORY_LABELS["other"],
+        "profileLabel": "Transcode",
+        "layout": "",
+        "processor": "",
+        "processorLabel": "",
+        "segmentCount": 0,
+    }
+
+
+def cache_entry_video_key(path: Path) -> Dict[str, str]:
+    name = path.name
+    base = name
+    for suffix in (".mp4.part", ".part", ".mp4"):
+        if base.endswith(suffix):
+            base = base[: -len(suffix)]
+            break
+    if base.endswith("-hls"):
+        base = base[:-4]
+    if base.startswith("md5-"):
+        parts = base.split("-")
+        fingerprint = ""
+        if len(parts) >= 2 and parts[-1] not in {local_connector.HLS_SEGMENT_CACHE_VERSION, f"{local_connector.HLS_SEGMENT_SECONDS}s"}:
+            fingerprint = parts[-1]
+        label = f"MD5 {fingerprint[:12]}" if fingerprint else "MD5 source"
+        return {"videoKey": f"md5:{fingerprint or base}", "videoLabel": label}
+    normalized = base
+    changed = True
+    while changed:
+        changed = False
+        for part in TRANSCODE_PROFILE_SUFFIX_PARTS:
+            suffix = f"-{part}"
+            if normalized.endswith(suffix):
+                normalized = normalized[: -len(suffix)]
+                changed = True
+                break
+    return {"videoKey": normalized or base, "videoLabel": normalized or base}
 
 
 def transcode_files() -> List[Dict[str, object]]:
@@ -70,30 +253,47 @@ def transcode_files() -> List[Dict[str, object]]:
             continue
         if path.is_file() and path.suffix not in {".mp4", ".part"}:
             continue
-        if path.is_dir() and not path.name.startswith(local_connector.HLS_SEGMENT_CACHE_VERSION):
+        if path.is_dir() and not is_hls_cache_dir(path):
             continue
         try:
             stat = path.stat()
         except OSError:
             continue
         size = path_size(path)
-        entries.append(
-            {
-                "name": path.name,
-                "path": str(path),
-                "kind": cache_entry_kind(path),
-                "size": size,
-                "modifiedAt": format_timestamp(stat.st_mtime),
-            }
-        )
+        entry = {
+            "name": path.name,
+            "path": str(path),
+            "size": size,
+            "modifiedAt": format_timestamp(stat.st_mtime),
+        }
+        entry.update(cache_entry_details(path))
+        entry.update(cache_entry_video_key(path))
+        entries.append(entry)
     return entries
 
 
 def cache_payload() -> Dict[str, object]:
     entries = transcode_files()
+    groups: Dict[str, Dict[str, object]] = {}
+    for entry in entries:
+        category = str(entry.get("category") or "other")
+        group = groups.setdefault(
+            category,
+            {
+                "category": category,
+                "label": str(entry.get("categoryLabel") or CACHE_CATEGORY_LABELS.get(category, category)),
+                "count": 0,
+                "size": 0,
+                "segmentCount": 0,
+            },
+        )
+        group["count"] = int(group["count"]) + 1
+        group["size"] = int(group["size"]) + int(entry.get("size") or 0)
+        group["segmentCount"] = int(group["segmentCount"]) + int(entry.get("segmentCount") or 0)
     return {
         "cacheDir": str(cache_dir()),
         "files": entries,
+        "groups": sorted(groups.values(), key=lambda item: CACHE_CATEGORY_ORDER.get(str(item["category"]), 99)),
         "count": len(entries),
         "size": sum(int(entry["size"]) for entry in entries),
     }
@@ -105,7 +305,7 @@ def safe_cache_path(name: str) -> Path:
     if path.parent != directory:
         raise ValueError("Invalid cache file.")
     if path.is_dir():
-        if not path.name.startswith(local_connector.HLS_SEGMENT_CACHE_VERSION):
+        if not is_hls_cache_dir(path):
             raise ValueError("Invalid cache entry.")
         return path
     if path.suffix not in {".mp4", ".part"}:
@@ -190,7 +390,7 @@ def create_admin_blueprint(security, runtime):
 
     @blueprint.before_request
     def protect_admin():
-        if not is_loopback_address(request.remote_addr or ""):
+        if not is_local_admin_address(request.remote_addr or "", str(runtime.config.get("host") or "")):
             return jsonify({"error": "Admin UI is only available from this computer."}), 403
         if request.path.startswith("/admin/api") and request.headers.get(ADMIN_HEADER) != runtime.admin_token:
             return jsonify({"error": "Admin token is missing or invalid."}), 403
@@ -204,6 +404,7 @@ def create_admin_blueprint(security, runtime):
     @blueprint.get("/admin/api/status")
     def admin_status():
         ffprobe_available, ffmpeg_available = local_connector.ffmpeg_tools_available()
+        lan_ip = system_lan_ip()
         sessions = {
             token: expires_at
             for token, expires_at in list(local_connector.SESSION_TOKENS.items())
@@ -216,6 +417,8 @@ def create_admin_blueprint(security, runtime):
                 "ok": True,
                 "startedAt": runtime.started_at,
                 "connectorUrl": runtime.connector_url,
+                "lanIp": lan_ip,
+                "lanConnectorUrl": f"{runtime.scheme}://{lan_ip}:{runtime.actual_port}" if lan_ip else "",
                 "healthUrl": f"{runtime.connector_url}/health",
                 "configPath": str(runtime.config_path),
                 "restartRequired": runtime.restart_required,
@@ -225,6 +428,16 @@ def create_admin_blueprint(security, runtime):
                 "activeSessions": len(sessions),
                 "ffprobeAvailable": ffprobe_available,
                 "ffmpegAvailable": ffmpeg_available,
+                "stereo3d": {
+                    "available": sorted(local_connector.TRANSCODE_VIDEO_PROFILES),
+                    "generatedLayouts": {
+                        local_connector.TRANSCODE_VIDEO_PROFILE_STEREO_SBS: "half-sbs",
+                        local_connector.TRANSCODE_VIDEO_PROFILE_STEREO_FULL_SBS: "full-sbs",
+                    },
+                    "defaultProcessor": local_connector.normalize_stereo_processor(local_connector.HLS_STEREO3D_PROCESSOR),
+                    "processors": local_connector.stereo_processor_options(),
+                    "depthPercent": local_connector.hls_stereo3d_depth_fraction() * 100,
+                },
                 "cache": cache_payload(),
                 "connections": {
                     "servers": [local_connector.serialize_server(server) for server in local_connector.SERVER_CACHE.values()],
@@ -244,6 +457,7 @@ def create_admin_blueprint(security, runtime):
     @blueprint.delete("/admin/api/cache")
     def admin_clear_cache():
         deleted = 0
+        bytes_deleted = 0
         for entry in transcode_files():
             try:
                 path = safe_cache_path(str(entry["name"]))
@@ -634,6 +848,12 @@ ADMIN_HTML = r"""<!doctype html>
         grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
       }
 
+      .status-grid {
+        display: grid;
+        gap: 1rem;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+
       .columns {
         display: grid;
         gap: 1rem;
@@ -677,6 +897,216 @@ ADMIN_HTML = r"""<!doctype html>
         color: var(--muted);
         font-size: 0.86rem;
         margin-top: 0.25rem;
+      }
+
+      .tabs {
+        background: var(--panel-soft);
+        border: 1px solid var(--soft);
+        border-radius: 8px;
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        margin-bottom: 1rem;
+        padding: 0.25rem;
+      }
+
+      .tab-button {
+        background: transparent;
+        border: 0;
+        border-radius: 6px;
+        color: var(--muted);
+        min-height: 2.35rem;
+      }
+
+      .tab-button:hover {
+        background: #ffffff;
+        border: 0;
+        box-shadow: none;
+      }
+
+      .tab-button.active {
+        background: #ffffff;
+        box-shadow: 0 5px 16px rgba(15, 23, 42, 0.08);
+        color: var(--text-strong);
+      }
+
+      .tab-panel[hidden] {
+        display: none;
+      }
+
+      .collapsible {
+        border: 1px solid var(--soft);
+        border-radius: 8px;
+        background: #ffffff;
+        overflow: hidden;
+      }
+
+      .collapsible + .collapsible {
+        margin-top: 0.75rem;
+      }
+
+      .collapsible summary {
+        align-items: center;
+        cursor: pointer;
+        display: flex;
+        gap: 0.65rem;
+        justify-content: space-between;
+        list-style: none;
+        padding: 0.85rem 0.95rem;
+      }
+
+      .collapsible summary::-webkit-details-marker {
+        display: none;
+      }
+
+      .collapsible summary::after {
+        border-bottom: 2px solid #667085;
+        border-right: 2px solid #667085;
+        content: "";
+        height: 0.45rem;
+        transform: rotate(45deg);
+        transition: transform 0.16s ease;
+        width: 0.45rem;
+      }
+
+      .collapsible[open] summary::after {
+        transform: rotate(225deg);
+      }
+
+      .summary-title {
+        color: var(--text-strong);
+        display: block;
+        font-size: 0.92rem;
+        font-weight: 900;
+      }
+
+      .summary-copy {
+        color: var(--muted);
+        display: block;
+        font-size: 0.8rem;
+        font-weight: 600;
+        margin-top: 0.16rem;
+      }
+
+      .collapsible-body {
+        border-top: 1px solid var(--soft);
+        padding: 0.95rem;
+      }
+
+      .cache-groups {
+        display: grid;
+        gap: 0.75rem;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        margin: 0.85rem 0;
+      }
+
+      .cache-filter {
+        align-items: flex-start;
+        background: #ffffff;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        color: var(--text);
+        cursor: pointer;
+        display: grid;
+        gap: 0.22rem;
+        min-height: 6rem;
+        padding: 0.75rem;
+        text-align: left;
+      }
+
+      .cache-filter:hover {
+        border-color: #9fb2cc;
+        box-shadow: 0 8px 18px rgba(15, 23, 42, 0.07);
+      }
+
+      .cache-filter.active {
+        border-color: var(--primary);
+        box-shadow: 0 0 0 0.18rem rgba(37, 99, 235, 0.13);
+      }
+
+      .cache-filter strong {
+        color: var(--text-strong);
+        display: block;
+        font-size: 1.1rem;
+      }
+
+      .cache-entry-list {
+        display: grid;
+        gap: 0.75rem;
+      }
+
+      .cache-video {
+        border: 1px solid var(--soft);
+        border-radius: 8px;
+        overflow: hidden;
+      }
+
+      .cache-video summary {
+        align-items: center;
+        background: #ffffff;
+        cursor: pointer;
+        display: grid;
+        gap: 0.75rem;
+        grid-template-columns: minmax(0, 1fr) auto auto;
+        list-style: none;
+        padding: 0.8rem 0.9rem;
+      }
+
+      .cache-video summary::-webkit-details-marker {
+        display: none;
+      }
+
+      .cache-video-title {
+        color: var(--text-strong);
+        display: block;
+        font-weight: 900;
+        overflow-wrap: anywhere;
+      }
+
+      .cache-video-body {
+        border-top: 1px solid var(--soft);
+        padding: 0.75rem;
+      }
+
+      .badge {
+        background: #eef2f6;
+        border: 1px solid #dce4ee;
+        border-radius: 999px;
+        color: #344054;
+        display: inline-flex;
+        font-size: 0.72rem;
+        font-weight: 900;
+        line-height: 1;
+        padding: 0.28rem 0.45rem;
+        text-transform: uppercase;
+      }
+
+      .profile-line {
+        color: var(--muted);
+        display: block;
+        font-size: 0.78rem;
+        margin-top: 0.2rem;
+      }
+
+      .info-list {
+        display: grid;
+        gap: 0.7rem;
+      }
+
+      .info-row {
+        border-bottom: 1px solid var(--soft);
+        display: grid;
+        gap: 0.55rem;
+        grid-template-columns: minmax(8rem, 0.85fr) minmax(0, 1.7fr) minmax(0, 1fr);
+        padding-bottom: 0.7rem;
+      }
+
+      .info-row:last-child {
+        border-bottom: 0;
+        padding-bottom: 0;
+      }
+
+      .info-row strong {
+        color: var(--text-strong);
       }
 
       .stat {
@@ -731,6 +1161,14 @@ ADMIN_HTML = r"""<!doctype html>
         display: grid;
         gap: 0.55rem;
         grid-template-columns: minmax(0, 1fr) auto;
+      }
+
+      .field-hint {
+        color: var(--muted);
+        display: block;
+        font-size: 0.78rem;
+        line-height: 1.35;
+        margin-top: 0.35rem;
       }
 
       .check-row {
@@ -855,7 +1293,7 @@ ADMIN_HTML = r"""<!doctype html>
       }
 
       @media (max-width: 920px) {
-        .grid, .columns, .settings-layout, .form-grid, .toggle-grid, .hero {
+        .grid, .status-grid, .columns, .settings-layout, .form-grid, .toggle-grid, .hero, .info-row, .cache-groups, .cache-video summary {
           grid-template-columns: 1fr;
         }
 
@@ -918,7 +1356,7 @@ ADMIN_HTML = r"""<!doctype html>
         </div>
       </section>
 
-      <section class="grid" aria-label="Connector status">
+      <section class="status-grid" aria-label="Connector status">
         <div class="stat">
           <span class="muted">Connector</span>
           <strong id="service-state">On</strong>
@@ -934,15 +1372,15 @@ ADMIN_HTML = r"""<!doctype html>
           <strong id="server-count">0</strong>
           <span id="resource-count" class="muted">0 resources</span>
         </div>
-        <div class="stat">
-          <span class="muted">Auth</span>
-          <strong id="auth-state">Off</strong>
-          <span id="session-count" class="muted">0 sessions</span>
-        </div>
         <div class="stat stat-warning">
           <span class="muted">Transcoding</span>
           <strong id="ffmpeg-state">Unknown</strong>
           <span id="ffprobe-state" class="muted">Checking tools</span>
+        </div>
+        <div class="stat">
+          <span class="muted">3D video</span>
+          <strong id="stereo-state">SBS ready</strong>
+          <span id="stereo-processor-state" class="muted">Processor pending</span>
         </div>
         <div class="stat">
           <span class="muted">Read-ahead</span>
@@ -951,92 +1389,119 @@ ADMIN_HTML = r"""<!doctype html>
         </div>
       </section>
 
-      <section class="columns">
-        <div class="panel">
+      <section class="panel">
+        <div class="tabs" role="tablist" aria-label="Connector administration">
+          <button class="tab-button active" id="settings-tab" type="button" role="tab" aria-selected="true" aria-controls="settings-tab-panel" data-admin-tab="settings">Connector Settings</button>
+          <button class="tab-button" id="connections-tab" type="button" role="tab" aria-selected="false" aria-controls="connections-tab-panel" data-admin-tab="connections">Connections</button>
+        </div>
+
+        <div class="tab-panel" id="settings-tab-panel" role="tabpanel" aria-labelledby="settings-tab">
           <div class="panel-head">
             <div>
               <h2>Connector Settings</h2>
               <p class="panel-subtitle">Identity, room behavior, network, cache, and access controls.</p>
             </div>
           </div>
-          <div class="settings-layout">
-            <div class="form-stack">
-              <div>
-                <div class="section-title">Room identity</div>
-                <div class="form-stack">
-                  <label>Host name
-                    <input id="host-name" maxlength="80" autocomplete="name" placeholder="Shown to room participants">
-                  </label>
-                  <label class="check-row">
-                    <input id="pinned-watch-room" type="checkbox">
-                    Pin watch rooms
-                  </label>
-                </div>
-              </div>
+          <details class="collapsible" open>
+            <summary>
+              <span>
+                <span class="summary-title">Room identity</span>
+                <span class="summary-copy">How this connector appears to participants and watch rooms.</span>
+              </span>
+            </summary>
+            <div class="collapsible-body form-stack">
+              <label>Host name
+                <input id="host-name" maxlength="80" autocomplete="name" placeholder="Shown to room participants">
+              </label>
+              <label class="check-row">
+                <input id="pinned-watch-room" type="checkbox">
+                Pin watch rooms
+              </label>
+            </div>
+          </details>
 
-              <div>
-                <div class="section-title">Cache</div>
-                <label>Cache folder
+          <details class="collapsible" open>
+            <summary>
+              <span>
+                <span class="summary-title">Network and launch</span>
+                <span class="summary-copy">Host, port, HTTPS, service state, and startup behavior.</span>
+              </span>
+            </summary>
+            <div class="collapsible-body form-stack">
+              <div class="form-grid">
+                <label>Host
                   <div class="path-picker">
-                    <input id="cache-dir" autocomplete="off">
-                    <button class="secondary" id="choose-cache-dir" type="button">Choose</button>
+                    <input id="host" autocomplete="off">
+                    <button class="secondary" id="use-lan-host" type="button">Use LAN IP</button>
                   </div>
+                  <span class="field-hint" id="lan-host-hint">Detecting LAN IP...</span>
+                </label>
+                <label>Port
+                  <input id="port" type="number" min="1" max="65535">
+                </label>
+              </div>
+              <div class="toggle-grid">
+                <label class="check-row">
+                  <input id="use-tls" type="checkbox">
+                  HTTPS connector
+                </label>
+                <label class="check-row">
+                  <input id="service-enabled" type="checkbox">
+                  Connector on
+                </label>
+                <label class="check-row">
+                  <input id="open-browser" type="checkbox">
+                  Open UI on launch
+                </label>
+                <label class="check-row">
+                  <input id="allow-insecure-password" type="checkbox">
+                  Allow password over HTTP
                 </label>
               </div>
             </div>
+          </details>
 
-            <div class="form-stack">
-              <div>
-                <div class="section-title">Network</div>
-                <div class="form-grid">
-                  <label>Host
-                    <input id="host" autocomplete="off">
-                  </label>
-                  <label>Port
-                    <input id="port" type="number" min="1" max="65535">
-                  </label>
+          <details class="collapsible" open>
+            <summary>
+              <span>
+                <span class="summary-title">Cache location</span>
+                <span class="summary-copy">Where stable MP4 and HLS segment caches are stored.</span>
+              </span>
+            </summary>
+            <div class="collapsible-body">
+              <label>Cache folder
+                <div class="path-picker">
+                  <input id="cache-dir" autocomplete="off">
+                  <button class="secondary" id="choose-cache-dir" type="button">Choose</button>
                 </div>
-                <div class="toggle-grid" style="margin-top: 0.85rem;">
-                  <label class="check-row">
-                    <input id="use-tls" type="checkbox">
-                    HTTPS connector
-                  </label>
-                  <label class="check-row">
-                    <input id="service-enabled" type="checkbox">
-                    Connector on
-                  </label>
-                  <label class="check-row">
-                    <input id="open-browser" type="checkbox">
-                    Open UI on launch
-                  </label>
-                  <label class="check-row">
-                    <input id="allow-insecure-password" type="checkbox">
-                    Allow password over HTTP
-                  </label>
-                </div>
-              </div>
-
-              <div>
-                <div class="section-title">Access</div>
-                <div class="form-grid">
-                  <label>New password
-                    <input id="password" type="password" autocomplete="new-password">
-                  </label>
-                  <label class="check-row">
-                    <input id="clear-password" type="checkbox">
-                    Remove password
-                  </label>
-                </div>
-              </div>
+              </label>
             </div>
-          </div>
+          </details>
+
+          <details class="collapsible">
+            <summary>
+              <span>
+                <span class="summary-title">Access</span>
+                <span class="summary-copy">Optional local password protection for browser access.</span>
+              </span>
+            </summary>
+            <div class="collapsible-body form-grid">
+              <label>New password
+                <input id="password" type="password" autocomplete="new-password">
+              </label>
+              <label class="check-row">
+                <input id="clear-password" type="checkbox">
+                Remove password
+              </label>
+            </div>
+          </details>
           <div class="actions">
             <button id="save-config" type="button">Save settings</button>
           </div>
           <p class="path" id="config-path"></p>
         </div>
 
-        <div class="panel">
+        <div class="tab-panel" id="connections-tab-panel" role="tabpanel" aria-labelledby="connections-tab" hidden>
           <div class="panel-head">
             <div>
               <h2>Connections</h2>
@@ -1067,31 +1532,69 @@ ADMIN_HTML = r"""<!doctype html>
       <section class="panel">
         <div class="panel-head">
           <div>
+            <h2>3D Video</h2>
+            <p class="panel-subtitle">Optional on-the-fly 2D to 3D HLS generation for participants that request SBS playback.</p>
+          </div>
+        </div>
+        <div class="grid">
+          <div class="stat">
+            <span class="muted">Layouts</span>
+            <strong>Half + Full SBS</strong>
+            <span class="muted">Per-participant 3D HLS caches</span>
+          </div>
+          <div class="stat">
+            <span class="muted">Default processor</span>
+            <strong id="stereo-default-processor">Pending</strong>
+            <span id="stereo-depth" class="muted">Depth pending</span>
+          </div>
+          <div class="stat">
+            <span class="muted">Experimental</span>
+            <strong>WebGPU</strong>
+            <span class="muted">Browser-side where supported</span>
+          </div>
+        </div>
+        <details class="collapsible" open style="margin-top:0.85rem;">
+          <summary>
+            <span>
+              <span class="summary-title">Processor options</span>
+              <span class="summary-copy">Quality and latency tradeoffs for M3-class Macs and local/browser processing.</span>
+            </span>
+          </summary>
+          <div class="collapsible-body">
+            <div class="info-list" id="stereo-processor-list">
+              <div class="muted">Loading processor options...</div>
+            </div>
+          </div>
+        </details>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <div>
             <h2>Transcode Cache</h2>
-            <p class="panel-subtitle">Browser-safe media files generated by ffmpeg for playback and sharing.</p>
+            <p class="panel-subtitle">Browser-safe media files, HLS segments, and 3D variants generated for playback and sharing.</p>
           </div>
           <div class="actions" style="margin-top:0;">
+            <button class="secondary" id="show-all-cache" type="button">Show all</button>
             <button class="secondary" id="refresh-cache" type="button">Refresh cache</button>
             <button class="danger" id="clear-cache" type="button">Clear all</button>
           </div>
         </div>
         <p class="path" id="cache-path"></p>
-        <div class="scroll-table">
-          <table>
-            <thead>
-              <tr>
-                <th>File</th>
-                <th>Type</th>
-                <th>Size</th>
-                <th>Modified</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody id="cache-rows">
-              <tr><td colspan="5" class="empty-row">No cached transcodes.</td></tr>
-            </tbody>
-          </table>
-        </div>
+        <div class="cache-groups" id="cache-groups"></div>
+        <details class="collapsible" open>
+          <summary>
+            <span>
+              <span class="summary-title">Cached entries</span>
+              <span class="summary-copy" id="cache-filter-label">Showing all generated files and segment folders.</span>
+            </span>
+          </summary>
+          <div class="collapsible-body">
+            <div class="cache-entry-list" id="cache-entries">
+              <div class="empty-row">No cached transcodes.</div>
+            </div>
+          </div>
+        </details>
       </section>
 
       <section class="panel">
@@ -1109,6 +1612,9 @@ ADMIN_HTML = r"""<!doctype html>
       const ADMIN_TOKEN = __ADMIN_TOKEN_JSON__;
       const headers = { "X-File-Pipe-Admin": ADMIN_TOKEN };
       const logEl = () => document.getElementById("log");
+      let detectedLanIp = "";
+      let cacheFilter = "all";
+      let activeAdminTab = "settings";
 
       function log(message) {
         const time = new Date().toLocaleTimeString();
@@ -1149,6 +1655,26 @@ ADMIN_HTML = r"""<!doctype html>
         document.getElementById(id).checked = Boolean(value);
       }
 
+      function useLanHost() {
+        if (!detectedLanIp) {
+          log("No LAN IP was detected.");
+          return;
+        }
+        document.getElementById("host").value = detectedLanIp;
+        log(`Host set to ${detectedLanIp}. Save settings and restart the connector.`);
+      }
+
+      function setAdminTab(tab) {
+        activeAdminTab = tab === "connections" ? "connections" : "settings";
+        for (const button of document.querySelectorAll("[data-admin-tab]")) {
+          const selected = button.dataset.adminTab === activeAdminTab;
+          button.classList.toggle("active", selected);
+          button.setAttribute("aria-selected", selected ? "true" : "false");
+        }
+        document.getElementById("settings-tab-panel").hidden = activeAdminTab !== "settings";
+        document.getElementById("connections-tab-panel").hidden = activeAdminTab !== "connections";
+      }
+
       function renderConfig(config, configPath) {
         setValue("host", config.host);
         setValue("port", config.port);
@@ -1177,29 +1703,142 @@ ADMIN_HTML = r"""<!doctype html>
         `).join("");
       }
 
+      function cacheGroupMeta(cache) {
+        const groups = new Map((cache.groups || []).map((group) => [group.category, group]));
+        return [
+          { category: "hls-3d-full", label: "Full SBS", ...(groups.get("hls-3d-full") || {}) },
+          { category: "hls-3d-half", label: "Half SBS", ...(groups.get("hls-3d-half") || {}) },
+          { category: "hls-2d", label: "HLS 2D", ...(groups.get("hls-2d") || {}) },
+          { category: "stable-mp4", label: "Stable MP4", ...(groups.get("stable-mp4") || {}) },
+          { category: "stable-mp4-spatial", label: "Spatial MP4", ...(groups.get("stable-mp4-spatial") || {}) },
+          { category: "in-progress", label: "In progress", ...(groups.get("in-progress") || {}) },
+        ].map((group) => ({
+          category: group.category,
+          label: group.label,
+          count: Number(group.count || 0),
+          size: Number(group.size || 0),
+          segmentCount: Number(group.segmentCount || 0),
+        }));
+      }
+
+      function renderCacheGroups(cache) {
+        const container = document.getElementById("cache-groups");
+        container.innerHTML = cacheGroupMeta(cache).map((group) => `
+          <button class="cache-filter ${cacheFilter === group.category ? "active" : ""}" type="button" data-cache-filter="${escapeHtml(group.category)}">
+            <span class="badge">${escapeHtml(group.label)}</span>
+            <strong>${group.count}</strong>
+            <span class="muted">${formatBytes(group.size)}</span>
+            <span class="muted">${group.segmentCount ? `${group.segmentCount} segments` : "No segments"}</span>
+          </button>
+        `).join("");
+      }
+
       function renderCache(cache) {
         document.getElementById("cache-count").textContent = cache.count || 0;
         document.getElementById("cache-size").textContent = formatBytes(cache.size || 0);
         document.getElementById("cache-path").textContent = `Cache: ${cache.cacheDir}`;
-        const body = document.getElementById("cache-rows");
-        if (!cache.files.length) {
-          body.innerHTML = '<tr><td colspan="5" class="empty-row">No cached transcodes.</td></tr>';
+        renderCacheGroups(cache);
+        document.getElementById("cache-filter-label").textContent = cacheFilter === "all"
+          ? "Showing all generated files and segment folders."
+          : `Showing ${cacheGroupMeta(cache).find((group) => group.category === cacheFilter)?.label || cacheFilter}.`;
+        const body = document.getElementById("cache-entries");
+        const files = cacheFilter === "all"
+          ? (cache.files || [])
+          : (cache.files || []).filter((file) => file.category === cacheFilter);
+        if (!files.length) {
+          body.innerHTML = '<div class="empty-row">No cached transcodes in this group.</div>';
           return;
         }
-        body.innerHTML = cache.files.map((file) => `
-          <tr>
-            <td><span class="cache-file">${escapeHtml(file.name)}</span></td>
-            <td>${escapeHtml(file.kind || "Transcode")}</td>
-            <td>${formatBytes(file.size)}</td>
-            <td>${escapeHtml(file.modifiedAt)}</td>
-            <td><button class="danger" type="button" data-delete-cache="${encodeURIComponent(file.name)}">Delete</button></td>
-          </tr>
+        const videos = new Map();
+        for (const file of files) {
+          const key = file.videoKey || file.name;
+          if (!videos.has(key)) {
+            videos.set(key, { label: file.videoLabel || key, files: [], size: 0, segmentCount: 0 });
+          }
+          const video = videos.get(key);
+          video.files.push(file);
+          video.size += Number(file.size || 0);
+          video.segmentCount += Number(file.segmentCount || 0);
+        }
+        body.innerHTML = [...videos.values()].map((video) => `
+          <details class="cache-video" open>
+            <summary>
+              <span>
+                <span class="cache-video-title">${escapeHtml(video.label)}</span>
+                <span class="profile-line">${video.files.length} cached ${video.files.length === 1 ? "entry" : "entries"}</span>
+              </span>
+              <span class="muted">${formatBytes(video.size)}</span>
+              <span class="muted">${video.segmentCount ? `${video.segmentCount} segments` : ""}</span>
+            </summary>
+            <div class="cache-video-body scroll-table">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Group</th>
+                    <th>Segments</th>
+                    <th>Size</th>
+                    <th>Modified</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${video.files.map((file) => `
+                    <tr>
+                      <td>
+                        <span class="cache-file">${escapeHtml(file.name)}</span>
+                        <span class="profile-line">${escapeHtml([file.profileLabel, file.processorLabel].filter(Boolean).join(" · "))}</span>
+                      </td>
+                      <td>${escapeHtml(file.categoryLabel || file.kind || "Transcode")}</td>
+                      <td>${file.segmentCount ? escapeHtml(String(file.segmentCount)) : ""}</td>
+                      <td>${formatBytes(file.size)}</td>
+                      <td>${escapeHtml(new Date(file.modifiedAt).toLocaleString())}</td>
+                      <td><button class="danger" type="button" data-delete-cache="${encodeURIComponent(file.name)}">Delete</button></td>
+                    </tr>
+                  `).join("")}
+                </tbody>
+              </table>
+            </div>
+          </details>
+        `).join("");
+      }
+
+      function renderStereo3d(stereo3d) {
+        const processors = stereo3d?.processors || [];
+        const defaultProcessor = stereo3d?.defaultProcessor || "";
+        const selected = processors.find((processor) => processor.id === defaultProcessor);
+        document.getElementById("stereo-state").textContent = "Half + Full SBS";
+        document.getElementById("stereo-processor-state").textContent = selected?.label || defaultProcessor || "Fast ffmpeg shift";
+        document.getElementById("stereo-default-processor").textContent = selected?.label || defaultProcessor || "Fast ffmpeg shift";
+        document.getElementById("stereo-depth").textContent = `${Number(stereo3d?.depthPercent || 0).toFixed(1)}% stereo depth`;
+        const list = document.getElementById("stereo-processor-list");
+        if (!processors.length) {
+          list.innerHTML = '<div class="muted">No processor metadata available.</div>';
+          return;
+        }
+        list.innerHTML = processors.map((processor) => `
+          <div class="info-row">
+            <div>
+              <strong>${escapeHtml(processor.label || processor.id)}</strong>
+              <span class="profile-line">${processor.id === defaultProcessor ? "Default" : ""}${processor.browserOnly ? " Browser/WebGPU" : ""}</span>
+            </div>
+            <div>${escapeHtml(processor.bestUse || "")}</div>
+            <div>
+              ${escapeHtml(processor.m3Practicality || "")}
+              <span class="profile-line">${processor.requiresCommand ? "Requires local helper command" : "No helper command required"}</span>
+            </div>
+          </div>
         `).join("");
       }
 
       function renderStatus(payload) {
+        detectedLanIp = payload.lanIp || "";
         document.getElementById("connector-url").textContent = payload.connectorUrl;
         document.getElementById("health-url").textContent = payload.healthUrl;
+        document.getElementById("lan-host-hint").textContent = detectedLanIp
+          ? `LAN devices can use ${payload.lanConnectorUrl || `${payload.connectorUrl.split("://")[0]}://${detectedLanIp}:${payload.config.port}`}. Save and restart after selecting this address.`
+          : "No LAN IP detected. Enter a host manually if needed.";
+        document.getElementById("use-lan-host").disabled = !detectedLanIp;
         document.getElementById("protocol-pill").textContent = payload.connectorUrl.startsWith("https://") ? "HTTPS" : "HTTP";
         document.getElementById("protocol-pill").className = `pill ${payload.connectorUrl.startsWith("https://") ? "ready" : "warn"}`;
         document.getElementById("status-pill").textContent = payload.restartRequired ? "Restart needed" : (payload.serviceEnabled ? "Running" : "Off");
@@ -1210,12 +1849,11 @@ ADMIN_HTML = r"""<!doctype html>
         document.getElementById("toggle-service").textContent = payload.serviceEnabled ? "Turn off connector" : "Turn on connector";
         document.getElementById("server-count").textContent = payload.connections.serverCount || 0;
         document.getElementById("resource-count").textContent = `${payload.connections.resourceCount || 0} resources`;
-        document.getElementById("auth-state").textContent = payload.authRequired ? "On" : "Off";
-        document.getElementById("session-count").textContent = `${payload.activeSessions || 0} sessions`;
         document.getElementById("ffmpeg-state").textContent = payload.ffmpegAvailable ? "Ready" : "Missing";
         document.getElementById("ffprobe-state").textContent = payload.ffprobeAvailable ? "ffprobe ready" : "ffprobe missing";
         document.getElementById("read-ahead-state").textContent = payload.readAhead?.enabled ? "On" : "Off";
         document.getElementById("read-ahead-size").textContent = `${formatBytes(payload.readAhead?.cachedBytes || 0)} buffered`;
+        renderStereo3d(payload.stereo3d);
         renderConfig(payload.config, payload.configPath);
         renderServers(payload.connections.servers || []);
         renderCache(payload.cache);
@@ -1328,6 +1966,7 @@ ADMIN_HTML = r"""<!doctype html>
       }
 
       wire("save-config", saveConfig);
+      wire("use-lan-host", useLanHost);
       wire("choose-cache-dir", chooseCacheDir);
       wire("scan", scanServers);
       wire("refresh", async () => {
@@ -1337,6 +1976,10 @@ ADMIN_HTML = r"""<!doctype html>
       wire("clear-connections", clearConnections);
       wire("refresh-cache", refreshCache);
       wire("clear-cache", clearCache);
+      wire("show-all-cache", async () => {
+        cacheFilter = "all";
+        await refreshCache();
+      });
       wire("toggle-service", toggleService);
       wire("copy-url", async () => {
         await navigator.clipboard.writeText(document.getElementById("connector-url").textContent);
@@ -1347,7 +1990,7 @@ ADMIN_HTML = r"""<!doctype html>
         log("Connector shutdown requested.");
       });
 
-      document.getElementById("cache-rows").addEventListener("click", async (event) => {
+      document.getElementById("cache-entries").addEventListener("click", async (event) => {
         const button = event.target.closest("[data-delete-cache]");
         if (!button) return;
         button.disabled = true;
@@ -1358,6 +2001,17 @@ ADMIN_HTML = r"""<!doctype html>
         } finally {
           button.disabled = false;
         }
+      });
+
+      document.getElementById("cache-groups").addEventListener("click", async (event) => {
+        const button = event.target.closest("[data-cache-filter]");
+        if (!button) return;
+        cacheFilter = button.dataset.cacheFilter || "all";
+        await refreshCache();
+      });
+
+      document.querySelectorAll("[data-admin-tab]").forEach((button) => {
+        button.addEventListener("click", () => setAdminTab(button.dataset.adminTab));
       });
 
       refresh().catch((error) => log(error.message));
