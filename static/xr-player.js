@@ -104,7 +104,7 @@
           roomDim: clampNumber(Number(stored.roomDim), 0, 100, DEFAULT_SETTINGS.roomDim),
           sidePanelVisible: Boolean(stored.sidePanelVisible ?? DEFAULT_SETTINGS.sidePanelVisible),
           aspectLocked: stored.aspectLocked !== false,
-          backlightMode: ["off", "soft", "dynamic"].includes(stored.backlightMode) ? stored.backlightMode : DEFAULT_SETTINGS.backlightMode,
+          backlightMode: isKnownBacklightMode(stored.backlightMode) ? stored.backlightMode : DEFAULT_SETTINGS.backlightMode,
           backlightIntensity: clampNumber(Number(stored.backlightIntensity), 0, 150, DEFAULT_SETTINGS.backlightIntensity),
           theme: typeof stored.theme === "string" && stored.theme ? stored.theme : DEFAULT_SETTINGS.theme,
         };
@@ -546,7 +546,8 @@
                 <select class="form-select form-select-sm" data-role="backlight">
                   <option value="off">Off</option>
                   <option value="soft">Soft glow</option>
-                  <option value="dynamic">Dynamic video</option>
+                  <option value="dynamic">Dynamic glow</option>
+                  <option value="video">Video sampled</option>
                 </select>
               </label>
               <label class="fp-xr-range"><span>Backlight intensity <output data-role="backlight-intensity-label"></output></span><input class="form-range" type="range" min="0" max="150" step="5" data-role="backlight-intensity"></label>
@@ -649,7 +650,7 @@
         this.applyTheme();
       });
       this.backlightSelect.addEventListener("change", () => {
-        this.settings.backlightMode = ["soft", "dynamic"].includes(this.backlightSelect.value) ? this.backlightSelect.value : "off";
+        this.settings.backlightMode = isKnownBacklightMode(this.backlightSelect.value) ? this.backlightSelect.value : "off";
         this.saveSettings();
         this.syncOverlayControls();
         this.updateBacklight(true);
@@ -997,7 +998,7 @@
       } else if (hotspot.action === "backlight-cycle") {
         const nextMode = this.settings.backlightMode === "off"
           ? "soft"
-          : this.settings.backlightMode === "soft" ? "dynamic" : "off";
+          : this.settings.backlightMode === "soft" ? "dynamic" : this.settings.backlightMode === "dynamic" ? "video" : "off";
         this.settings.backlightMode = nextMode;
         this.saveSettings();
         this.syncOverlayControls();
@@ -1155,13 +1156,12 @@
         }
         return;
       }
-      const now = performance.now();
-      if (!force && now - this.lastBacklightSampleAt < 120) return;
-      this.lastBacklightSampleAt = now;
-      const colors = this.sampleVideoEdgeColors();
+      const colors = mode === "video" ? this.sampleVideoEdgeColors() : fallbackBacklightColors();
       for (const segmentMesh of this.backlightSegments) {
         const segment = segmentMesh.userData.backlightSegment || {};
-        const color = colors[segment.side]?.[segment.index] || fallbackBacklightColor(segment);
+        const color = colors[segment.side]?.[segment.index] || (
+          mode === "video" ? offBacklightColor() : fallbackBacklightColor(segment)
+        );
         segmentMesh.material.color.setRGB(color.r, color.g, color.b);
         segmentMesh.material.opacity = clampNumber((color.opacity ?? 0.3) * 0.72 * intensity, 0, 0.52, 0.26);
       }
@@ -1169,7 +1169,7 @@
 
     sampleVideoEdgeColors() {
       if (!this.backlightSampleContext || this.video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
-        return fallbackBacklightColors();
+        return offBacklightColors();
       }
       try {
         const context = this.backlightSampleContext;
@@ -1219,7 +1219,7 @@
         }
         return output;
       } catch (error) {
-        return fallbackBacklightColors();
+        return offBacklightColors();
       }
     }
 
@@ -1433,6 +1433,7 @@
     }
 
     backlightModeLabel() {
+      if (this.settings.backlightMode === "video") return "Video";
       if (this.settings.backlightMode === "dynamic") return "Dynamic";
       if (this.settings.backlightMode === "soft") return "Soft";
       return "Off";
@@ -1546,6 +1547,10 @@
     return ["mono", "half-sbs", "full-sbs"].includes(value);
   }
 
+  function isKnownBacklightMode(value) {
+    return ["off", "soft", "dynamic", "video"].includes(value);
+  }
+
   function clampNumber(value, min, max, fallback) {
     if (!Number.isFinite(value)) return fallback;
     return Math.min(max, Math.max(min, value));
@@ -1618,6 +1623,21 @@
       }
     }
     return output;
+  }
+
+  function offBacklightColors() {
+    const output = { top: [], bottom: [], left: [], right: [] };
+    for (const side of Object.keys(output)) {
+      const count = side === "top" || side === "bottom" ? 20 : 6;
+      for (let index = 0; index < count; index += 1) {
+        output[side][index] = offBacklightColor();
+      }
+    }
+    return output;
+  }
+
+  function offBacklightColor() {
+    return { r: 0, g: 0, b: 0, opacity: 0 };
   }
 
   function colorToRgb(value) {
