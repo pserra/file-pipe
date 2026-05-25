@@ -1178,6 +1178,15 @@ progress {
   font-weight: 800;
 }
 
+.fp-xr-debug {
+  color: rgba(248, 250, 252, 0.58);
+  font-size: 0.76rem;
+  font-weight: 700;
+  line-height: 1.25;
+  margin-top: -0.2rem;
+  overflow-wrap: anywhere;
+}
+
 .fp-xr-status {
   margin-top: 0.5rem;
 }

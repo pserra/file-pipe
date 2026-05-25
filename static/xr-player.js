@@ -9,7 +9,13 @@
     panelX: 0,
     panelY: 0,
     panelYaw: 0,
+    panelPitch: 0,
     distance: 3,
+    roomViewX: 0,
+    roomViewY: 0,
+    roomViewZ: 0,
+    roomViewYaw: 0,
+    roomViewPitch: 0,
     roomDim: 80,
     sidePanelVisible: false,
     aspectLocked: true,
@@ -65,6 +71,14 @@
       this.backlightSampleMesh = null;
       this.backlightReadPixels = null;
       this.backlightReadData = null;
+      this.backlightCaptureCanvas = null;
+      this.backlightCaptureContext = null;
+      this.backlightCaptureStream = null;
+      this.backlightImageCapture = null;
+      this.backlightCapturePending = false;
+      this.backlightCaptureSample = null;
+      this.backlightSampleStatus = "idle";
+      this.backlightSampleDebug = null;
       this.lastVideoBacklightColors = null;
       this.lastBacklightSampleAt = 0;
       this.xrSidePanelCanvas = null;
@@ -86,6 +100,10 @@
       this.controllers = [];
       this.controllerLines = [];
       this.activeGrab = null;
+      this.desktopDrag = null;
+      this.desktopKeys = new Set();
+      this.overlayCleanups = [];
+      this.lastRenderAt = 0;
       this.xrRaycaster = null;
       this.xrControllerRayMatrix = null;
 
@@ -113,7 +131,13 @@
           panelX: clampNumber(Number(stored.panelX), -3, 3, DEFAULT_SETTINGS.panelX),
           panelY: clampNumber(Number(stored.panelY), -1.4, 1.4, DEFAULT_SETTINGS.panelY),
           panelYaw: clampNumber(Number(stored.panelYaw), -35, 35, DEFAULT_SETTINGS.panelYaw),
+          panelPitch: clampNumber(Number(stored.panelPitch), -20, 20, DEFAULT_SETTINGS.panelPitch),
           distance: clampNumber(Number(stored.distance), 1.4, 6, DEFAULT_SETTINGS.distance),
+          roomViewX: clampNumber(Number(stored.roomViewX), -2.8, 2.8, DEFAULT_SETTINGS.roomViewX),
+          roomViewY: clampNumber(Number(stored.roomViewY), -0.8, 1.2, DEFAULT_SETTINGS.roomViewY),
+          roomViewZ: clampNumber(Number(stored.roomViewZ), -3.7, 1.2, DEFAULT_SETTINGS.roomViewZ),
+          roomViewYaw: normalizeDegrees(clampNumber(Number(stored.roomViewYaw), -180, 180, DEFAULT_SETTINGS.roomViewYaw)),
+          roomViewPitch: clampNumber(Number(stored.roomViewPitch), -35, 35, DEFAULT_SETTINGS.roomViewPitch),
           roomDim: clampNumber(Number(stored.roomDim), 0, 100, DEFAULT_SETTINGS.roomDim),
           sidePanelVisible: Boolean(stored.sidePanelVisible ?? DEFAULT_SETTINGS.sidePanelVisible),
           aspectLocked: stored.aspectLocked !== false,
@@ -503,6 +527,11 @@
       this.controllers = [];
       this.controllerLines = [];
       this.activeGrab = null;
+      this.desktopDrag = null;
+      this.desktopKeys.clear();
+      this.overlayCleanups.forEach((cleanup) => cleanup());
+      this.overlayCleanups = [];
+      this.lastRenderAt = 0;
       this.xrRaycaster = null;
       this.xrControllerRayMatrix = null;
       document.body.classList.remove("fp-three-xr-active");
@@ -524,6 +553,15 @@
             </button>
             <button class="btn btn-sm btn-light" type="button" data-action="recenter">
               <i class="bi bi-crosshair"></i>
+            </button>
+            <button class="btn btn-sm btn-light" type="button" data-action="reset-room-view" title="Reset desktop room view">
+              <i class="bi bi-house"></i>
+            </button>
+            <button class="btn btn-sm btn-light" type="button" data-action="zoom-out" title="Zoom out">
+              <i class="bi bi-dash-lg"></i>
+            </button>
+            <button class="btn btn-sm btn-light" type="button" data-action="zoom-in" title="Zoom in">
+              <i class="bi bi-plus-lg"></i>
             </button>
             <button class="btn btn-sm btn-light" type="button" data-action="toggle-side-panel">
               <i class="bi bi-layout-sidebar-inset-reverse"></i>
@@ -570,6 +608,7 @@
                 </select>
               </label>
               <label class="fp-xr-range"><span>Backlight intensity <output data-role="backlight-intensity-label"></output></span><input class="form-range" type="range" min="0" max="150" step="5" data-role="backlight-intensity"></label>
+              <div class="fp-xr-debug" data-role="backlight-debug" hidden></div>
               <label class="fp-xr-field">
                 <span>View</span>
                 <select class="form-select form-select-sm" data-role="overlay-layout">
@@ -594,6 +633,7 @@
               <label class="fp-xr-range"><span>X <output data-role="x-label"></output></span><input class="form-range" type="range" min="-3" max="3" step="0.05" data-role="panel-x"></label>
               <label class="fp-xr-range"><span>Height pos <output data-role="y-label"></output></span><input class="form-range" type="range" min="-1.4" max="1.4" step="0.05" data-role="panel-y"></label>
               <label class="fp-xr-range"><span>Yaw <output data-role="yaw-label"></output></span><input class="form-range" type="range" min="-35" max="35" step="1" data-role="panel-yaw"></label>
+              <label class="fp-xr-range"><span>Tilt <output data-role="pitch-label"></output></span><input class="form-range" type="range" min="-20" max="20" step="1" data-role="panel-pitch"></label>
               <label class="fp-xr-range"><span>Distance <output data-role="distance-label"></output></span><input class="form-range" type="range" min="1.4" max="6" step="0.1" data-role="panel-distance"></label>
               <label class="fp-xr-range"><span>Room dim <output data-role="dim-label"></output></span><input class="form-range" type="range" min="0" max="100" step="5" data-role="room-dim"></label>
               <button class="btn btn-sm btn-outline-light w-100" type="button" data-action="reset-screen">
@@ -611,6 +651,7 @@
       this.themeSelect = this.overlay.querySelector("[data-role='theme']");
       this.backlightSelect = this.overlay.querySelector("[data-role='backlight']");
       this.backlightIntensityInput = this.overlay.querySelector("[data-role='backlight-intensity']");
+      this.backlightDebug = this.overlay.querySelector("[data-role='backlight-debug']");
       this.overlayLayoutSelect = this.overlay.querySelector("[data-role='overlay-layout']");
       this.overlayEyeSelect = this.overlay.querySelector("[data-role='overlay-eye']");
       this.overlayEyeField = this.overlay.querySelector("[data-role='overlay-eye-field']");
@@ -620,6 +661,7 @@
       this.xInput = this.overlay.querySelector("[data-role='panel-x']");
       this.yInput = this.overlay.querySelector("[data-role='panel-y']");
       this.yawInput = this.overlay.querySelector("[data-role='panel-yaw']");
+      this.pitchInput = this.overlay.querySelector("[data-role='panel-pitch']");
       this.distanceInput = this.overlay.querySelector("[data-role='panel-distance']");
       this.dimInput = this.overlay.querySelector("[data-role='room-dim']");
       this.backlightIntensityLabel = this.overlay.querySelector("[data-role='backlight-intensity-label']");
@@ -628,6 +670,7 @@
       this.xLabel = this.overlay.querySelector("[data-role='x-label']");
       this.yLabel = this.overlay.querySelector("[data-role='y-label']");
       this.yawLabel = this.overlay.querySelector("[data-role='yaw-label']");
+      this.pitchLabel = this.overlay.querySelector("[data-role='pitch-label']");
       this.distanceLabel = this.overlay.querySelector("[data-role='distance-label']");
       this.dimLabel = this.overlay.querySelector("[data-role='dim-label']");
       this.playButton = this.overlay.querySelector("[data-action='play-toggle']");
@@ -643,7 +686,11 @@
       this.sideSlot = this.overlay.querySelector("[data-role='side-slot']");
       this.overlay.querySelector("[data-action='close']").addEventListener("click", () => this.closeTheater());
       this.overlay.querySelector("[data-action='recenter']").addEventListener("click", () => this.recenterScreen());
+      this.overlay.querySelector("[data-action='reset-room-view']").addEventListener("click", () => this.resetRoomView());
+      this.overlay.querySelector("[data-action='zoom-out']").addEventListener("click", () => this.zoomScreen(0.2));
+      this.overlay.querySelector("[data-action='zoom-in']").addEventListener("click", () => this.zoomScreen(-0.2));
       this.overlay.querySelector("[data-action='reset-screen']").addEventListener("click", () => this.recenterScreen({ resetDistance: true }));
+      this.bindDesktopStageControls();
       this.webXrButton.addEventListener("click", () => this.enterWebXr());
       this.sidePanelToggleButton.addEventListener("click", () => this.toggleSidePanel());
       this.playButton.addEventListener("click", () => this.togglePlayback());
@@ -703,6 +750,7 @@
       this.xInput.addEventListener("input", () => this.updateNumericSetting("panelX", this.xInput.value));
       this.yInput.addEventListener("input", () => this.updateNumericSetting("panelY", this.yInput.value));
       this.yawInput.addEventListener("input", () => this.updateNumericSetting("panelYaw", this.yawInput.value));
+      this.pitchInput.addEventListener("input", () => this.updateNumericSetting("panelPitch", this.pitchInput.value));
       this.distanceInput.addEventListener("input", () => this.updateNumericSetting("distance", this.distanceInput.value));
       this.dimInput.addEventListener("input", () => this.updateNumericSetting("roomDim", this.dimInput.value));
       this.backlightIntensityInput.addEventListener("input", () => this.updateNumericSetting("backlightIntensity", this.backlightIntensityInput.value));
@@ -730,6 +778,7 @@
       this.xInput.value = String(this.settings.panelX);
       this.yInput.value = String(this.settings.panelY);
       this.yawInput.value = String(this.settings.panelYaw);
+      this.pitchInput.value = String(this.settings.panelPitch);
       this.distanceInput.value = String(this.settings.distance);
       this.dimInput.value = String(this.settings.roomDim);
       this.widthLabel.textContent = `${this.settings.panelWidth.toFixed(1)}m`;
@@ -737,9 +786,14 @@
       this.xLabel.textContent = `${this.settings.panelX.toFixed(2)}m`;
       this.yLabel.textContent = `${this.settings.panelY.toFixed(2)}m`;
       this.yawLabel.textContent = `${Math.round(this.settings.panelYaw)}°`;
+      this.pitchLabel.textContent = `${Math.round(this.settings.panelPitch)}°`;
       this.distanceLabel.textContent = `${this.settings.distance.toFixed(1)}m`;
       this.dimLabel.textContent = `${Math.round(this.settings.roomDim)}%`;
       this.backlightIntensityLabel.textContent = `${Math.round(this.settings.backlightIntensity)}%`;
+      if (this.backlightDebug) {
+        this.backlightDebug.hidden = this.settings.backlightMode !== "video";
+        this.backlightDebug.textContent = `Sample ${this.backlightSampleStatus || "idle"}`;
+      }
       if (this.webXrButton) {
         const modeSupported = this.settings.headsetMode === "mr" ? this.xrArSupported : this.xrVrSupported;
         this.webXrButton.disabled = !modeSupported || Boolean(this.xrSession);
@@ -768,6 +822,7 @@
         panelX: [-3, 3],
         panelY: [-1.4, 1.4],
         panelYaw: [-35, 35],
+        panelPitch: [-20, 20],
         distance: [1.4, 6],
         roomDim: [0, 100],
         backlightIntensity: [0, 150],
@@ -1110,6 +1165,10 @@
       this.backlightSampleCanvas.width = 96;
       this.backlightSampleCanvas.height = 54;
       this.backlightSampleContext = this.backlightSampleCanvas.getContext("2d", { willReadFrequently: true });
+      this.backlightCaptureCanvas = document.createElement("canvas");
+      this.backlightCaptureCanvas.width = 96;
+      this.backlightCaptureCanvas.height = 54;
+      this.backlightCaptureContext = this.backlightCaptureCanvas.getContext("2d", { willReadFrequently: true });
       this.backlightRenderTarget = new THREE.WebGLRenderTarget(96, 54, {
         depthBuffer: false,
         stencilBuffer: false,
@@ -1148,6 +1207,7 @@
       this.backlightRenderTarget?.dispose?.();
       this.backlightSampleMesh?.geometry?.dispose?.();
       this.backlightSampleMesh?.material?.dispose?.();
+      this.backlightCaptureStream?.getTracks?.().forEach((track) => track.stop());
       this.backlightGroup = null;
       this.backlightMesh = null;
       this.backlightMaskMesh = null;
@@ -1159,6 +1219,14 @@
       this.backlightSampleMesh = null;
       this.backlightReadPixels = null;
       this.backlightReadData = null;
+      this.backlightCaptureCanvas = null;
+      this.backlightCaptureContext = null;
+      this.backlightCaptureStream = null;
+      this.backlightImageCapture = null;
+      this.backlightCapturePending = false;
+      this.backlightCaptureSample = null;
+      this.backlightSampleStatus = "idle";
+      this.backlightSampleDebug = null;
     }
 
     updateBacklightGeometry() {
@@ -1201,6 +1269,7 @@
         return;
       }
       const colors = mode === "video" ? this.sampleVideoEdgeColors() : fallbackBacklightColors();
+      this.updateBacklightDebugLabel();
       for (const segmentMesh of this.backlightSegments) {
         const segment = segmentMesh.userData.backlightSegment || {};
         const color = colors[segment.side]?.[segment.index] || (
@@ -1213,11 +1282,15 @@
 
     sampleVideoEdgeColors() {
       if (this.video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+        this.setBacklightSampleStatus(this.lastVideoBacklightColors ? "last: waiting for frame" : "off: waiting for frame");
         return this.lastVideoBacklightColors || offBacklightColors();
       }
       try {
         const sample = this.readBacklightVideoSample();
-        if (!sample) return this.lastVideoBacklightColors || offBacklightColors();
+        if (!sample) {
+          this.setBacklightSampleStatus(this.lastVideoBacklightColors ? "last: no readable sample" : "off: no readable sample");
+          return this.lastVideoBacklightColors || offBacklightColors();
+        }
         const { data, width, height } = sample;
         const window = this.displayedVideoSampleWindow();
         const output = { top: [], bottom: [], left: [], right: [] };
@@ -1274,15 +1347,19 @@
         }
         if (hasVisibleBacklightColors(output)) {
           this.lastVideoBacklightColors = output;
+          this.setBacklightSampleStatus(`${sample.source}: ${sample.debug || "visible"}`);
           return output;
         }
         const broadOutput = sampleExpandedBacklightColors(data, width, height, window, this.backlightSegments);
         if (hasVisibleBacklightColors(broadOutput)) {
           this.lastVideoBacklightColors = broadOutput;
+          this.setBacklightSampleStatus(`${sample.source}: broad ${sample.debug || "visible"}`);
           return broadOutput;
         }
+        this.setBacklightSampleStatus(this.lastVideoBacklightColors ? `${sample.source}: blank, using last` : `${sample.source}: blank`);
         return this.lastVideoBacklightColors || offBacklightColors();
       } catch (error) {
+        this.setBacklightSampleStatus(this.lastVideoBacklightColors ? "last: sample error" : "off: sample error");
         return this.lastVideoBacklightColors || offBacklightColors();
       }
     }
@@ -1294,6 +1371,7 @@
       } catch (error) {
         canvasSample = null;
       }
+      if (canvasSample) canvasSample.debug = samplePixelDebug(canvasSample.data);
       if (canvasSample && hasVisibleSamplePixels(canvasSample.data)) return canvasSample;
       let webglSample = null;
       try {
@@ -1301,8 +1379,11 @@
       } catch (error) {
         webglSample = null;
       }
+      if (webglSample) webglSample.debug = samplePixelDebug(webglSample.data);
       if (webglSample && hasVisibleSamplePixels(webglSample.data)) return webglSample;
-      return canvasSample || webglSample;
+      if (this.backlightCaptureSample && hasVisibleSamplePixels(this.backlightCaptureSample.data)) return this.backlightCaptureSample;
+      this.requestBacklightCaptureSample();
+      return canvasSample || webglSample || this.backlightCaptureSample;
     }
 
     readBacklightCanvasSample() {
@@ -1313,6 +1394,7 @@
       context.drawImage(this.video, 0, 0, width, height);
       return {
         data: context.getImageData(0, 0, width, height).data,
+        source: "canvas",
         width,
         height,
       };
@@ -1345,6 +1427,7 @@
         flipRgbaRows(this.backlightReadPixels, this.backlightReadData, width, height);
         return {
           data: this.backlightReadData,
+          source: "webgl",
           width,
           height,
         };
@@ -1357,6 +1440,71 @@
         this.renderer.setScissor(previousScissor);
         this.renderer.setScissorTest(previousScissorTest);
         this.renderer.xr.enabled = previousXrEnabled;
+      }
+    }
+
+    requestBacklightCaptureSample() {
+      if (this.backlightCapturePending || !this.backlightCaptureContext) return;
+      const captureStream = this.video.captureStream || this.video.mozCaptureStream;
+      const canGrabFrame = typeof window.ImageCapture === "function" && typeof captureStream === "function";
+      const canCreateBitmap = typeof window.createImageBitmap === "function";
+      if (!canCreateBitmap && !canGrabFrame) return;
+      this.backlightCapturePending = true;
+      Promise.resolve().then(async () => {
+        let bitmap = null;
+        let source = "";
+        if (canCreateBitmap) {
+          try {
+            bitmap = await window.createImageBitmap(this.video);
+            source = "bitmap";
+          } catch (error) {
+            bitmap = null;
+          }
+        }
+        if (!bitmap && canGrabFrame) {
+          if (!this.backlightCaptureStream) {
+            this.backlightCaptureStream = captureStream.call(this.video);
+            const [track] = this.backlightCaptureStream?.getVideoTracks?.() || [];
+            if (!track) throw new Error("Video capture track unavailable.");
+            this.backlightImageCapture = new ImageCapture(track);
+          }
+          bitmap = await this.backlightImageCapture.grabFrame();
+          source = "capture";
+        }
+        if (!bitmap) throw new Error("Video frame capture unavailable.");
+        const width = this.backlightCaptureCanvas.width;
+        const height = this.backlightCaptureCanvas.height;
+        this.backlightCaptureContext.drawImage(bitmap, 0, 0, width, height);
+        bitmap.close?.();
+        const data = this.backlightCaptureContext.getImageData(0, 0, width, height).data;
+        this.backlightCaptureSample = {
+          data,
+          debug: samplePixelDebug(data),
+          source,
+          width,
+          height,
+        };
+      }).catch(() => {
+        if (this.backlightCaptureStream) {
+          this.backlightCaptureStream.getTracks?.().forEach((track) => track.stop());
+          this.backlightCaptureStream = null;
+          this.backlightImageCapture = null;
+        }
+      }).finally(() => {
+        this.backlightCapturePending = false;
+      });
+    }
+
+    setBacklightSampleStatus(status) {
+      this.backlightSampleStatus = status;
+      this.updateBacklightDebugLabel();
+    }
+
+    updateBacklightDebugLabel() {
+      if (!this.backlightDebug) return;
+      this.backlightDebug.hidden = this.settings.backlightMode !== "video";
+      if (!this.backlightDebug.hidden) {
+        this.backlightDebug.textContent = `Sample ${this.backlightSampleStatus || "idle"}`;
       }
     }
 
@@ -1742,6 +1890,23 @@
       }
     }
     return false;
+  }
+
+  function samplePixelDebug(data) {
+    if (!data?.length) return "empty";
+    let max = 0;
+    let luminance = 0;
+    let samples = 0;
+    for (let index = 0; index < data.length; index += 16) {
+      const pixelR = data[index];
+      const pixelG = data[index + 1];
+      const pixelB = data[index + 2];
+      max = Math.max(max, pixelR, pixelG, pixelB);
+      luminance += 0.2126 * pixelR + 0.7152 * pixelG + 0.0722 * pixelB;
+      samples += 1;
+    }
+    const avg = samples ? Math.round(luminance / samples) : 0;
+    return `avg ${avg} max ${Math.round(max)}`;
   }
 
   function averageSampleRegion(data, width, height, region) {
