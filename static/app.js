@@ -1,3 +1,6 @@
+const HOST_WATCH_ROOM_STORAGE_KEY = "filePipeHostWatchRoom";
+const HOST_WATCH_ROOM_TTL_MS = 12 * 60 * 60 * 1000;
+
 document.addEventListener("alpine:init", () => {
   Alpine.data("filePipe", () => ({
     connectorUrl: localStorage.getItem("filePipeConnectorUrl") || "https://127.0.0.1:8765",
@@ -51,10 +54,13 @@ document.addEventListener("alpine:init", () => {
     playerCompatibilitySwitching: false,
     hostHls: null,
     hostXrPlayer: null,
+    hostProgressTracker: null,
     hostProgressiveMse: null,
     playerRoomLink: "",
     playerRoomQrDataUrl: "",
     playerRoomId: "",
+    playerRoomRestored: false,
+    restoredWatchRoomContentKey: "",
     qrModalOpen: false,
     qrModalTitle: "",
     qrModalUrl: "",
@@ -125,6 +131,7 @@ document.addEventListener("alpine:init", () => {
       window.addEventListener("hashchange", () => this.applyHashRoute());
       this.refreshAudioDevices();
       this.checkConnector();
+      this.restoreStoredWatchRoom();
       window.setTimeout(() => {
         this.initHashNavigation();
         this.applyHashRoute();
@@ -256,10 +263,20 @@ document.addEventListener("alpine:init", () => {
       ].join("\n");
     },
 
-    connectorDirectUrl(path) {
+    connectorDirectUrl(path, params = {}) {
       const url = new URL(`${this.connectorUrl}${path}`);
+      Object.entries(params || {}).forEach(([key, value]) => {
+        if (value !== undefined && value !== null && value !== "") url.searchParams.set(key, value);
+      });
       if (this.connectorToken) url.searchParams.set("access_token", this.connectorToken);
       return url.toString();
+    },
+
+    connectorPathWithAudioProfile(path, audioProfile = "stereo") {
+      if (audioProfile !== "spatial") return path;
+      const url = new URL(path, "https://file-pipe.local");
+      url.searchParams.set("audio_profile", "spatial");
+      return `${url.pathname}${url.search}`;
     },
 
     connectorHeaders(extraHeaders = {}) {
@@ -616,12 +633,13 @@ document.addEventListener("alpine:init", () => {
       }
     },
 
-    pollTranscodeProgress(resource, title, target = "list") {
+    pollTranscodeProgress(resource, title, target = "list", audioProfile = "stereo") {
       let stopped = false;
+      const statusPath = this.connectorPathWithAudioProfile(`${resource.proxyPath}/transcode-status`, audioProfile);
       const run = async () => {
         while (!stopped) {
           try {
-            const progress = await this.request(`${resource.proxyPath}/transcode-status`);
+            const progress = await this.request(statusPath);
             const percent = Number(progress.percent || 0);
             if (percent > 0) {
               const status = progress.status === "finalizing" ? "Finalizing" : "Transcoding";
@@ -673,7 +691,8 @@ document.addEventListener("alpine:init", () => {
       const playbackRate = video?.playbackRate || 1;
       this.suppressHostPlayerEvents = true;
       this.teardownHostProgressiveMsePlayer();
-      this.playerUrl = this.connectorDirectUrl(`${resource.proxyPath}/transcoded`);
+      const audioProfile = this.playerSource?.spatialAudioProfile === "spatial" ? "spatial" : "stereo";
+      this.playerUrl = this.connectorDirectUrl(this.connectorPathWithAudioProfile(`${resource.proxyPath}/transcoded`, audioProfile));
       setTimeout(() => {
         const upgraded = document.getElementById("host-video-player");
         if (!upgraded) {
@@ -1154,14 +1173,17 @@ document.addEventListener("alpine:init", () => {
       }
     },
 
-    async launchFullTranscodedConnectorVideo(item, resource, mediaInfo, transcodeParts) {
-      const transcodePath = `${resource.proxyPath}/transcoded`;
-      this.playerStatus = `Preparing complete Stable MP4 cache with browser-safe ${transcodeParts.join(" and ")}...`;
+    async launchFullTranscodedConnectorVideo(item, resource, mediaInfo, transcodeParts, options = {}) {
+      const audioProfile = options.audioProfile === "spatial" ? "spatial" : "stereo";
+      const transcodePath = this.connectorPathWithAudioProfile(`${resource.proxyPath}/transcoded`, audioProfile);
+      const transcodeInfoPath = this.connectorPathWithAudioProfile(`${resource.proxyPath}/transcoded-info`, audioProfile);
+      const transcodeLabel = audioProfile === "spatial" ? "spatial Stable MP4" : "Stable MP4";
+      this.playerStatus = `Preparing complete ${transcodeLabel} cache with browser-safe ${transcodeParts.join(" and ")}...`;
       this.playerTranscodeAvailablePercent = 0;
-      const poller = this.pollTranscodeProgress(resource, item.title, "player");
+      const poller = this.pollTranscodeProgress(resource, item.title, "player", audioProfile);
       let transcodeInfo;
       try {
-        transcodeInfo = await this.request(`${resource.proxyPath}/transcoded-info`);
+        transcodeInfo = await this.request(transcodeInfoPath);
       } finally {
         poller.stop();
       }
@@ -1180,9 +1202,11 @@ document.addEventListener("alpine:init", () => {
         type: "video/mp4",
         size: transcodeSize,
         contentKey: `connector:${resource.proxyPath}`,
-        sourceLabel: `${this.sourceLabel(this.selectedServer)} video transcoded to MP4/AAC`,
+        sourceLabel: `${this.sourceLabel(this.selectedServer)} video transcoded to ${audioProfile === "spatial" ? "multichannel" : "stereo"} MP4/AAC`,
         mediaInfo,
-        playbackProfile: stableMp4PlaybackProfile(mediaInfo),
+        playbackProfile: stableMp4PlaybackProfile(mediaInfo, audioProfile),
+        spatialAudioProfile: audioProfile,
+        spatialAudioReady: audioProfile === "spatial",
         progressiveTranscode: false,
         progressiveTranscodePercent: this.playerTranscodeAvailablePercent,
         transcodedAvailableBytes: transcodeSize,
@@ -1190,7 +1214,7 @@ document.addEventListener("alpine:init", () => {
         duration: transcodeDuration,
         mseType: stableMp4MseMimeType(mediaInfo),
         shareDisabledReason: "",
-        checksumPath: `${transcodePath}/checksum`,
+        checksumPath: this.connectorPathWithAudioProfile(`${resource.proxyPath}/transcoded/checksum`, audioProfile),
       };
       source.readRange = async (start, endExclusive) => {
         const requestedStart = Math.max(0, Number(start || 0));
@@ -1223,16 +1247,17 @@ document.addEventListener("alpine:init", () => {
         };
       };
       this.playerSource = source;
-      this.playerStatus = `Video ready with browser-safe ${transcodeParts.join(" and ")}.`;
+      this.playerStatus = `Video ready with browser-safe ${transcodeParts.join(" and ")}${audioProfile === "spatial" ? " and spatial audio channels" : ""}.`;
       setTimeout(() => {
         this.prepareHostPlayerMedia();
       }, 0);
       this.showBootstrapTab("player-tab");
     },
 
-    hlsWatchSourceFromConnector(item, resource, mediaInfo, transcodeParts, hlsInfo) {
-      const playlistPath = hlsInfo.playlistPath || `${resource.proxyPath}/hls/playlist.m3u8`;
-      const segmentPath = (index) => `${resource.proxyPath}/hls/segments/${Number(index || 0)}.ts`;
+    hlsWatchSourceFromConnector(item, resource, mediaInfo, transcodeParts, hlsInfo, options = {}) {
+      const audioProfile = options.audioProfile === "spatial" ? "spatial" : "stereo";
+      const playlistPath = this.connectorPathWithAudioProfile(hlsInfo.playlistPath || `${resource.proxyPath}/hls/playlist.m3u8`, audioProfile);
+      const segmentPath = (index) => this.connectorPathWithAudioProfile(`${resource.proxyPath}/hls/segments/${Number(index || 0)}.ts`, audioProfile);
       return {
         title: item.title,
         type: "application/vnd.apple.mpegurl",
@@ -1245,6 +1270,10 @@ document.addEventListener("alpine:init", () => {
           containerType: "application/vnd.apple.mpegurl",
           videoCodec: "h264",
           audioCodec: "aac",
+          audioChannels: audioProfile === "spatial" ? Number(mediaInfo?.audioChannels || mediaInfo?.defaultAudio?.channels || 0) : Math.min(2, Number(mediaInfo?.audioChannels || 2)),
+          audioChannelLayout: audioProfile === "spatial" ? (mediaInfo?.audioChannelLayout || "") : "stereo",
+          audioChannelLabels: audioProfile === "spatial" ? (mediaInfo?.audioChannelLabels || []) : ["L", "R"],
+          spatialAudioReady: audioProfile === "spatial",
           universal: false,
         },
         hlsLive: true,
@@ -1266,6 +1295,8 @@ document.addEventListener("alpine:init", () => {
         playlistPath,
         playlistUrl: this.connectorDirectUrl(playlistPath),
         transcodeParts,
+        spatialAudioProfile: audioProfile,
+        spatialAudioReady: audioProfile === "spatial",
       };
     },
 
@@ -1278,7 +1309,8 @@ document.addEventListener("alpine:init", () => {
       if (launch.mediaInfo && launch.mediaInfo.ffmpegAvailable === false) {
         throw new Error("Live stream watch links require ffmpeg in the local connector.");
       }
-      const hlsInfo = await this.request(`${launch.resource.proxyPath}/hls-info`);
+      const audioProfile = this.playerSource?.spatialAudioProfile === "spatial" ? "spatial" : "stereo";
+      const hlsInfo = await this.request(this.connectorPathWithAudioProfile(`${launch.resource.proxyPath}/hls-info`, audioProfile));
       const transcodeParts = launch.transcodeParts?.length ? launch.transcodeParts : ["video to H.264/AAC"];
       return this.hlsWatchSourceFromConnector(
         launch.item,
@@ -1286,6 +1318,7 @@ document.addEventListener("alpine:init", () => {
         hlsInfo.mediaInfo || launch.mediaInfo,
         transcodeParts,
         hlsInfo,
+        { audioProfile },
       );
     },
 
@@ -1296,9 +1329,11 @@ document.addEventListener("alpine:init", () => {
       );
     },
 
-    async launchSegmentedConnectorVideo(item, resource, mediaInfo, transcodeParts) {
-      const hlsInfo = await this.request(`${resource.proxyPath}/hls-info`);
-      const hlsSource = this.hlsWatchSourceFromConnector(item, resource, mediaInfo, transcodeParts, hlsInfo);
+    async launchSegmentedConnectorVideo(item, resource, mediaInfo, transcodeParts, options = {}) {
+      const audioProfile = options.audioProfile === "spatial" ? "spatial" : "stereo";
+      const hlsInfoPath = this.connectorPathWithAudioProfile(`${resource.proxyPath}/hls-info`, audioProfile);
+      const hlsInfo = await this.request(hlsInfoPath);
+      const hlsSource = this.hlsWatchSourceFromConnector(item, resource, mediaInfo, transcodeParts, hlsInfo, { audioProfile });
       const playlistUrl = hlsSource.playlistUrl;
       this.teardownHostHlsPlayer();
       this.playerUrl = playlistUrl;
@@ -1501,6 +1536,10 @@ document.addEventListener("alpine:init", () => {
         this.hostXrPlayer.dispose();
         this.hostXrPlayer = null;
       }
+      if (this.hostProgressTracker) {
+        this.hostProgressTracker.detach();
+        this.hostProgressTracker = null;
+      }
       this.teardownHostHlsPlayer();
       this.teardownHostProgressiveMsePlayer();
       if (this.playerUrl && this.playerUrl.startsWith("blob:")) URL.revokeObjectURL(this.playerUrl);
@@ -1539,6 +1578,8 @@ document.addEventListener("alpine:init", () => {
       this.playerRoomLink = "";
       this.playerRoomQrDataUrl = "";
       this.playerRoomId = "";
+      this.playerRoomRestored = false;
+      this.restoredWatchRoomContentKey = "";
       this.playerStatus = "";
       this.playerPeers = {};
       this.playerShareProgress = 0;
@@ -1549,11 +1590,83 @@ document.addEventListener("alpine:init", () => {
       this.playerRoomSource = null;
       this.playerRoomRangeSource = null;
       this.playerRoomHlsSource = null;
+      this.clearStoredWatchRoom();
       if (this.qrModalUrl) this.closeQrModal();
     },
 
     shouldPreserveWatchRoom() {
       return Boolean(this.connectorSettings?.pinnedWatchRoom && this.playerRoomId && this.playerRoomKey);
+    },
+
+    shouldResumeRestoredWatchRoom() {
+      return Boolean(this.playerRoomRestored && this.playerRoomId && this.playerRoomKey && this.playerSource);
+    },
+
+    saveStoredWatchRoom() {
+      try {
+        if (!this.playerRoomId || !this.playerRoomKeyText || !this.playerRoomLink) return;
+        localStorage.setItem(HOST_WATCH_ROOM_STORAGE_KEY, JSON.stringify({
+          version: 1,
+          savedAt: Date.now(),
+          expiresAt: Date.now() + HOST_WATCH_ROOM_TTL_MS,
+          roomId: this.playerRoomId,
+          roomKeyText: this.playerRoomKeyText,
+          roomLink: this.playerRoomLink,
+          sourceVersion: this.playerSourceVersion,
+          contentKey: this.playerRoomMetadata?.contentKey || this.playerSource?.contentKey || "",
+          title: this.playerRoomMetadata?.name || this.playerTitle || "",
+        }));
+      } catch {
+        // Host room recovery is best effort; sharing still works without storage.
+      }
+    },
+
+    clearStoredWatchRoom() {
+      try {
+        localStorage.removeItem(HOST_WATCH_ROOM_STORAGE_KEY);
+      } catch {
+        // Ignore storage failures.
+      }
+    },
+
+    async restoreStoredWatchRoom() {
+      try {
+        const raw = localStorage.getItem(HOST_WATCH_ROOM_STORAGE_KEY);
+        if (!raw || !hasWebCrypto()) return;
+        const stored = JSON.parse(raw);
+        if (!stored || Number(stored.expiresAt || 0) <= Date.now()) {
+          this.clearStoredWatchRoom();
+          return;
+        }
+        this.playerRoomId = String(stored.roomId || "");
+        this.playerRoomKeyText = String(stored.roomKeyText || "");
+        this.playerRoomLink = stored.roomLink || (this.playerRoomId && this.playerRoomKeyText
+          ? `${window.location.origin}/watch/${this.playerRoomId}#key=${this.playerRoomKeyText}`
+          : "");
+        if (!this.playerRoomId || !this.playerRoomKeyText || !this.playerRoomLink) {
+          this.clearStoredWatchRoom();
+          return;
+        }
+        this.playerRoomKey = await crypto.subtle.importKey(
+          "raw",
+          base64UrlDecode(this.playerRoomKeyText),
+          { name: "AES-GCM" },
+          true,
+          ["encrypt", "decrypt"],
+        );
+        this.playerSourceVersion = Number(stored.sourceVersion || 0);
+        this.restoredWatchRoomContentKey = String(stored.contentKey || "");
+        this.playerRoomRestored = true;
+        await this.renderPlayerRoomQr();
+        this.playerStatus = "Previous watch room restored. Load the same video, then resume this room from Share player.";
+      } catch {
+        this.clearStoredWatchRoom();
+        this.playerRoomId = "";
+        this.playerRoomKeyText = "";
+        this.playerRoomKey = null;
+        this.playerRoomLink = "";
+        this.playerRoomRestored = false;
+      }
     },
 
     async publishPinnedWatchRoomSourceChange(reason = "Host switched videos in this pinned room.") {
@@ -1882,9 +1995,27 @@ document.addEventListener("alpine:init", () => {
       video.muted = false;
       video.volume = this.mediaVolume;
       this.updateHostLinearPlaybackTime();
+      this.attachHostPlaybackProgress(video);
       this.attachHostXrPlayer(video);
       this.setHostAudioOutput();
       this.inspectHostPlayerAudio();
+    },
+
+    hostPlaybackMd5() {
+      return this.playerMd5 || this.playerRoomMetadata?.md5 || this.playerSource?.md5 || "";
+    },
+
+    attachHostPlaybackProgress(video) {
+      if (!window.FilePipePlaybackProgress || !video) return;
+      const trackerMd5 = this.hostPlaybackMd5();
+      if (this.hostProgressTracker) {
+        this.hostProgressTracker.refresh(trackerMd5);
+        return;
+      }
+      this.hostProgressTracker = window.FilePipePlaybackProgress.attach(video, {
+        md5: () => this.hostPlaybackMd5(),
+        name: () => this.playerTitle || this.playerRoomMetadata?.name || "",
+      });
     },
 
     hostProgressivePlaybackLocked() {
@@ -1921,7 +2052,60 @@ document.addEventListener("alpine:init", () => {
       this.hostXrPlayer = window.FilePipeXrPlayer.attach(video, {
         panelSelector: ".xr-side-panel",
         storageKey: "filePipeHostXrPlayer",
+        mediaInfo: () => this.playerSource?.mediaInfo || this.playerRoomMetadata?.mediaInfo || null,
+        onSpatialAudioPreference: () => this.ensureHostSpatialAudioSource(),
       });
+    },
+
+    async ensureHostSpatialAudioSource() {
+      const source = this.playerSource;
+      const launch = this.playerConnectorLaunch;
+      const mediaInfo = source?.mediaInfo || launch?.mediaInfo;
+      if (!mediaInfo || !mediaInfoSpatialAudioCandidate(mediaInfo)) return;
+      const profile = source?.playbackProfile || {};
+      if (
+        source?.spatialAudioReady
+        || source?.spatialAudioProfile === "spatial"
+        || profile.spatialAudioReady
+        || (profile.sourceKind === "original" && mediaInfoSpatialAudioReady(mediaInfo))
+      ) return;
+      if (!launch?.resource?.proxyPath || !launch?.item || mediaInfo.ffmpegAvailable === false) {
+        this.playerStatus = "Spatial audio needs a multichannel source or a connector spatial transcode.";
+        return;
+      }
+
+      const video = document.getElementById("host-video-player");
+      const restoreTime = Number(video?.currentTime || 0);
+      const wasPaused = !video || video.paused;
+      const playbackRate = Number(video?.playbackRate || 1);
+      const transcodeParts = launch.transcodeParts?.length ? launch.transcodeParts : ["audio to AAC"];
+      this.playerLoading = true;
+      try {
+        await this.launchFullTranscodedConnectorVideo(
+          launch.item,
+          launch.resource,
+          mediaInfo,
+          transcodeParts,
+          { audioProfile: "spatial" },
+        );
+        await this.publishPinnedWatchRoomSourceChange("Host switched this pinned room to a spatial audio source.");
+        const nextVideo = document.getElementById("host-video-player");
+        if (nextVideo) {
+          nextVideo.playbackRate = playbackRate;
+          const restorePlayback = () => {
+            seekVideoTo(nextVideo, restoreTime);
+            if (!wasPaused) playVideoWhenReady(nextVideo, 10000).catch(() => {});
+          };
+          if (nextVideo.readyState === HTMLMediaElement.HAVE_NOTHING) {
+            nextVideo.addEventListener("loadedmetadata", restorePlayback, { once: true });
+            nextVideo.load();
+          } else {
+            restorePlayback();
+          }
+        }
+      } finally {
+        this.playerLoading = false;
+      }
     },
 
     inspectHostPlayerAudio() {
@@ -1954,7 +2138,9 @@ document.addEventListener("alpine:init", () => {
       }
       if (mediaInfo?.defaultAudio && mediaInfo.audioPlayable) {
         const codec = mediaInfo.audioCodec ? mediaInfo.audioCodec.toUpperCase() : "audio";
-        this.playerAudioStatus = `Default audio uses ${codec}, which should be browser-playable.`;
+        const channels = Number(mediaInfo.audioChannels || mediaInfo.defaultAudio?.channels || 0);
+        const layout = mediaInfo.audioChannelLayout || (channels > 0 ? `${channels}ch` : "");
+        this.playerAudioStatus = `Default audio uses ${codec}${layout ? ` ${layout}` : ""}, which should be browser-playable.`;
         return;
       }
       if (mediaInfo?.ok && !mediaInfo.defaultAudio) {
@@ -2005,7 +2191,7 @@ document.addEventListener("alpine:init", () => {
       });
     },
 
-    async publishCurrentWatchRoomMetadata(label = "viewer acknowledgement", source = this.playerSource) {
+    async publishCurrentWatchRoomMetadata(label = "viewer acknowledgement", source = this.playerSource, options = {}) {
       if (!this.playerRoomId || !this.playerRoomKey || !source) {
         throw new Error("Create a watch room before publishing source metadata.");
       }
@@ -2031,7 +2217,11 @@ document.addEventListener("alpine:init", () => {
         : await this.getPlayerSourceChecksum(label, (progress) => {
             this.playerShareProgress = progress;
           }, source);
-      this.playerSourceVersion += 1;
+      if (options.preserveSourceVersion) {
+        this.playerSourceVersion = Math.max(1, Number(this.playerSourceVersion || 1));
+      } else {
+        this.playerSourceVersion += 1;
+      }
       this.playerRoomSource = source;
       const rangeProgressive = rangeSource?.progressiveTranscode ? {
         percent: Number(this.playerTranscodeAvailablePercent || 0),
@@ -2111,6 +2301,8 @@ document.addEventListener("alpine:init", () => {
         throw new Error(payload.error || `Could not publish room metadata: ${response.status}`);
       }
       this.playerMd5 = this.playerRoomMetadata.md5;
+      this.attachHostPlaybackProgress(document.getElementById("host-video-player"));
+      this.saveStoredWatchRoom();
       return this.playerRoomMetadata;
     },
 
@@ -2134,6 +2326,25 @@ document.addEventListener("alpine:init", () => {
       }
 
       this.error = "";
+      if (this.shouldResumeRestoredWatchRoom()) {
+        this.playerRoomCreating = true;
+        try {
+          if (this.restoredWatchRoomContentKey && this.playerSource.contentKey && this.playerSource.contentKey !== this.restoredWatchRoomContentKey) {
+            throw new Error("This restored watch room was created for a different video. Create a new watch link for the current source.");
+          }
+          this.playerStatus = "Resuming restored watch room...";
+          await this.publishCurrentWatchRoomMetadata("Host resumed this watch room.", this.playerSource, { preserveSourceVersion: true });
+          this.playerRoomRestored = false;
+          this.restoredWatchRoomContentKey = "";
+          this.playerStatus = "Watch room resumed. Viewers will reconnect and continue.";
+          if (!this.playerPollActive) this.pollWatchRoomParticipants();
+        } catch (error) {
+          this.error = error.message;
+        } finally {
+          this.playerRoomCreating = false;
+        }
+        return;
+      }
       if (this.shouldPreserveWatchRoom()) {
         this.playerRoomCreating = true;
         try {
@@ -2167,6 +2378,8 @@ document.addEventListener("alpine:init", () => {
 
         this.playerRoomId = created.roomId;
         this.playerRoomLink = `${window.location.origin}/watch/${created.roomId}#key=${this.playerRoomKeyText}`;
+        this.playerRoomRestored = false;
+        this.saveStoredWatchRoom();
         await this.renderPlayerRoomQr();
         this.playerStatus = "Watch room link ready. Publishing stream metadata...";
         await this.publishCurrentWatchRoomMetadata("viewer acknowledgement");
@@ -2196,6 +2409,18 @@ document.addEventListener("alpine:init", () => {
       this.playerStatus = "Preparing live stream watch link...";
       try {
         const liveSource = await this.liveWatchSourceForCurrentPlayer();
+        if (this.shouldResumeRestoredWatchRoom()) {
+          if (this.restoredWatchRoomContentKey && liveSource.contentKey && liveSource.contentKey !== this.restoredWatchRoomContentKey) {
+            throw new Error("This restored watch room was created for a different video. Create a new watch link for the current source.");
+          }
+          this.playerStatus = "Resuming restored live watch room...";
+          await this.publishCurrentWatchRoomMetadata("Host resumed this live watch room.", liveSource, { preserveSourceVersion: true });
+          this.playerRoomRestored = false;
+          this.restoredWatchRoomContentKey = "";
+          this.playerStatus = "Live watch room resumed. Viewers will reconnect and continue.";
+          if (!this.playerPollActive) this.pollWatchRoomParticipants();
+          return;
+        }
         if (this.shouldPreserveWatchRoom()) {
           await this.publishCurrentWatchRoomMetadata("Host updated this pinned stream room.", liveSource);
           for (const peer of this.connectedWatchPeers()) {
@@ -2232,6 +2457,8 @@ document.addEventListener("alpine:init", () => {
 
         this.playerRoomId = created.roomId;
         this.playerRoomLink = `${window.location.origin}/watch/${created.roomId}#key=${this.playerRoomKeyText}`;
+        this.playerRoomRestored = false;
+        this.saveStoredWatchRoom();
         await this.renderPlayerRoomQr();
         this.playerShareProgress = 100;
         this.playerStatus = "Live stream link ready. Publishing segment metadata...";
@@ -2434,6 +2661,7 @@ document.addEventListener("alpine:init", () => {
       const start = Math.max(0, Number(message.start || 0));
       const end = Math.min(totalSize - 1, Number(message.end ?? totalSize - 1));
       const requestId = message.requestId;
+      const prefetch = Boolean(message.prefetch);
       const chunkSize = RANGE_STREAM_CHUNK_SIZE;
       try {
         transfer.cancelledRanges.delete(requestId);
@@ -2453,6 +2681,7 @@ document.addEventListener("alpine:init", () => {
             start: offset,
             end: nextEnd,
             iv: base64UrlEncode(iv),
+            prefetch,
           }, ciphertext)) throw dataChannelDisconnectedError();
           if (!(await waitForDataChannelBuffer(channel))) throw dataChannelDisconnectedError();
           if (shouldUpdateChannelUi(transfer)) {
@@ -2461,7 +2690,7 @@ document.addEventListener("alpine:init", () => {
           }
         }
         if (!transfer.cancelledRanges.has(requestId)) {
-          if (!sendChannelJson(channel, { type: "range-done", requestId })) throw dataChannelDisconnectedError();
+          if (!sendChannelJson(channel, { type: "range-done", requestId, prefetch })) throw dataChannelDisconnectedError();
         }
         transfer.cancelledRanges.delete(requestId);
       } catch (error) {
@@ -2473,6 +2702,7 @@ document.addEventListener("alpine:init", () => {
             type: "range-error",
             requestId,
             error: error.message,
+            prefetch,
           });
         }
       }
@@ -2870,6 +3100,7 @@ document.addEventListener("alpine:init", () => {
       const source = this.playerRoomHlsSource || (this.playerRoomSource?.readHlsSegment ? this.playerRoomSource : null);
       const requestId = message.requestId;
       const segmentIndex = Math.max(0, Number(message.segmentIndex || 0));
+      const prefetch = Boolean(message.prefetch);
       const chunkSize = RANGE_STREAM_CHUNK_SIZE;
       let sentBytes = 0;
       try {
@@ -2893,6 +3124,7 @@ document.addEventListener("alpine:init", () => {
             offset,
             sourceVersion,
             iv: base64UrlEncode(iv),
+            prefetch,
           }, ciphertext)) throw dataChannelDisconnectedError();
           if (!(await waitForDataChannelBuffer(channel))) throw dataChannelDisconnectedError();
           sentBytes += plainChunk.byteLength;
@@ -2909,6 +3141,7 @@ document.addEventListener("alpine:init", () => {
             sourceVersion,
             sentBytes,
             contentType: segment.contentType || "video/mp2t",
+            prefetch,
           })) throw dataChannelDisconnectedError();
         }
       } catch (error) {
@@ -2925,6 +3158,7 @@ document.addEventListener("alpine:init", () => {
             segmentIndex,
             sourceVersion,
             error: error.message,
+            prefetch,
           });
         }
       } finally {
@@ -2970,6 +3204,7 @@ document.addEventListener("alpine:init", () => {
       const start = Math.max(0, Number(message.start || 0));
       const end = Math.min(totalSize - 1, Number(message.end ?? totalSize - 1));
       const requestId = message.requestId;
+      const prefetch = Boolean(message.prefetch);
       const chunkSize = RANGE_STREAM_CHUNK_SIZE;
       const rangeMd5 = new SparkMD5.ArrayBuffer();
       let sentBytes = 0;
@@ -3004,6 +3239,7 @@ document.addEventListener("alpine:init", () => {
             end: nextEnd,
             sourceVersion,
             iv: base64UrlEncode(iv),
+            prefetch,
           }, ciphertext)) throw dataChannelDisconnectedError();
           if (!(await waitForDataChannelBuffer(channel))) throw dataChannelDisconnectedError();
           sentBytes += plainChunk.byteLength;
@@ -3019,6 +3255,7 @@ document.addEventListener("alpine:init", () => {
             sourceVersion,
             md5: rangeMd5.end(),
             sentBytes,
+            prefetch,
           })) throw dataChannelDisconnectedError();
         }
       } catch (error) {
@@ -3034,6 +3271,7 @@ document.addEventListener("alpine:init", () => {
             requestId,
             sourceVersion,
             error: error.message,
+            prefetch,
           });
         }
       } finally {
@@ -3801,6 +4039,16 @@ function base64UrlEncode(bytes) {
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
 }
 
+function base64UrlDecode(value) {
+  const padded = value.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
+  const binary = atob(padded);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
+}
+
 function contentTypeFromProtocol(protocolInfo) {
   const parts = (protocolInfo || "").split(":");
   return parts.length >= 3 && parts[2] ? parts[2] : "application/octet-stream";
@@ -4031,21 +4279,32 @@ function mediaPlaybackDecisionForCapabilities(mediaInfo, contentType = "", capab
 function playbackProfileFromMediaInfo(mediaInfo, contentType = "", sourceKind = "original") {
   const videoCodec = codecName(mediaInfo?.videoCodec);
   const audioCodec = codecName(mediaInfo?.audioCodec);
+  const audioChannels = Number(mediaInfo?.audioChannels || mediaInfo?.defaultAudio?.channels || 0);
   return {
     sourceKind,
     containerType: contentType || "application/octet-stream",
     videoCodec,
     audioCodec,
+    audioChannels,
+    audioChannelLayout: mediaInfo?.audioChannelLayout || mediaInfo?.defaultAudio?.channel_layout || "",
+    audioChannelLabels: Array.isArray(mediaInfo?.audioChannelLabels) ? mediaInfo.audioChannelLabels : [],
+    spatialAudioReady: mediaInfoSpatialAudioReady(mediaInfo),
     universal: sourceKind === "stable-mp4" || (videoCodec === "h264" && ["", "aac", "mp3"].includes(audioCodec) && isMp4LikeContentType(contentType)),
   };
 }
 
-function stableMp4PlaybackProfile(mediaInfo) {
+function stableMp4PlaybackProfile(mediaInfo, audioProfile = "stereo") {
+  const spatial = audioProfile === "spatial";
+  const sourceChannels = Number(mediaInfo?.audioChannels || mediaInfo?.defaultAudio?.channels || 0);
   return {
     sourceKind: "stable-mp4",
     containerType: "video/mp4",
     videoCodec: "h264",
     audioCodec: mediaInfo?.defaultAudio ? "aac" : "",
+    audioChannels: spatial ? sourceChannels : Math.min(2, sourceChannels || 2),
+    audioChannelLayout: spatial ? (mediaInfo?.audioChannelLayout || mediaInfo?.defaultAudio?.channel_layout || "") : "stereo",
+    audioChannelLabels: spatial && Array.isArray(mediaInfo?.audioChannelLabels) ? mediaInfo.audioChannelLabels : ["L", "R"],
+    spatialAudioReady: spatial,
     universal: true,
   };
 }
@@ -4059,9 +4318,15 @@ function mediaInfoSummary(mediaInfo) {
     audioPlayable: Boolean(mediaInfo.audioPlayable),
     videoPlayable: Boolean(mediaInfo.videoPlayable),
     shouldTranscode: Boolean(mediaInfo.shouldTranscode),
+    audioChannels: Number(mediaInfo.audioChannels || mediaInfo.defaultAudio?.channels || 0),
+    audioChannelLayout: mediaInfo.audioChannelLayout || mediaInfo.defaultAudio?.channel_layout || "",
+    audioChannelLabels: Array.isArray(mediaInfo.audioChannelLabels) ? mediaInfo.audioChannelLabels : [],
+    spatialAudioCandidate: Boolean(mediaInfo.spatialAudioCandidate || mediaInfoSpatialAudioCandidate(mediaInfo)),
     defaultAudio: mediaInfo.defaultAudio ? {
       codec_name: mediaInfo.defaultAudio.codec_name,
       profile: mediaInfo.defaultAudio.profile,
+      channels: mediaInfo.defaultAudio.channels,
+      channel_layout: mediaInfo.defaultAudio.channel_layout,
     } : null,
     defaultVideo: mediaInfo.defaultVideo ? {
       codec_name: mediaInfo.defaultVideo.codec_name,
@@ -4071,6 +4336,17 @@ function mediaInfoSummary(mediaInfo) {
       height: mediaInfo.defaultVideo.height,
     } : null,
   };
+}
+
+function mediaInfoSpatialAudioCandidate(mediaInfo) {
+  const channels = Number(mediaInfo?.audioChannels || mediaInfo?.defaultAudio?.channels || 0);
+  return channels > 2;
+}
+
+function mediaInfoSpatialAudioReady(mediaInfo) {
+  if (!mediaInfoSpatialAudioCandidate(mediaInfo)) return false;
+  const codec = codecName(mediaInfo?.audioCodec || mediaInfo?.defaultAudio?.codec_name);
+  return Boolean(mediaInfo?.audioPlayable) && ["aac", "opus", "flac", "alac"].includes(codec);
 }
 
 function canCapabilitiesPlayProfile(capabilities, profile) {

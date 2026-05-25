@@ -1,5 +1,7 @@
 const WATCH_SESSION_TTL_MS = 8 * 60 * 60 * 1000;
 const WATCH_SESSION_STORAGE_PREFIX = "filePipeWatchSession:";
+const WATCH_RECONNECT_BASE_DELAY_MS = 1500;
+const WATCH_RECONNECT_MAX_DELAY_MS = 30000;
 
 document.addEventListener("alpine:init", () => {
   Alpine.data("watchRoom", (roomId) => ({
@@ -34,6 +36,7 @@ document.addEventListener("alpine:init", () => {
     videoUrl: "",
     viewerHls: null,
     viewerXrPlayer: null,
+    viewerProgressTracker: null,
     viewerProgressiveMse: null,
     streamingReady: false,
     rangePlayerPromoted: false,
@@ -49,6 +52,8 @@ document.addEventListener("alpine:init", () => {
     networkOnline: navigator.onLine,
     recoveryStatus: "",
     reconnecting: false,
+    reconnectRetryTimer: null,
+    reconnectRetryDelayMs: WATCH_RECONNECT_BASE_DELAY_MS,
     voiceEnabled: false,
     audioInputs: [],
     audioOutputs: [],
@@ -73,6 +78,7 @@ document.addEventListener("alpine:init", () => {
     pendingRangeBytes: {},
     pendingHlsBytes: {},
     pendingSegmentSync: null,
+    mediaPrefetchStatus: "",
     viewerSeekControlTimer: null,
     error: "",
 
@@ -381,6 +387,7 @@ document.addEventListener("alpine:init", () => {
       this.teardownViewerHlsPlayer();
       this.teardownViewerProgressiveMsePlayer();
       this.detachViewerXrPlayer();
+      this.detachViewerPlaybackProgress();
       const video = document.getElementById("viewer-video-player");
       if (video) {
         video.pause();
@@ -426,8 +433,8 @@ document.addEventListener("alpine:init", () => {
       }
     },
 
-    async waitForOfferAndAnswer() {
-      for (let attempt = 0; attempt < 300; attempt += 1) {
+    async waitForOfferAndAnswer(maxAttempts = 300) {
+      for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
         const participant = await this.appJson(`/api/watch/rooms/${this.roomId}/participants/${this.participantId}`);
         if (participant.kicked) {
           this.clearStoredWatchSession();
@@ -454,30 +461,41 @@ document.addEventListener("alpine:init", () => {
         this.channel.binaryType = "arraybuffer";
         this.channel.onopen = () => {
           this.channelReady = true;
+          this.reconnectRetryDelayMs = WATCH_RECONNECT_BASE_DELAY_MS;
+          this.clearReconnectRetry();
           this.status = "Connected. Confirm the acknowledgement to receive video.";
+          this.recoveryStatus = "";
           this.clearPendingVideoReconnect();
           this.logWatchEvent("channel-open", "Data channel opened.");
           this.publishViewerVoiceState("channel-open");
           this.publishViewerMediaCapabilities("channel-open");
           if (this.pendingVideoRequest) {
             this.requestVideo();
+          } else if (this.videoUrl && this.streamingReady) {
+            this.notifyViewerPlayerReady();
+            this.applyPendingPlaybackState(250);
+            setTimeout(() => this.startMediaPrefetch(this.playbackMetadata()), 1500);
           }
         };
         this.channelMessageQueue = Promise.resolve();
         this.channel.onmessage = (eventMessage) => this.queueChannelMessage(eventMessage);
         this.channel.onclose = () => {
+          if (this.reconnecting) return;
           this.channelReady = false;
-          this.status = "Host disconnected. Requesting a fresh peer connection...";
+          this.status = "Host disconnected. Waiting for the host to return...";
+          this.recoveryStatus = "Host connection lost. Playback can continue from cached data; sync will resume when the host reconnects.";
           this.logWatchEvent("channel-close", "Data channel closed.");
-          setTimeout(() => this.reconnectToHost({ preservePendingRequest: this.pendingVideoRequest }), 1500);
+          this.scheduleReconnectToHost({ preservePendingRequest: this.pendingVideoRequest || Boolean(this.videoUrl) });
         };
       };
       this.peer.onconnectionstatechange = () => {
         this.logWatchEvent("peer-state", this.peer.connectionState);
+        if (this.reconnecting) return;
         if (["failed", "disconnected"].includes(this.peer.connectionState)) {
           this.channelReady = false;
-          this.status = "Peer connection interrupted. Requesting recovery...";
-          setTimeout(() => this.reconnectToHost({ preservePendingRequest: this.pendingVideoRequest }), 1500);
+          this.status = "Peer connection interrupted. Waiting for the host to return...";
+          this.recoveryStatus = "Peer connection interrupted. Playback can continue from cached data; sync will resume when the host reconnects.";
+          this.scheduleReconnectToHost({ preservePendingRequest: this.pendingVideoRequest || Boolean(this.videoUrl) });
         }
       };
       this.peer.ontrack = (event) => this.handleViewerRemoteVoice(event);
@@ -517,6 +535,7 @@ document.addEventListener("alpine:init", () => {
         if (!this.participantId) await this.loadRoom();
         return;
       }
+      this.clearReconnectRetry();
       this.reconnecting = true;
       this.error = "";
       this.logWatchEvent("reconnect-start", options.preservePendingRequest ? "Preserving queued video request." : "");
@@ -542,11 +561,23 @@ document.addEventListener("alpine:init", () => {
           throw reconnectError;
         }
         this.status = "Reconnect requested. Waiting for host offer...";
-        await this.waitForOfferAndAnswer();
+        await this.waitForOfferAndAnswer(45);
         this.recoveryStatus = "Reconnected to signaling. Waiting for peer connection.";
         this.logWatchEvent("reconnect-complete", "Fresh answer published.");
         if (this.pendingVideoRequest) this.schedulePendingVideoReconnect();
       } catch (error) {
+        if (error.status === 410) {
+          this.clearStoredWatchSession();
+          this.participantId = "";
+          this.channelReady = false;
+          this.pendingVideoRequest = false;
+          this.clearPendingVideoReconnect();
+          this.clearReconnectRetry();
+          this.status = "The host removed you from this watch room.";
+          this.error = this.status;
+          this.logWatchEvent("reconnect-removed", error.message);
+          return;
+        }
         if (options.restoringSession && [404, 410].includes(error.status)) {
           this.clearStoredWatchSession();
           this.participantId = "";
@@ -560,11 +591,31 @@ document.addEventListener("alpine:init", () => {
           this.logWatchEvent("session-restore-missing", error.message);
           return;
         }
-        this.error = error.message;
+        this.error = "";
+        this.recoveryStatus = `Waiting for host to return. Last reconnect attempt: ${error.message}`;
         this.logWatchEvent("reconnect-error", error.message);
+        this.scheduleReconnectToHost({
+          preservePendingRequest: options.preservePendingRequest || this.pendingVideoRequest || Boolean(this.videoUrl),
+        });
       } finally {
         this.reconnecting = false;
       }
+    },
+
+    scheduleReconnectToHost(options = {}) {
+      if (!this.participantId || this.reconnectRetryTimer) return;
+      const delay = this.reconnectRetryDelayMs || WATCH_RECONNECT_BASE_DELAY_MS;
+      this.reconnectRetryDelayMs = Math.min(delay * 1.6, WATCH_RECONNECT_MAX_DELAY_MS);
+      this.reconnectRetryTimer = setTimeout(() => {
+        this.reconnectRetryTimer = null;
+        this.reconnectToHost(options);
+      }, delay);
+    },
+
+    clearReconnectRetry() {
+      if (!this.reconnectRetryTimer) return;
+      clearTimeout(this.reconnectRetryTimer);
+      this.reconnectRetryTimer = null;
     },
 
     async refreshAudioDevices() {
@@ -983,9 +1034,28 @@ document.addEventListener("alpine:init", () => {
       if (!video) return;
       video.muted = false;
       video.volume = this.mediaVolume;
+      this.attachViewerPlaybackProgress(video);
       this.attachViewerXrPlayer(video);
       this.setViewerAudioOutput();
       this.inspectViewerVideoAudio();
+    },
+
+    viewerPlaybackMd5() {
+      const metadata = this.playbackMetadata() || this.metadata || {};
+      return metadata.md5 || this.verifiedMd5 || "";
+    },
+
+    attachViewerPlaybackProgress(video) {
+      if (!window.FilePipePlaybackProgress || !video) return;
+      const trackerMd5 = this.viewerPlaybackMd5();
+      if (this.viewerProgressTracker) {
+        this.viewerProgressTracker.refresh(trackerMd5);
+        return;
+      }
+      this.viewerProgressTracker = window.FilePipePlaybackProgress.attach(video, {
+        md5: () => this.viewerPlaybackMd5(),
+        name: () => this.playbackMetadata()?.name || this.metadata?.name || "",
+      });
     },
 
     attachViewerHlsPlayer(video = document.getElementById("viewer-video-player")) {
@@ -1059,6 +1129,7 @@ document.addEventListener("alpine:init", () => {
       this.viewerXrPlayer = window.FilePipeXrPlayer.attach(video, {
         panelSelector: ".xr-side-panel",
         storageKey: "filePipeViewerXrPlayer",
+        mediaInfo: () => this.playbackMetadata()?.mediaInfo || this.metadata?.mediaInfo || null,
       });
     },
 
@@ -1066,6 +1137,12 @@ document.addEventListener("alpine:init", () => {
       if (!this.viewerXrPlayer) return;
       this.viewerXrPlayer.dispose();
       this.viewerXrPlayer = null;
+    },
+
+    detachViewerPlaybackProgress() {
+      if (!this.viewerProgressTracker) return;
+      this.viewerProgressTracker.detach();
+      this.viewerProgressTracker = null;
     },
 
     isHlsStream() {
@@ -1184,6 +1261,7 @@ document.addEventListener("alpine:init", () => {
         this.logWatchEvent(hlsStream ? "hls-player-ready" : "range-player-ready", "Service worker player is ready.");
         this.notifyViewerPlayerReady();
         this.applyPendingPlaybackState(250);
+        setTimeout(() => this.startMediaPrefetch(playbackMetadata), 2500);
       } catch (error) {
         this.error = serviceWorkerSetupMessage(error);
         this.receiving = false;
@@ -1247,7 +1325,7 @@ document.addEventListener("alpine:init", () => {
     },
 
     async registerServiceWorker() {
-      const registration = await navigator.serviceWorker.register("/bigscreen-sw.js?v=9", { scope: "/" });
+      const registration = await navigator.serviceWorker.register("/bigscreen-sw.js?v=10", { scope: "/" });
       await navigator.serviceWorker.ready;
       if (!navigator.serviceWorker.controller) {
         await new Promise((resolve) => {
@@ -1274,7 +1352,49 @@ document.addEventListener("alpine:init", () => {
           type: "range-cancel",
           requestId: message.requestId,
         });
+      } else if (message.type === "prefetch-progress") {
+        this.mediaPrefetchStatus = `Cached ${message.percent || 0}% for smooth scrubbing.`;
+      } else if (message.type === "prefetch-complete") {
+        this.mediaPrefetchStatus = "Video cached locally for smooth scrubbing.";
+      } else if (message.type === "prefetch-error") {
+        this.mediaPrefetchStatus = message.error || "Background video cache paused.";
       }
+    },
+
+    startMediaPrefetch(playbackMetadata) {
+      if (!navigator.serviceWorker?.controller || !playbackMetadata) return;
+      const metadata = plainData(playbackMetadata);
+      const hlsStream = this.isHlsStream() || isHlsPlaybackMetadata(metadata);
+      if (hlsStream) {
+        const hls = metadata.hls || {};
+        const duration = Math.max(0, Number(hls.duration || 0));
+        const segmentDuration = Math.max(1, Number(hls.segmentDuration || 8));
+        const segmentCount = Math.max(1, Number(hls.segmentCount || Math.ceil(duration / segmentDuration) || 1));
+        navigator.serviceWorker.controller.postMessage({
+          type: "prefetch-hls-segments",
+          mediaKind: "watch",
+          sessionId: this.roomId,
+          metadata,
+          startIndex: 0,
+          endIndex: segmentCount - 1,
+          sourceVersion: metadata.sourceVersion || this.sourceVersion || 0,
+        });
+        this.mediaPrefetchStatus = "Caching stream segments for smooth scrubbing.";
+        return;
+      }
+      const totalSize = Number(metadata.size || metadata.availableModes?.range?.size || 0);
+      if (!totalSize) return;
+      navigator.serviceWorker.controller.postMessage({
+        type: "prefetch-range",
+        mediaKind: "watch",
+        sessionId: this.roomId,
+        metadata,
+        start: 0,
+        end: totalSize - 1,
+        chunkSize: 512 * 1024,
+        sourceVersion: metadata.sourceVersion || this.sourceVersion || 0,
+      });
+      this.mediaPrefetchStatus = "Caching video locally for smooth scrubbing.";
     },
 
     sendHlsSegmentRequest(message) {
@@ -1292,6 +1412,7 @@ document.addEventListener("alpine:init", () => {
         requestId: message.requestId,
         segmentIndex: message.segmentIndex,
         sourceVersion: this.sourceVersion,
+        prefetch: Boolean(message.prefetch),
       })) {
         this.postWorkerMessage({
           type: "range-error",
@@ -1319,6 +1440,7 @@ document.addEventListener("alpine:init", () => {
         end: message.end,
         linear: Boolean(message.linear),
         sourceVersion: this.sourceVersion,
+        prefetch: Boolean(message.prefetch),
       })) {
         this.postWorkerMessage({
           type: "range-error",
@@ -1411,12 +1533,13 @@ document.addEventListener("alpine:init", () => {
         const message = await readChannelMessage(event.data);
         if (message.type === "hls-chunk") {
           if (message.sourceVersion && Number(message.sourceVersion) !== this.sourceVersion) return;
+          const isPrefetch = Boolean(message.prefetch);
           const ciphertext = message.binary || base64UrlDecode(message.data || "");
           const plaintext = exactArrayBuffer(await this.decryptPayload(message.iv, ciphertext));
           const workerBytes = plaintext.slice(0);
           this.pendingHlsBytes[message.requestId] = (this.pendingHlsBytes[message.requestId] || 0) + plaintext.byteLength;
           this.receivedBytes += plaintext.byteLength;
-          if (shouldUpdateChannelUi(this)) {
+          if (!isPrefetch && shouldUpdateChannelUi(this)) {
             this.status = `Buffered live segment ${Number(message.segmentIndex || 0) + 1}.`;
             this.updateViewerPlaybackBuffer();
           }
@@ -1456,13 +1579,14 @@ document.addEventListener("alpine:init", () => {
         }
         if (message.type === "range-chunk") {
           if (message.sourceVersion && Number(message.sourceVersion) !== this.sourceVersion) return;
+          const isPrefetch = Boolean(message.prefetch);
           const ciphertext = message.binary || base64UrlDecode(message.data);
           const plaintext = exactArrayBuffer(await this.decryptPayload(message.iv, ciphertext));
           const rangeMd5 = this.pendingRangeMd5[message.requestId];
           if (rangeMd5) rangeMd5.append(plaintext);
           this.pendingRangeBytes[message.requestId] = (this.pendingRangeBytes[message.requestId] || 0) + plaintext.byteLength;
           this.receivedBytes += plaintext.byteLength;
-          if (shouldUpdateChannelUi(this)) {
+          if (!isPrefetch && shouldUpdateChannelUi(this)) {
             this.status = `Buffered encrypted range ${formatByteOffset(message.start)}-${formatByteOffset(message.end)}.`;
             this.updateViewerPlaybackBuffer();
           }
@@ -1583,6 +1707,7 @@ document.addEventListener("alpine:init", () => {
           this.teardownViewerHlsPlayer();
           this.teardownViewerProgressiveMsePlayer();
           this.detachViewerXrPlayer();
+          this.detachViewerPlaybackProgress();
           this.receivedParts = [];
           this.receivedBytes = 0;
           this.verifiedMd5 = "";
@@ -1691,6 +1816,7 @@ document.addEventListener("alpine:init", () => {
       this.teardownViewerHlsPlayer();
       this.teardownViewerProgressiveMsePlayer();
       this.detachViewerXrPlayer();
+      this.detachViewerPlaybackProgress();
       const video = document.getElementById("viewer-video-player");
       if (video) {
         video.pause();
@@ -2579,6 +2705,12 @@ function createVoiceActivityMeter(stream, onLevel, onError) {
 
 function plainData(value) {
   return JSON.parse(JSON.stringify(value));
+}
+
+function isHlsPlaybackMetadata(metadata) {
+  return metadata?.streamMode === "hls"
+    || metadata?.playbackProfile?.sourceKind === "hls-live"
+    || String(metadata?.type || "").toLowerCase().includes("mpegurl");
 }
 
 function serviceWorkerSetupMessage(error) {

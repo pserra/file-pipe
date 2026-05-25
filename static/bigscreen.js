@@ -10,6 +10,7 @@ document.addEventListener("alpine:init", () => {
     acknowledgementAccepted: false,
     playerStarted: false,
     xrPlayer: null,
+    progressTracker: null,
     status: "Loading Bigscreen link...",
     error: "",
 
@@ -116,6 +117,7 @@ document.addEventListener("alpine:init", () => {
         this.playerStarted = true;
         await this.$nextTick();
         const video = document.getElementById("bigscreen-video");
+        this.attachPlaybackProgress(video);
         this.attachXrPlayer(video);
         const fileName = encodeURIComponent(this.metadata.name || "video");
         video.src = `/bigscreen-media/${this.sessionId}/${fileName}`;
@@ -135,11 +137,24 @@ document.addEventListener("alpine:init", () => {
       this.xrPlayer = window.FilePipeXrPlayer.attach(video, {
         fill: true,
         storageKey: "filePipeBigscreenXrPlayer",
+        mediaInfo: () => this.metadata?.mediaInfo || null,
+      });
+    },
+
+    attachPlaybackProgress(video) {
+      if (!window.FilePipePlaybackProgress || !video) return;
+      if (this.progressTracker) {
+        this.progressTracker.refresh(this.metadata?.md5 || "");
+        return;
+      }
+      this.progressTracker = window.FilePipePlaybackProgress.attach(video, {
+        md5: () => this.metadata?.md5 || "",
+        name: () => this.metadata?.name || "",
       });
     },
 
     async registerServiceWorker() {
-      const registration = await navigator.serviceWorker.register("/bigscreen-sw.js?v=9", { scope: "/" });
+      const registration = await navigator.serviceWorker.register("/bigscreen-sw.js?v=10", { scope: "/" });
       await navigator.serviceWorker.ready;
       if (!navigator.serviceWorker.controller) {
         await new Promise((resolve) => {
@@ -180,6 +195,7 @@ document.addEventListener("alpine:init", () => {
         requestId: message.requestId,
         start: message.start,
         end: message.end,
+        prefetch: Boolean(message.prefetch),
       })) {
         this.postWorkerMessage({
           type: "range-error",

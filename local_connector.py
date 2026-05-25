@@ -213,6 +213,9 @@ READ_AHEAD_MAX_BYTES = int(os.environ.get("FILE_PIPE_READ_AHEAD_MAX_BYTES", str(
 READ_AHEAD_MIN_TRIGGER_BYTES = int(os.environ.get("FILE_PIPE_READ_AHEAD_MIN_TRIGGER_BYTES", str(512 * 1024)))
 READ_AHEAD_SEQUENTIAL_GAP_BYTES = int(os.environ.get("FILE_PIPE_READ_AHEAD_SEQUENTIAL_GAP_BYTES", str(1024 * 1024)))
 TRANSCODE_CACHE_VERSION = "v5"
+TRANSCODE_AUDIO_PROFILE_STEREO = "stereo"
+TRANSCODE_AUDIO_PROFILE_SPATIAL = "spatial"
+TRANSCODE_AUDIO_PROFILES = {TRANSCODE_AUDIO_PROFILE_STEREO, TRANSCODE_AUDIO_PROFILE_SPATIAL}
 TRANSCODE_CACHE_DIR = Path(os.environ.get("FILE_PIPE_TRANSCODE_CACHE_DIR", "instance/transcodes"))
 HLS_SEGMENT_SECONDS = int(os.environ.get("FILE_PIPE_HLS_SEGMENT_SECONDS", "6"))
 HLS_PREFETCH_SEGMENTS = int(os.environ.get("FILE_PIPE_HLS_PREFETCH_SEGMENTS", "4"))
@@ -990,6 +993,78 @@ def cached_probe_media(url: str) -> Dict[str, object]:
     return media_info
 
 
+def normalize_transcode_audio_profile(value: object) -> str:
+    profile = str(value or "").strip().lower().replace("_", "-")
+    if profile in {"1", "true", "yes", "on", "spatial", "surround", "multichannel", "multi-channel", "immersive"}:
+        return TRANSCODE_AUDIO_PROFILE_SPATIAL
+    return TRANSCODE_AUDIO_PROFILE_STEREO
+
+
+def request_transcode_audio_profile() -> str:
+    return normalize_transcode_audio_profile(
+        request.args.get("audio_profile")
+        or request.args.get("audioProfile")
+        or request.args.get("spatial_audio")
+        or request.args.get("spatialAudio")
+    )
+
+
+def transcode_progress_key(resource_id: str, audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO) -> str:
+    profile = normalize_transcode_audio_profile(audio_profile)
+    if profile == TRANSCODE_AUDIO_PROFILE_STEREO:
+        return resource_id
+    return f"{resource_id}:{profile}"
+
+
+def media_audio_channels(audio_stream: Optional[Dict[str, object]]) -> int:
+    if not audio_stream:
+        return 0
+    return parse_int(audio_stream.get("channels")) or 0
+
+
+def media_audio_channel_layout(audio_stream: Optional[Dict[str, object]]) -> str:
+    if not audio_stream:
+        return ""
+    return str(audio_stream.get("channel_layout") or "").strip()
+
+
+def audio_channel_labels(channels: int, layout: str = "") -> List[str]:
+    normalized = layout.strip().lower().replace(" ", "")
+    known_layouts = {
+        "mono": ["C"],
+        "stereo": ["L", "R"],
+        "2.1": ["L", "R", "LFE"],
+        "3.0": ["L", "R", "C"],
+        "3.0(back)": ["L", "R", "BC"],
+        "3.1": ["L", "R", "C", "LFE"],
+        "4.0": ["L", "R", "C", "BC"],
+        "quad": ["L", "R", "BL", "BR"],
+        "quad(side)": ["L", "R", "SL", "SR"],
+        "4.1": ["L", "R", "C", "LFE", "BC"],
+        "5.0": ["L", "R", "C", "SL", "SR"],
+        "5.0(side)": ["L", "R", "C", "SL", "SR"],
+        "5.1": ["L", "R", "C", "LFE", "SL", "SR"],
+        "5.1(side)": ["L", "R", "C", "LFE", "SL", "SR"],
+        "6.1": ["L", "R", "C", "LFE", "BC", "SL", "SR"],
+        "7.1": ["L", "R", "C", "LFE", "BL", "BR", "SL", "SR"],
+        "7.1(wide)": ["L", "R", "C", "LFE", "BL", "BR", "FLC", "FRC"],
+    }
+    labels = known_layouts.get(normalized)
+    if labels:
+        return labels[:channels] if channels else labels
+    fallback = ["L", "R", "C", "LFE", "SL", "SR", "BL", "BR"]
+    if channels <= 0:
+        return []
+    if channels <= len(fallback):
+        return fallback[:channels]
+    return [*fallback, *[f"CH{index + 1}" for index in range(len(fallback), channels)]]
+
+
+def spatial_audio_candidate(media_info: Dict[str, object]) -> bool:
+    channels = parse_int(media_info.get("audioChannels")) or media_audio_channels(media_info.get("defaultAudio") or {})
+    return channels > 2
+
+
 def probe_media(url: str) -> Dict[str, object]:
     ffprobe_path = find_media_tool("ffprobe")
     ffmpeg_available = bool(find_media_tool("ffmpeg"))
@@ -1006,7 +1081,7 @@ def probe_media(url: str) -> Dict[str, object]:
         "-v",
         "error",
         "-show_entries",
-        "stream=index,codec_type,codec_name,profile,pix_fmt,width,height,level,disposition:stream_tags=language,title:format=duration,size",
+        "stream=index,codec_type,codec_name,profile,pix_fmt,width,height,level,channels,channel_layout,disposition:stream_tags=language,title:format=duration,size",
         "-of",
         "json",
         url,
@@ -1034,17 +1109,23 @@ def probe_media(url: str) -> Dict[str, object]:
     default_video = video_streams[0] if video_streams else None
     audio_codec = (default_audio or {}).get("codec_name") or ""
     video_codec = (default_video or {}).get("codec_name") or ""
+    audio_channels = media_audio_channels(default_audio)
+    audio_channel_layout = media_audio_channel_layout(default_audio)
+    channel_labels = audio_channel_labels(audio_channels, audio_channel_layout)
     audio_playable = not default_audio or audio_codec in PLAYABLE_BROWSER_AUDIO_CODECS
     video_playable = is_browser_video_compatible(default_video)
     should_transcode = bool((default_audio and not audio_playable) or (default_video and not video_playable))
 
-    return {
+    media_info = {
         "ok": True,
         "ffprobeAvailable": True,
         "ffmpegAvailable": ffmpeg_available,
         "defaultAudio": default_audio,
         "defaultVideo": default_video,
         "audioCodec": audio_codec,
+        "audioChannels": audio_channels,
+        "audioChannelLayout": audio_channel_layout,
+        "audioChannelLabels": channel_labels,
         "videoCodec": video_codec,
         "audioPlayable": audio_playable,
         "videoPlayable": video_playable,
@@ -1054,6 +1135,8 @@ def probe_media(url: str) -> Dict[str, object]:
         "playableAudioCodecs": sorted(PLAYABLE_BROWSER_AUDIO_CODECS),
         "playableVideoCodecs": sorted(PLAYABLE_BROWSER_VIDEO_CODECS),
     }
+    media_info["spatialAudioCandidate"] = spatial_audio_candidate(media_info)
+    return media_info
 
 
 def is_browser_video_compatible(video_stream: Optional[Dict[str, object]]) -> bool:
@@ -1083,6 +1166,7 @@ def build_transcode_command(
     ffmpeg_path: str = "ffmpeg",
     force_video_transcode: bool = True,
     fragmented: bool = False,
+    audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
 ) -> List[str]:
     default_audio = probe.get("defaultAudio") or {}
     default_video = probe.get("defaultVideo") or {}
@@ -1124,13 +1208,26 @@ def build_transcode_command(
                 ]
             )
     if audio_index is not None:
-        command.extend(["-c:a", "aac", "-ac", "2", "-b:a", "192k"])
+        command.extend(audio_transcode_options(default_audio, audio_profile))
     duration = parse_float(probe.get("duration"))
     if fragmented and duration and duration > 0:
         command.extend(["-t", f"{duration:.3f}"])
     movflags = "+frag_keyframe+empty_moov+default_base_moof" if fragmented else "+faststart"
     command.extend(["-movflags", movflags, "-f", "mp4", output_path])
     return command
+
+
+def audio_transcode_options(
+    audio_stream: Dict[str, object],
+    audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
+) -> List[str]:
+    profile = normalize_transcode_audio_profile(audio_profile)
+    channels = media_audio_channels(audio_stream)
+    if profile == TRANSCODE_AUDIO_PROFILE_SPATIAL and channels > 2:
+        output_channels = min(max(channels, 3), 8)
+        bitrate = "384k" if output_channels <= 6 else "512k"
+        return ["-c:a", "aac", "-ac", str(output_channels), "-b:a", bitrate]
+    return ["-c:a", "aac", "-ac", "2", "-b:a", "192k"]
 
 
 def default_stream_indexes(probe: Dict[str, object]) -> Tuple[Optional[int], Optional[int]]:
@@ -1146,6 +1243,7 @@ def build_hls_segment_command(
     start_time: float,
     duration: float,
     ffmpeg_path: str = "ffmpeg",
+    audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
 ) -> List[str]:
     video_index, audio_index = default_stream_indexes(probe)
     input_seek = max(0.0, float(start_time) - max(0.0, HLS_ACCURATE_SEEK_WINDOW_SECONDS))
@@ -1187,7 +1285,7 @@ def build_hls_segment_command(
             ]
         )
     if audio_index is not None:
-        command.extend(["-c:a", "aac", "-ac", "2", "-b:a", "192k"])
+        command.extend(audio_transcode_options(probe.get("defaultAudio") or {}, audio_profile))
     command.extend(
         [
             "-avoid_negative_ts",
@@ -1204,14 +1302,34 @@ def build_hls_segment_command(
     return command
 
 
-def source_transcode_cache_path(resource_id: str, url: str) -> Path:
-    url_hash = hashlib.sha256(f"{TRANSCODE_CACHE_VERSION}:{url}".encode("utf-8")).hexdigest()[:16]
-    return TRANSCODE_CACHE_DIR / f"{resource_id}-{url_hash}.mp4"
+def transcode_profile_cache_suffix(audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO) -> str:
+    profile = normalize_transcode_audio_profile(audio_profile)
+    return "" if profile == TRANSCODE_AUDIO_PROFILE_STEREO else f"-{profile}"
 
 
-def source_hls_cache_dir(resource_id: str, url: str) -> Path:
-    url_hash = hashlib.sha256(f"{TRANSCODE_CACHE_VERSION}:{HLS_SEGMENT_CACHE_VERSION}:{HLS_SEGMENT_SECONDS}:{url}".encode("utf-8")).hexdigest()[:16]
-    return TRANSCODE_CACHE_DIR / f"{resource_id}-{url_hash}-hls"
+def transcode_profile_cache_key(audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO) -> str:
+    profile = normalize_transcode_audio_profile(audio_profile)
+    return "" if profile == TRANSCODE_AUDIO_PROFILE_STEREO else f":{profile}"
+
+
+def source_transcode_cache_path(
+    resource_id: str,
+    url: str,
+    audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
+) -> Path:
+    profile_key = transcode_profile_cache_key(audio_profile)
+    url_hash = hashlib.sha256(f"{TRANSCODE_CACHE_VERSION}{profile_key}:{url}".encode("utf-8")).hexdigest()[:16]
+    return TRANSCODE_CACHE_DIR / f"{resource_id}-{url_hash}{transcode_profile_cache_suffix(audio_profile)}.mp4"
+
+
+def source_hls_cache_dir(
+    resource_id: str,
+    url: str,
+    audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
+) -> Path:
+    profile_key = transcode_profile_cache_key(audio_profile)
+    url_hash = hashlib.sha256(f"{TRANSCODE_CACHE_VERSION}{profile_key}:{HLS_SEGMENT_CACHE_VERSION}:{HLS_SEGMENT_SECONDS}:{url}".encode("utf-8")).hexdigest()[:16]
+    return TRANSCODE_CACHE_DIR / f"{resource_id}-{url_hash}{transcode_profile_cache_suffix(audio_profile)}-hls"
 
 
 def cached_resource_md5(resource_id: str) -> str:
@@ -1219,63 +1337,100 @@ def cached_resource_md5(resource_id: str) -> str:
     return str(cached.get("md5") or "").strip().lower()
 
 
-def md5_transcode_cache_path(md5: str) -> Path:
-    return TRANSCODE_CACHE_DIR / f"md5-{TRANSCODE_CACHE_VERSION}-{md5}.mp4"
+def md5_transcode_cache_path(md5: str, audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO) -> Path:
+    profile = normalize_transcode_audio_profile(audio_profile)
+    profile_part = "" if profile == TRANSCODE_AUDIO_PROFILE_STEREO else f"-{profile}"
+    return TRANSCODE_CACHE_DIR / f"md5-{TRANSCODE_CACHE_VERSION}{profile_part}-{md5}.mp4"
 
 
-def md5_hls_cache_dir(md5: str) -> Path:
-    return TRANSCODE_CACHE_DIR / f"md5-{TRANSCODE_CACHE_VERSION}-{HLS_SEGMENT_CACHE_VERSION}-{HLS_SEGMENT_SECONDS}s-{md5}-hls"
+def md5_hls_cache_dir(md5: str, audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO) -> Path:
+    profile = normalize_transcode_audio_profile(audio_profile)
+    profile_part = "" if profile == TRANSCODE_AUDIO_PROFILE_STEREO else f"-{profile}"
+    return TRANSCODE_CACHE_DIR / f"md5-{TRANSCODE_CACHE_VERSION}{profile_part}-{HLS_SEGMENT_CACHE_VERSION}-{HLS_SEGMENT_SECONDS}s-{md5}-hls"
 
 
-def transcode_cache_candidates(resource_id: str, url: str) -> List[Path]:
+def transcode_cache_candidates(
+    resource_id: str,
+    url: str,
+    audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
+) -> List[Path]:
     candidates: List[Path] = []
     md5 = cached_resource_md5(resource_id)
     if md5:
-        candidates.append(md5_transcode_cache_path(md5))
-    candidates.append(source_transcode_cache_path(resource_id, url))
+        candidates.append(md5_transcode_cache_path(md5, audio_profile))
+    candidates.append(source_transcode_cache_path(resource_id, url, audio_profile))
     return candidates
 
 
-def hls_cache_candidates(resource_id: str, url: str) -> List[Path]:
+def hls_cache_candidates(
+    resource_id: str,
+    url: str,
+    audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
+) -> List[Path]:
     candidates: List[Path] = []
     md5 = cached_resource_md5(resource_id)
     if md5:
-        candidates.append(md5_hls_cache_dir(md5))
-    candidates.append(source_hls_cache_dir(resource_id, url))
+        candidates.append(md5_hls_cache_dir(md5, audio_profile))
+    candidates.append(source_hls_cache_dir(resource_id, url, audio_profile))
     return candidates
 
 
-def transcode_cache_path(resource_id: str, url: str) -> Path:
-    for path in transcode_cache_candidates(resource_id, url):
+def transcode_cache_path(
+    resource_id: str,
+    url: str,
+    audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
+) -> Path:
+    for path in transcode_cache_candidates(resource_id, url, audio_profile):
         if path.exists() and path.stat().st_size > 0:
             return path
-    return transcode_cache_candidates(resource_id, url)[0]
+    return transcode_cache_candidates(resource_id, url, audio_profile)[0]
 
 
-def transcode_part_candidates(resource_id: str, url: str) -> List[Path]:
-    return [path.with_suffix(".part.mp4") for path in transcode_cache_candidates(resource_id, url)]
+def transcode_part_candidates(
+    resource_id: str,
+    url: str,
+    audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
+) -> List[Path]:
+    return [path.with_suffix(".part.mp4") for path in transcode_cache_candidates(resource_id, url, audio_profile)]
 
 
-def transcode_part_path(resource_id: str, url: str) -> Path:
-    for path in transcode_part_candidates(resource_id, url):
+def transcode_part_path(
+    resource_id: str,
+    url: str,
+    audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
+) -> Path:
+    for path in transcode_part_candidates(resource_id, url, audio_profile):
         if path.exists() and path.stat().st_size > 0:
             return path
-    return transcode_part_candidates(resource_id, url)[0]
+    return transcode_part_candidates(resource_id, url, audio_profile)[0]
 
 
-def transcoded_file_cached(resource_id: str, url: str) -> bool:
-    return any(path.exists() and path.stat().st_size > 0 for path in transcode_cache_candidates(resource_id, url))
+def transcoded_file_cached(
+    resource_id: str,
+    url: str,
+    audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
+) -> bool:
+    return any(path.exists() and path.stat().st_size > 0 for path in transcode_cache_candidates(resource_id, url, audio_profile))
 
 
-def hls_cache_dir(resource_id: str, url: str) -> Path:
-    for path in hls_cache_candidates(resource_id, url):
+def hls_cache_dir(
+    resource_id: str,
+    url: str,
+    audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
+) -> Path:
+    for path in hls_cache_candidates(resource_id, url, audio_profile):
         if path.exists():
             return path
-    return hls_cache_candidates(resource_id, url)[0]
+    return hls_cache_candidates(resource_id, url, audio_profile)[0]
 
 
-def hls_segment_path(resource_id: str, url: str, segment_index: int) -> Path:
-    return hls_cache_dir(resource_id, url) / f"segment-{segment_index:06d}.ts"
+def hls_segment_path(
+    resource_id: str,
+    url: str,
+    segment_index: int,
+    audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
+) -> Path:
+    return hls_cache_dir(resource_id, url, audio_profile) / f"segment-{segment_index:06d}.ts"
 
 
 def remember_resource_checksum(resource_id: str, checksum: Dict[str, object]) -> None:
@@ -1286,7 +1441,9 @@ def remember_resource_checksum(resource_id: str, checksum: Dict[str, object]) ->
     RESOURCE_METADATA_CACHE.setdefault(resource_id, {})["md5"] = md5
     descriptor = resource_descriptor(resource_id)
     if descriptor:
-        alias_transcode_cache_by_md5(resource_id, resource_probe_target(resource_id) or "", md5)
+        url = resource_probe_target(resource_id) or ""
+        for audio_profile in TRANSCODE_AUDIO_PROFILES:
+            alias_transcode_cache_by_md5(resource_id, url, md5, audio_profile)
 
 
 def link_or_copy_file(source: Path, destination: Path) -> None:
@@ -1299,11 +1456,16 @@ def link_or_copy_file(source: Path, destination: Path) -> None:
         shutil.copy2(source, destination)
 
 
-def alias_transcode_cache_by_md5(resource_id: str, url: str, md5: str) -> None:
+def alias_transcode_cache_by_md5(
+    resource_id: str,
+    url: str,
+    md5: str,
+    audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
+) -> None:
     if not url or not md5:
         return
-    source_path = source_transcode_cache_path(resource_id, url)
-    md5_path = md5_transcode_cache_path(md5)
+    source_path = source_transcode_cache_path(resource_id, url, audio_profile)
+    md5_path = md5_transcode_cache_path(md5, audio_profile)
     if source_path.exists() and source_path.stat().st_size > 0:
         link_or_copy_file(source_path, md5_path)
     elif md5_path.exists() and md5_path.stat().st_size > 0:
@@ -1322,12 +1484,22 @@ def hls_duration_info(media_info: Dict[str, object]) -> Dict[str, object]:
     }
 
 
-def hls_playlist(resource_id: str, media_info: Dict[str, object], access_token: str = "") -> str:
+def hls_playlist(
+    resource_id: str,
+    media_info: Dict[str, object],
+    access_token: str = "",
+    audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
+) -> str:
     info = hls_duration_info(media_info)
     duration = float(info["duration"])
     segment_duration = int(info["segmentDuration"])
     segment_count = int(info["segmentCount"])
-    token_query = f"?access_token={access_token}" if access_token else ""
+    query_parts = []
+    if access_token:
+        query_parts.append(f"access_token={access_token}")
+    if normalize_transcode_audio_profile(audio_profile) == TRANSCODE_AUDIO_PROFILE_SPATIAL:
+        query_parts.append("audio_profile=spatial")
+    token_query = f"?{'&'.join(query_parts)}" if query_parts else ""
     lines = [
         "#EXTM3U",
         "#EXT-X-VERSION:3",
@@ -1347,13 +1519,25 @@ def hls_playlist(resource_id: str, media_info: Dict[str, object], access_token: 
     return "\n".join(lines) + "\n"
 
 
-def ensure_hls_segment(resource_id: str, url: str, media_info: Dict[str, object], segment_index: int) -> Dict[str, object]:
-    artifact = create_hls_segment(resource_id, url, media_info, segment_index)
-    prefetch_hls_segments(resource_id, url, media_info, segment_index + 1)
+def ensure_hls_segment(
+    resource_id: str,
+    url: str,
+    media_info: Dict[str, object],
+    segment_index: int,
+    audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
+) -> Dict[str, object]:
+    artifact = create_hls_segment(resource_id, url, media_info, segment_index, audio_profile)
+    prefetch_hls_segments(resource_id, url, media_info, segment_index + 1, audio_profile)
     return artifact
 
 
-def create_hls_segment(resource_id: str, url: str, media_info: Dict[str, object], segment_index: int) -> Dict[str, object]:
+def create_hls_segment(
+    resource_id: str,
+    url: str,
+    media_info: Dict[str, object],
+    segment_index: int,
+    audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
+) -> Dict[str, object]:
     ffmpeg_path = find_media_tool("ffmpeg")
     if not ffmpeg_path:
         raise RuntimeError("ffmpeg is not installed or is not on PATH.")
@@ -1365,7 +1549,7 @@ def create_hls_segment(resource_id: str, url: str, media_info: Dict[str, object]
     segment_duration = int(info["segmentDuration"])
     start_time = segment_index * segment_duration
     segment_length = max(0.1, min(segment_duration, duration - start_time))
-    path = hls_segment_path(resource_id, url, segment_index)
+    path = hls_segment_path(resource_id, url, segment_index, audio_profile)
     lock = lock_for_transcode(path)
     with lock:
         if not path.exists() or path.stat().st_size == 0:
@@ -1373,7 +1557,15 @@ def create_hls_segment(resource_id: str, url: str, media_info: Dict[str, object]
             temp_path = path.with_suffix(f".{os.getpid()}.part")
             if temp_path.exists():
                 temp_path.unlink()
-            command = build_hls_segment_command(url, media_info, str(temp_path), start_time, segment_length, ffmpeg_path)
+            command = build_hls_segment_command(
+                url,
+                media_info,
+                str(temp_path),
+                start_time,
+                segment_length,
+                ffmpeg_path,
+                audio_profile,
+            )
             try:
                 subprocess.run(command, capture_output=True, text=True, check=True)
                 temp_path.replace(path)
@@ -1393,11 +1585,18 @@ def create_hls_segment(resource_id: str, url: str, media_info: Dict[str, object]
         "contentType": "video/mp2t",
         "cached": True,
         "segmentIndex": segment_index,
+        "audioProfile": normalize_transcode_audio_profile(audio_profile),
         **info,
     }
 
 
-def prefetch_hls_segments(resource_id: str, url: str, media_info: Dict[str, object], start_index: int) -> None:
+def prefetch_hls_segments(
+    resource_id: str,
+    url: str,
+    media_info: Dict[str, object],
+    start_index: int,
+    audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
+) -> None:
     if HLS_PREFETCH_SEGMENTS <= 0:
         return
     try:
@@ -1405,7 +1604,7 @@ def prefetch_hls_segments(resource_id: str, url: str, media_info: Dict[str, obje
     except RuntimeError:
         return
     for segment_index in range(start_index, min(segment_count, start_index + HLS_PREFETCH_SEGMENTS)):
-        path = hls_segment_path(resource_id, url, segment_index)
+        path = hls_segment_path(resource_id, url, segment_index, audio_profile)
         try:
             if path.exists() and path.stat().st_size > 0:
                 continue
@@ -1419,7 +1618,7 @@ def prefetch_hls_segments(resource_id: str, url: str, media_info: Dict[str, obje
 
         def worker(index=segment_index, prefetch_key=key) -> None:
             try:
-                create_hls_segment(resource_id, url, media_info, index)
+                create_hls_segment(resource_id, url, media_info, index, audio_profile)
             except Exception:
                 pass
             finally:
@@ -1436,15 +1635,26 @@ def lock_for_transcode(path: Path) -> threading.Lock:
     return TRANSCODE_LOCKS[key]
 
 
-def update_transcode_progress(resource_id: str, **values) -> None:
-    current = TRANSCODE_PROGRESS.get(resource_id, {})
+def update_transcode_progress(
+    resource_id: str,
+    audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
+    **values,
+) -> None:
+    profile = normalize_transcode_audio_profile(audio_profile)
+    key = transcode_progress_key(resource_id, profile)
+    current = TRANSCODE_PROGRESS.get(key, {})
     current.update(values)
+    current["audioProfile"] = profile
     current["updatedAt"] = int(time.time())
-    TRANSCODE_PROGRESS[resource_id] = current
+    TRANSCODE_PROGRESS[key] = current
 
 
-def estimate_transcode_final_size(resource_id: str, fallback_size: Optional[int] = None) -> int:
-    status = TRANSCODE_PROGRESS.get(resource_id, {})
+def estimate_transcode_final_size(
+    resource_id: str,
+    fallback_size: Optional[int] = None,
+    audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
+) -> int:
+    status = TRANSCODE_PROGRESS.get(transcode_progress_key(resource_id, audio_profile), {})
     current_size = parse_int(status.get("size")) or 0
     estimated_size = parse_int(status.get("estimatedFinalSize")) or 0
     duration = parse_float(status.get("duration"))
@@ -1456,20 +1666,31 @@ def estimate_transcode_final_size(resource_id: str, fallback_size: Optional[int]
     return max(estimated_size, current_size)
 
 
-def progressive_transcode_details(resource_id: str, fallback_size: Optional[int] = None) -> Dict[str, object]:
-    status = TRANSCODE_PROGRESS.get(resource_id, {})
-    estimated_size = estimate_transcode_final_size(resource_id, fallback_size)
+def progressive_transcode_details(
+    resource_id: str,
+    fallback_size: Optional[int] = None,
+    audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
+) -> Dict[str, object]:
+    profile = normalize_transcode_audio_profile(audio_profile)
+    status = TRANSCODE_PROGRESS.get(transcode_progress_key(resource_id, profile), {})
+    estimated_size = estimate_transcode_final_size(resource_id, fallback_size, profile)
     details = {
         "duration": parse_float(status.get("duration")),
         "estimatedFinalSize": estimated_size,
+        "audioProfile": profile,
     }
     if status:
         details["progress"] = status
     return details
 
 
-def transcode_artifact(resource_id: str, url: str) -> Optional[Dict[str, object]]:
-    for path in transcode_cache_candidates(resource_id, url):
+def transcode_artifact(
+    resource_id: str,
+    url: str,
+    audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
+) -> Optional[Dict[str, object]]:
+    profile = normalize_transcode_audio_profile(audio_profile)
+    for path in transcode_cache_candidates(resource_id, url, profile):
         if not path.exists() or path.stat().st_size <= 0:
             continue
         stat = path.stat()
@@ -1479,8 +1700,9 @@ def transcode_artifact(resource_id: str, url: str) -> Optional[Dict[str, object]
             "contentType": "video/mp4",
             "cached": True,
             "complete": True,
+            "audioProfile": profile,
         }
-    for part_path in transcode_part_candidates(resource_id, url):
+    for part_path in transcode_part_candidates(resource_id, url, profile):
         if not part_path.exists() or part_path.stat().st_size <= 0:
             continue
         stat = part_path.stat()
@@ -1490,11 +1712,18 @@ def transcode_artifact(resource_id: str, url: str) -> Optional[Dict[str, object]
             "contentType": "video/mp4",
             "cached": False,
             "complete": False,
+            "audioProfile": profile,
         }
     return None
 
 
-def run_transcode_command(command: List[str], temp_path: Path, resource_id: str, duration: Optional[float]) -> None:
+def run_transcode_command(
+    command: List[str],
+    temp_path: Path,
+    resource_id: str,
+    duration: Optional[float],
+    audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
+) -> None:
     progress_command = [*command[:-1], "-progress", "pipe:1", "-nostats", command[-1]]
     process = subprocess.Popen(
         progress_command,
@@ -1527,9 +1756,9 @@ def run_transcode_command(command: List[str], temp_path: Path, resource_id: str,
                 }
                 if duration and duration > 0 and seconds > 0 and size > 0:
                     progress["estimatedFinalSize"] = int(math.ceil(size * duration / seconds))
-                update_transcode_progress(resource_id, **progress)
+                update_transcode_progress(resource_id, audio_profile, **progress)
             elif key == "progress" and value == "end":
-                update_transcode_progress(resource_id, status="finalizing", percent=99)
+                update_transcode_progress(resource_id, audio_profile, status="finalizing", percent=99)
         assert process.stderr is not None
         stderr_text = process.stderr.read()
         if stderr_text:
@@ -1540,7 +1769,7 @@ def run_transcode_command(command: List[str], temp_path: Path, resource_id: str,
         raise
     if return_code != 0:
         detail = "\n".join(stderr_lines).strip() or f"ffmpeg exited with {return_code}"
-        update_transcode_progress(resource_id, status="error", error=detail)
+        update_transcode_progress(resource_id, audio_profile, status="error", error=detail)
         if temp_path.exists():
             temp_path.unlink()
         raise RuntimeError(f"ffmpeg could not transcode this resource: {detail}")
@@ -1578,19 +1807,25 @@ def remux_fragmented_mp4_to_faststart(source_path: Path, output_path: Path, ffmp
             temp_path.unlink()
 
 
-def start_transcoded_file(resource_id: str, url: str, media_info: Dict[str, object]) -> Dict[str, object]:
+def start_transcoded_file(
+    resource_id: str,
+    url: str,
+    media_info: Dict[str, object],
+    audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
+) -> Dict[str, object]:
+    profile = normalize_transcode_audio_profile(audio_profile)
     ffmpeg_path = find_media_tool("ffmpeg")
     if not ffmpeg_path:
         raise RuntimeError("ffmpeg is not installed or is not on PATH.")
-    path = transcode_cache_path(resource_id, url)
-    part_path = transcode_part_path(resource_id, url)
-    cached = transcode_artifact(resource_id, url)
+    path = transcode_cache_path(resource_id, url, profile)
+    part_path = transcode_part_path(resource_id, url, profile)
+    cached = transcode_artifact(resource_id, url, profile)
     if cached and cached.get("complete"):
-        update_transcode_progress(resource_id, status="cached", percent=100, size=cached["size"])
+        update_transcode_progress(resource_id, profile, status="cached", percent=100, size=cached["size"])
         return cached
-    status = TRANSCODE_PROGRESS.get(resource_id, {})
+    status = TRANSCODE_PROGRESS.get(transcode_progress_key(resource_id, profile), {})
     if status.get("status") in {"running", "finalizing"}:
-        artifact = transcode_artifact(resource_id, url)
+        artifact = transcode_artifact(resource_id, url, profile)
         if artifact:
             return artifact
         return {
@@ -1599,14 +1834,16 @@ def start_transcoded_file(resource_id: str, url: str, media_info: Dict[str, obje
             "contentType": "video/mp4",
             "cached": False,
             "complete": False,
+            "audioProfile": profile,
         }
 
     TRANSCODE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     if part_path.exists():
         part_path.unlink()
-    command = build_transcode_command(url, media_info, str(part_path), ffmpeg_path, fragmented=True)
+    command = build_transcode_command(url, media_info, str(part_path), ffmpeg_path, fragmented=True, audio_profile=profile)
     update_transcode_progress(
         resource_id,
+        profile,
         status="running",
         percent=0,
         seconds=0,
@@ -1621,14 +1858,14 @@ def start_transcoded_file(resource_id: str, url: str, media_info: Dict[str, obje
         lock = lock_for_transcode(path)
         with lock:
             try:
-                run_transcode_command(command, part_path, resource_id, parse_float(media_info.get("duration")))
-                update_transcode_progress(resource_id, status="finalizing", percent=99, size=part_path.stat().st_size)
+                run_transcode_command(command, part_path, resource_id, parse_float(media_info.get("duration")), profile)
+                update_transcode_progress(resource_id, profile, status="finalizing", percent=99, size=part_path.stat().st_size)
                 remux_fragmented_mp4_to_faststart(part_path, path, ffmpeg_path)
                 if part_path.exists():
                     part_path.unlink()
-                alias_transcode_cache_by_md5(resource_id, url, cached_resource_md5(resource_id))
+                alias_transcode_cache_by_md5(resource_id, url, cached_resource_md5(resource_id), profile)
                 stat = path.stat()
-                update_transcode_progress(resource_id, status="complete", percent=100, size=stat.st_size, progressive=False)
+                update_transcode_progress(resource_id, profile, status="complete", percent=100, size=stat.st_size, progressive=False)
             except Exception:
                 if part_path.exists():
                     part_path.unlink()
@@ -1640,14 +1877,21 @@ def start_transcoded_file(resource_id: str, url: str, media_info: Dict[str, obje
         "contentType": "video/mp4",
         "cached": False,
         "complete": False,
+        "audioProfile": profile,
     }
 
 
-def wait_for_progressive_transcode(resource_id: str, url: str, timeout: float = 45.0) -> Dict[str, object]:
+def wait_for_progressive_transcode(
+    resource_id: str,
+    url: str,
+    timeout: float = 45.0,
+    audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
+) -> Dict[str, object]:
+    profile = normalize_transcode_audio_profile(audio_profile)
     started = time.monotonic()
     while time.monotonic() - started < timeout:
-        artifact = transcode_artifact(resource_id, url)
-        status = TRANSCODE_PROGRESS.get(resource_id, {})
+        artifact = transcode_artifact(resource_id, url, profile)
+        status = TRANSCODE_PROGRESS.get(transcode_progress_key(resource_id, profile), {})
         if artifact and (
             artifact.get("complete")
             or artifact.get("size", 0) >= PROGRESSIVE_TRANSCODE_MIN_BYTES
@@ -1660,32 +1904,40 @@ def wait_for_progressive_transcode(resource_id: str, url: str, timeout: float = 
     raise RuntimeError("Timed out waiting for enough transcoded video to start playback.")
 
 
-def ensure_transcoded_file(resource_id: str, url: str, media_info: Dict[str, object]) -> Dict[str, object]:
+def ensure_transcoded_file(
+    resource_id: str,
+    url: str,
+    media_info: Dict[str, object],
+    audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
+) -> Dict[str, object]:
+    profile = normalize_transcode_audio_profile(audio_profile)
     ffmpeg_path = find_media_tool("ffmpeg")
     if not ffmpeg_path:
         raise RuntimeError("ffmpeg is not installed or is not on PATH.")
-    path = transcode_cache_path(resource_id, url)
+    path = transcode_cache_path(resource_id, url, profile)
     lock = lock_for_transcode(path)
     with lock:
         if path.exists() and path.stat().st_size > 0:
             stat = path.stat()
-            alias_transcode_cache_by_md5(resource_id, url, cached_resource_md5(resource_id))
-            update_transcode_progress(resource_id, status="cached", percent=100, size=stat.st_size)
+            alias_transcode_cache_by_md5(resource_id, url, cached_resource_md5(resource_id), profile)
+            update_transcode_progress(resource_id, profile, status="cached", percent=100, size=stat.st_size)
             return {
                 "path": str(path),
                 "size": stat.st_size,
                 "contentType": "video/mp4",
                 "cached": True,
+                "audioProfile": profile,
             }
 
         if not path.exists() or path.stat().st_size == 0:
             TRANSCODE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-            temp_path = transcode_part_path(resource_id, url)
+            temp_path = transcode_part_path(resource_id, url, profile)
             if temp_path.exists():
                 temp_path.unlink()
-            command = build_transcode_command(url, media_info, str(temp_path), ffmpeg_path, fragmented=False)
+            command = build_transcode_command(url, media_info, str(temp_path), ffmpeg_path, fragmented=False, audio_profile=profile)
             update_transcode_progress(
                 resource_id,
+                profile,
                 status="running",
                 percent=0,
                 seconds=0,
@@ -1694,9 +1946,9 @@ def ensure_transcoded_file(resource_id: str, url: str, media_info: Dict[str, obj
                 error="",
             )
             try:
-                run_transcode_command(command, temp_path, resource_id, parse_float(media_info.get("duration")))
+                run_transcode_command(command, temp_path, resource_id, parse_float(media_info.get("duration")), profile)
                 temp_path.replace(path)
-                alias_transcode_cache_by_md5(resource_id, url, cached_resource_md5(resource_id))
+                alias_transcode_cache_by_md5(resource_id, url, cached_resource_md5(resource_id), profile)
             except Exception:
                 if temp_path.exists():
                     temp_path.unlink()
@@ -1708,8 +1960,9 @@ def ensure_transcoded_file(resource_id: str, url: str, media_info: Dict[str, obj
         "size": stat.st_size,
         "contentType": "video/mp4",
         "cached": True,
+        "audioProfile": profile,
     }
-    update_transcode_progress(resource_id, status="complete", percent=100, size=stat.st_size)
+    update_transcode_progress(resource_id, profile, status="complete", percent=100, size=stat.st_size)
     return result
 
 
@@ -1880,8 +2133,11 @@ def serve_file_with_range(path: Path, content_type: str):
     )
 
 
-def transcode_running(resource_id: str) -> bool:
-    return TRANSCODE_PROGRESS.get(resource_id, {}).get("status") in {"running", "finalizing"}
+def transcode_running(
+    resource_id: str,
+    audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
+) -> bool:
+    return TRANSCODE_PROGRESS.get(transcode_progress_key(resource_id, audio_profile), {}).get("status") in {"running", "finalizing"}
 
 
 def parse_open_range_header(range_header: str) -> Optional[Tuple[int, Optional[int]]]:
@@ -1906,7 +2162,9 @@ def serve_growing_file_with_range(
     resource_id: str,
     total_size: Optional[int] = None,
     duration: Optional[float] = None,
+    audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
 ):
+    profile = normalize_transcode_audio_profile(audio_profile)
     open_range = parse_open_range_header(request.headers.get("Range", ""))
     chunk_size = 1024 * 256
     total_size = int(total_size or 0)
@@ -1920,13 +2178,13 @@ def serve_growing_file_with_range(
         while time.monotonic() - started < timeout:
             if current_file_size() >= min_size:
                 return True
-            if not transcode_running(resource_id):
+            if not transcode_running(resource_id, profile):
                 return current_file_size() >= min_size
             time.sleep(0.1)
         return False
 
     def content_range_total(current_size: int) -> str:
-        if total_size > 0 and transcode_running(resource_id):
+        if total_size > 0 and transcode_running(resource_id, profile):
             return str(max(total_size, current_size))
         if current_size > 0:
             return str(current_size)
@@ -1969,7 +2227,7 @@ def serve_growing_file_with_range(
                             position += len(chunk)
                             yield chunk
                             continue
-                    if not transcode_running(resource_id):
+                    if not transcode_running(resource_id, profile):
                         break
                     time.sleep(0.1)
 
@@ -1992,7 +2250,7 @@ def serve_growing_file_with_range(
     synthetic_range = open_range is None and total_size > 0
     start = open_range[0] if open_range else 0
     requested_end = open_range[1] if open_range else None
-    running = transcode_running(resource_id)
+    running = transcode_running(resource_id, profile)
     if total_size > 0 and requested_end is not None and not running:
         requested_end = min(requested_end, total_size - 1)
     if total_size > 0 and start >= total_size and not running:
@@ -2010,21 +2268,21 @@ def serve_growing_file_with_range(
 
     if not wait_for_size(start + 1):
         current_size = current_file_size()
-        pending_known_range = total_size > 0 and start < total_size and transcode_running(resource_id)
+        pending_known_range = total_size > 0 and start < total_size and transcode_running(resource_id, profile)
         return range_not_ready_response(
             current_size,
-            503 if pending_known_range or (total_size <= 0 and transcode_running(resource_id)) else 416,
+            503 if pending_known_range or (total_size <= 0 and transcode_running(resource_id, profile)) else 416,
         )
 
     if requested_end is None:
         requested_end = max(start, current_file_size() - 1)
 
     if requested_end is not None:
-        if transcode_running(resource_id) and not wait_for_size(requested_end + 1):
+        if transcode_running(resource_id, profile) and not wait_for_size(requested_end + 1):
             return range_not_ready_response(current_file_size(), 503)
         current_size = current_file_size()
         if requested_end >= current_size:
-            if transcode_running(resource_id):
+            if transcode_running(resource_id, profile):
                 return range_not_ready_response(current_size, 503)
             requested_end = current_size - 1
         if requested_end < start:
@@ -2048,7 +2306,7 @@ def serve_growing_file_with_range(
                         position += len(chunk)
                         yield chunk
                         continue
-                if not transcode_running(resource_id):
+                if not transcode_running(resource_id, profile):
                     break
                 time.sleep(0.1)
 
@@ -2311,7 +2569,13 @@ def create_connector_app(security: Optional[ConnectorSecurity] = None):
 
         media_info["resource"] = RESOURCE_METADATA_CACHE.get(resource_id, {})
         media_info["transcodedCached"] = transcoded_file_cached(resource_id, url)
-        media_info["transcodeStatus"] = TRANSCODE_PROGRESS.get(resource_id, {})
+        media_info["spatialTranscodedCached"] = transcoded_file_cached(resource_id, url, TRANSCODE_AUDIO_PROFILE_SPATIAL)
+        media_info["transcodeStatus"] = TRANSCODE_PROGRESS.get(transcode_progress_key(resource_id), {})
+        media_info["spatialTranscodeStatus"] = TRANSCODE_PROGRESS.get(transcode_progress_key(resource_id, TRANSCODE_AUDIO_PROFILE_SPATIAL), {})
+        media_info["transcodeAudioProfiles"] = {
+            "default": TRANSCODE_AUDIO_PROFILE_STEREO,
+            "available": sorted(TRANSCODE_AUDIO_PROFILES),
+        }
         return jsonify(media_info)
 
     @app.get("/resources/<resource_id>/transcode-status")
@@ -2322,21 +2586,22 @@ def create_connector_app(security: Optional[ConnectorSecurity] = None):
         url = resource_probe_target(resource_id)
         if not url:
             return jsonify({"error": "Unknown resource. Browse the file again."}), 404
-        cached = transcoded_file_cached(resource_id, url)
-        status = TRANSCODE_PROGRESS.get(resource_id, {})
+        audio_profile = request_transcode_audio_profile()
+        cached = transcoded_file_cached(resource_id, url, audio_profile)
+        status = TRANSCODE_PROGRESS.get(transcode_progress_key(resource_id, audio_profile), {})
         if cached:
-            path = transcode_cache_path(resource_id, url)
+            path = transcode_cache_path(resource_id, url, audio_profile)
             stat = path.stat()
-            return jsonify({"ok": True, "status": "cached", "cached": True, "percent": 100, "size": stat.st_size})
-        artifact = transcode_artifact(resource_id, url)
+            return jsonify({"ok": True, "status": "cached", "cached": True, "percent": 100, "size": stat.st_size, "audioProfile": audio_profile})
+        artifact = transcode_artifact(resource_id, url, audio_profile)
         if artifact:
             status = {
                 **status,
                 "size": artifact["size"],
                 "complete": artifact["complete"],
-                **progressive_transcode_details(resource_id, RESOURCE_METADATA_CACHE.get(resource_id, {}).get("size")),
+                **progressive_transcode_details(resource_id, RESOURCE_METADATA_CACHE.get(resource_id, {}).get("size"), audio_profile),
             }
-        return jsonify({"ok": True, "status": status.get("status", "idle"), "cached": False, **status})
+        return jsonify({"ok": True, "status": status.get("status", "idle"), "cached": False, "audioProfile": audio_profile, **status})
 
     @app.get("/resources/<resource_id>/checksum")
     def resource_checksum(resource_id: str):
@@ -2362,9 +2627,10 @@ def create_connector_app(security: Optional[ConnectorSecurity] = None):
         if not url:
             return jsonify({"error": "Unknown resource. Browse the file again."}), 404
         try:
+            audio_profile = request_transcode_audio_profile()
             media_info = cached_probe_media(url)
             info = hls_duration_info(media_info)
-            prefetch_hls_segments(resource_id, url, media_info, 0)
+            prefetch_hls_segments(resource_id, url, media_info, 0, audio_profile)
         except subprocess.TimeoutExpired:
             return jsonify({"error": "Timed out while probing media tracks."}), 504
         except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
@@ -2376,6 +2642,7 @@ def create_connector_app(security: Optional[ConnectorSecurity] = None):
                 "ok": True,
                 "type": "application/vnd.apple.mpegurl",
                 "playlistPath": f"/resources/{resource_id}/hls/playlist.m3u8",
+                "audioProfile": audio_profile,
                 "mediaInfo": media_info,
                 **info,
             }
@@ -2390,9 +2657,10 @@ def create_connector_app(security: Optional[ConnectorSecurity] = None):
         if not url:
             return jsonify({"error": "Unknown resource. Browse the file again."}), 404
         try:
+            audio_profile = request_transcode_audio_profile()
             media_info = cached_probe_media(url)
-            playlist = hls_playlist(resource_id, media_info, request.args.get("access_token", ""))
-            prefetch_hls_segments(resource_id, url, media_info, 0)
+            playlist = hls_playlist(resource_id, media_info, request.args.get("access_token", ""), audio_profile)
+            prefetch_hls_segments(resource_id, url, media_info, 0, audio_profile)
         except subprocess.TimeoutExpired:
             return jsonify({"error": "Timed out while probing media tracks."}), 504
         except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
@@ -2414,8 +2682,9 @@ def create_connector_app(security: Optional[ConnectorSecurity] = None):
         if not url:
             return jsonify({"error": "Unknown resource. Browse the file again."}), 404
         try:
+            audio_profile = request_transcode_audio_profile()
             media_info = cached_probe_media(url)
-            artifact = ensure_hls_segment(resource_id, url, media_info, segment_index)
+            artifact = ensure_hls_segment(resource_id, url, media_info, segment_index, audio_profile)
         except IndexError as exc:
             return jsonify({"error": str(exc)}), 416
         except subprocess.TimeoutExpired:
@@ -2436,12 +2705,13 @@ def create_connector_app(security: Optional[ConnectorSecurity] = None):
             return jsonify({"error": "Unknown resource. Browse the file again."}), 404
 
         try:
+            audio_profile = request_transcode_audio_profile()
             media_info = cached_probe_media(url)
             if request.args.get("progressive") == "1":
-                start_transcoded_file(resource_id, url, media_info)
-                artifact = wait_for_progressive_transcode(resource_id, url)
+                start_transcoded_file(resource_id, url, media_info, audio_profile)
+                artifact = wait_for_progressive_transcode(resource_id, url, audio_profile=audio_profile)
             else:
-                artifact = ensure_transcoded_file(resource_id, url, media_info)
+                artifact = ensure_transcoded_file(resource_id, url, media_info, audio_profile)
         except subprocess.TimeoutExpired:
             return jsonify({"error": "Timed out while probing media tracks."}), 504
         except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
@@ -2456,8 +2726,9 @@ def create_connector_app(security: Optional[ConnectorSecurity] = None):
                 "size": artifact["size"],
                 "cached": artifact["cached"],
                 "complete": artifact.get("complete", artifact["cached"]),
-                "progress": TRANSCODE_PROGRESS.get(resource_id, {}),
-                **progressive_transcode_details(resource_id, media_info.get("size")),
+                "audioProfile": audio_profile,
+                "progress": TRANSCODE_PROGRESS.get(transcode_progress_key(resource_id, audio_profile), {}),
+                **progressive_transcode_details(resource_id, media_info.get("size"), audio_profile),
                 "mediaInfo": media_info,
             }
         )
@@ -2472,8 +2743,9 @@ def create_connector_app(security: Optional[ConnectorSecurity] = None):
             return jsonify({"error": "Unknown resource. Browse the file again."}), 404
 
         try:
+            audio_profile = request_transcode_audio_profile()
             media_info = cached_probe_media(url)
-            artifact = ensure_transcoded_file(resource_id, url, media_info)
+            artifact = ensure_transcoded_file(resource_id, url, media_info, audio_profile)
         except subprocess.TimeoutExpired:
             return jsonify({"error": "Timed out while probing media tracks."}), 504
         except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
@@ -2487,6 +2759,7 @@ def create_connector_app(security: Optional[ConnectorSecurity] = None):
                 "type": artifact["contentType"],
                 "size": artifact["size"],
                 "cached": artifact["cached"],
+                "audioProfile": audio_profile,
                 "mediaInfo": media_info,
                 "message": "Browser-safe transcode is cached and ready.",
             }
@@ -2502,14 +2775,15 @@ def create_connector_app(security: Optional[ConnectorSecurity] = None):
             return jsonify({"error": "Unknown resource. Browse the file again."}), 404
 
         try:
-            artifact = transcode_artifact(resource_id, url)
+            audio_profile = request_transcode_audio_profile()
+            artifact = transcode_artifact(resource_id, url, audio_profile)
             if not artifact:
                 media_info = cached_probe_media(url)
                 if request.args.get("progressive") == "1":
-                    start_transcoded_file(resource_id, url, media_info)
-                    artifact = wait_for_progressive_transcode(resource_id, url)
+                    start_transcoded_file(resource_id, url, media_info, audio_profile)
+                    artifact = wait_for_progressive_transcode(resource_id, url, audio_profile=audio_profile)
                 else:
-                    artifact = ensure_transcoded_file(resource_id, url, media_info)
+                    artifact = ensure_transcoded_file(resource_id, url, media_info, audio_profile)
         except subprocess.TimeoutExpired:
             return jsonify({"error": "Timed out while probing media tracks."}), 504
         except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
@@ -2520,13 +2794,14 @@ def create_connector_app(security: Optional[ConnectorSecurity] = None):
         artifact_path = Path(artifact["path"])
         if request.args.get("progressive") == "1" and not artifact.get("complete", artifact.get("cached", False)):
             media_info = cached_probe_media(url)
-            details = progressive_transcode_details(resource_id, media_info.get("size"))
+            details = progressive_transcode_details(resource_id, media_info.get("size"), audio_profile)
             return serve_growing_file_with_range(
                 artifact_path,
                 artifact["contentType"],
                 resource_id,
                 total_size=parse_int(details.get("estimatedFinalSize")),
                 duration=parse_float(details.get("duration")) or parse_float(media_info.get("duration")),
+                audio_profile=audio_profile,
             )
         return serve_file_with_range(artifact_path, artifact["contentType"])
 
@@ -2540,10 +2815,11 @@ def create_connector_app(security: Optional[ConnectorSecurity] = None):
             return jsonify({"error": "Unknown resource. Browse the file again."}), 404
 
         try:
-            path = transcode_cache_path(resource_id, url)
+            audio_profile = request_transcode_audio_profile()
+            path = transcode_cache_path(resource_id, url, audio_profile)
             if not path.exists() or path.stat().st_size == 0:
                 media_info = cached_probe_media(url)
-                artifact = ensure_transcoded_file(resource_id, url, media_info)
+                artifact = ensure_transcoded_file(resource_id, url, media_info, audio_profile)
                 path = Path(artifact["path"])
             return jsonify(checksum_file(path))
         except subprocess.TimeoutExpired:

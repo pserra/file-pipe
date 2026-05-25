@@ -1,5 +1,6 @@
 (() => {
   const INSTANCE_BY_VIDEO = new WeakMap();
+  const AUDIO_GRAPH_BY_VIDEO = new WeakMap();
   const DEFAULT_SETTINGS = {
     layout: "mono",
     eye: "left",
@@ -10,19 +11,23 @@
     panelY: 0,
     panelYaw: 0,
     panelPitch: 0,
+    screenCurve: 0,
     distance: 3,
     roomViewX: 0,
-    roomViewY: 0,
+    roomViewY: 1.45,
     roomViewZ: 0,
     roomViewYaw: 0,
-    roomViewPitch: 0,
+    roomViewPitch: -16,
+    roomViewPresetVersion: 2,
     roomDim: 80,
     sidePanelVisible: false,
     aspectLocked: true,
     backlightMode: "off",
     backlightIntensity: 100,
+    spatialAudio: false,
     theme: "default",
   };
+  const DEFAULT_AUDIO_CHANNEL_LABELS = ["L", "R", "C", "LFE", "SL", "SR", "BL", "BR"];
   const LAYOUT_LABELS = {
     mono: "Full frame",
     "half-sbs": "Half SBS 3D",
@@ -38,6 +43,13 @@
     "bottom-left": 2,
     "bottom-right": 2,
   };
+  const XR_SIDE_PANEL_LOGICAL_SIZE = 1024;
+  const XR_SIDE_PANEL_TEXTURE_SIZE = 2048;
+  const XR_SIDE_PANEL_ANGLE = -0.34;
+  const XR_THUMBSTICK_SEEK_SECONDS = 30;
+  const XR_THUMBSTICK_SEEK_DEADZONE = 0.72;
+  const XR_THUMBSTICK_SEEK_RESET_ZONE = 0.32;
+  const XR_THUMBSTICK_SEEK_REPEAT_MS = 650;
 
   class FilePipeThreeXrPlayer {
     constructor(video, options = {}) {
@@ -55,13 +67,18 @@
       this.scene = null;
       this.camera = null;
       this.screenGroup = null;
+      this.screenSurfaceGroup = null;
       this.videoMesh = null;
+      this.videoGeometryKey = "";
+      this.mrDimMesh = null;
       this.gridMesh = null;
       this.themeGroup = null;
       this.themeObjects = [];
       this.themeObjectById = new Map();
       this.themeInteractiveObjects = [];
       this.themeAnimatedObjects = [];
+      this.themeSampledObjects = [];
+      this.themeVideoSampleColors = null;
       this.themeSettingRenderKey = "";
       this.themeRaycaster = null;
       this.themePointer = null;
@@ -98,6 +115,9 @@
       this.xrSidePanelMesh = null;
       this.xrSidePanelHotspots = [];
       this.lastSidePanelTextureAt = 0;
+      this.spatialAudioGraph = null;
+      this.spatialAudioNodes = [];
+      this.spatialAudioStatus = "Spatial audio off.";
       this.xrSupported = false;
       this.xrVrSupported = false;
       this.xrArSupported = false;
@@ -110,6 +130,8 @@
       this.inTheater = false;
       this.controllers = [];
       this.controllerLines = [];
+      this.xrThumbstickSeekDirection = 0;
+      this.xrThumbstickSeekAt = 0;
       this.activeGrab = null;
       this.desktopDrag = null;
       this.desktopKeys = new Set();
@@ -127,13 +149,16 @@
 
     updateOptions(options = {}) {
       this.options = { ...this.options, ...options };
+      if (this.settings.spatialAudio && this.spatialAudioGraph?.mode === "spatial") {
+        this.rebuildSpatialAudioGraph();
+      }
       return this;
     }
 
     readSettings() {
       try {
         const stored = JSON.parse(localStorage.getItem(this.options.storageKey) || "{}");
-        return {
+        const settings = {
           layout: isKnownLayout(stored.layout) ? stored.layout : DEFAULT_SETTINGS.layout,
           eye: stored.eye === "right" ? "right" : DEFAULT_SETTINGS.eye,
           headsetMode: stored.headsetMode === "mr" ? "mr" : DEFAULT_SETTINGS.headsetMode,
@@ -143,21 +168,31 @@
           panelY: clampNumber(Number(stored.panelY), -1.4, 1.4, DEFAULT_SETTINGS.panelY),
           panelYaw: clampNumber(Number(stored.panelYaw), -35, 35, DEFAULT_SETTINGS.panelYaw),
           panelPitch: clampNumber(Number(stored.panelPitch), -20, 20, DEFAULT_SETTINGS.panelPitch),
+          screenCurve: clampNumber(Number(stored.screenCurve), 0, 100, DEFAULT_SETTINGS.screenCurve),
           distance: clampNumber(Number(stored.distance), 1.4, 6, DEFAULT_SETTINGS.distance),
           roomViewX: clampNumber(Number(stored.roomViewX), -2.8, 2.8, DEFAULT_SETTINGS.roomViewX),
-          roomViewY: clampNumber(Number(stored.roomViewY), -0.8, 1.2, DEFAULT_SETTINGS.roomViewY),
+          roomViewY: clampNumber(Number(stored.roomViewY), -0.8, 1.8, DEFAULT_SETTINGS.roomViewY),
           roomViewZ: clampNumber(Number(stored.roomViewZ), -3.7, 1.2, DEFAULT_SETTINGS.roomViewZ),
           roomViewYaw: normalizeDegrees(clampNumber(Number(stored.roomViewYaw), -180, 180, DEFAULT_SETTINGS.roomViewYaw)),
           roomViewPitch: clampNumber(Number(stored.roomViewPitch), -35, 35, DEFAULT_SETTINGS.roomViewPitch),
+          roomViewPresetVersion: clampNumber(Number(stored.roomViewPresetVersion), 0, 100, 0),
           roomDim: clampNumber(Number(stored.roomDim), 0, 100, DEFAULT_SETTINGS.roomDim),
           sidePanelVisible: Boolean(stored.sidePanelVisible ?? DEFAULT_SETTINGS.sidePanelVisible),
           aspectLocked: stored.aspectLocked !== false,
           backlightMode: isKnownBacklightMode(stored.backlightMode) ? stored.backlightMode : DEFAULT_SETTINGS.backlightMode,
           backlightIntensity: clampNumber(Number(stored.backlightIntensity), 0, 150, DEFAULT_SETTINGS.backlightIntensity),
+          spatialAudio: Boolean(stored.spatialAudio ?? DEFAULT_SETTINGS.spatialAudio),
           theme: typeof stored.theme === "string" && stored.theme ? stored.theme : DEFAULT_SETTINGS.theme,
           themeValues: isPlainObject(stored.themeValues) ? stored.themeValues : {},
+          themeValueRevisions: isPlainObject(stored.themeValueRevisions) ? stored.themeValueRevisions : {},
           themeObjectStates: isPlainObject(stored.themeObjectStates) ? stored.themeObjectStates : {},
         };
+        if (settings.roomViewPresetVersion < DEFAULT_SETTINGS.roomViewPresetVersion && isLegacyDesktopRoomView(stored)) {
+          settings.roomViewY = DEFAULT_SETTINGS.roomViewY;
+          settings.roomViewPitch = DEFAULT_SETTINGS.roomViewPitch;
+        }
+        settings.roomViewPresetVersion = DEFAULT_SETTINGS.roomViewPresetVersion;
+        return settings;
       } catch (error) {
         return { ...DEFAULT_SETTINGS };
       }
@@ -200,6 +235,10 @@
               <option value="mr">MR passthrough</option>
             </select>
           </label>
+          <label class="fp-xr-check">
+            <input class="form-check-input" type="checkbox" data-role="spatial-audio">
+            <span>Spatial audio</span>
+          </label>
           <button class="btn btn-sm btn-primary" type="button" data-action="enter-vr">
             <i class="bi bi-badge-vr"></i>
             <span data-role="vr-label">Open XR Theater</span>
@@ -216,6 +255,7 @@
       this.layoutSelect = this.panel.querySelector("[data-role='layout']");
       this.eyeSelect = this.panel.querySelector("[data-role='eye']");
       this.headsetModeSelect = this.panel.querySelector("[data-role='headset-mode']");
+      this.spatialAudioInput = this.panel.querySelector("[data-role='spatial-audio']");
       this.eyeField = this.panel.querySelector("[data-role='eye-field']");
       this.vrButton = this.panel.querySelector("[data-action='enter-vr']");
       this.vrLabel = this.panel.querySelector("[data-role='vr-label']");
@@ -223,6 +263,7 @@
       this.layoutSelect.value = this.settings.layout;
       this.eyeSelect.value = this.settings.eye;
       this.headsetModeSelect.value = this.settings.headsetMode;
+      this.spatialAudioInput.checked = Boolean(this.settings.spatialAudio);
       this.eyeField.hidden = this.settings.layout === "mono";
     }
 
@@ -249,6 +290,9 @@
         this.syncOverlayControls();
         this.updateInlineStatus();
       });
+      this.listen(this.spatialAudioInput, "change", () => {
+        this.setSpatialAudioEnabled(this.spatialAudioInput.checked);
+      });
       this.listen(this.vrButton, "click", () => this.openTheater());
       this.listen(this.video, "loadedmetadata", () => {
         if (this.settings.aspectLocked) this.applyAspectRatioFrom("width");
@@ -259,7 +303,10 @@
       this.listen(this.video, "play", () => this.updatePlaybackControls());
       this.listen(this.video, "pause", () => this.updatePlaybackControls());
       this.listen(this.video, "timeupdate", () => this.updatePlaybackControls());
-      this.listen(this.video, "volumechange", () => this.updatePlaybackControls());
+      this.listen(this.video, "volumechange", () => {
+        this.updatePlaybackControls();
+        this.updateSpatialAudioVolume();
+      });
       this.listen(window, "resize", () => this.resizeRenderer());
     }
 
@@ -296,9 +343,11 @@
       }
       const layout = LAYOUT_LABELS[this.settings.layout] || LAYOUT_LABELS.mono;
       const headset = this.settings.headsetMode === "mr" ? "MR passthrough" : "VR room";
-      this.statusElement.textContent = this.xrSupported
+      const spatial = this.settings.spatialAudio ? ` ${this.spatialAudioStatus || "Spatial audio on."}` : "";
+      const baseStatus = this.xrSupported
         ? `${layout}. ${headset}. Open the theater, then enter the headset from the top bar.`
         : `${layout}. Desktop theater is available; no WebXR headset is visible to this browser.`;
+      this.statusElement.textContent = `${baseStatus}${spatial}`;
     }
 
     async loadThemes() {
@@ -313,8 +362,12 @@
       if (!this.themes.some((theme) => theme.id === this.settings.theme)) {
         this.settings.theme = this.themes[0]?.id || DEFAULT_SETTINGS.theme;
       }
+      if (this.migrateThemeValueDefaults()) this.saveSettings();
       this.syncOverlayControls();
       if (this.scene) this.applyTheme();
+      if (this.settings.spatialAudio && this.spatialAudioGraph?.mode === "spatial") {
+        this.rebuildSpatialAudioGraph();
+      }
     }
 
     syncThemeOptions() {
@@ -359,6 +412,25 @@
       if (!isPlainObject(this.settings.themeValues)) this.settings.themeValues = {};
       if (!isPlainObject(this.settings.themeValues[themeId])) this.settings.themeValues[themeId] = {};
       return this.settings.themeValues[themeId];
+    }
+
+    migrateThemeValueDefaults(theme = this.currentTheme()) {
+      if (!isPlainObject(theme) || !theme.id) return false;
+      const revision = Math.max(0, Math.floor(Number(theme.settingsRevision || 0)));
+      if (!revision || !isPlainObject(theme.settingsRevisionDefaults)) return false;
+      if (!isPlainObject(this.settings.themeValueRevisions)) this.settings.themeValueRevisions = {};
+      const currentRevision = Math.max(0, Math.floor(Number(this.settings.themeValueRevisions[theme.id] || 0)));
+      const store = this.themeValueStore(theme.id);
+      let changed = currentRevision < revision;
+      for (const [id, value] of Object.entries(theme.settingsRevisionDefaults)) {
+        const next = coerceThemeSettingValue(value, this.themeSettingDefinition(id, theme));
+        if (store[id] !== next) {
+          store[id] = next;
+          changed = true;
+        }
+      }
+      this.settings.themeValueRevisions[theme.id] = revision;
+      return changed;
     }
 
     themeSettingDefinition(id, theme = this.currentTheme()) {
@@ -518,6 +590,8 @@
       this.themeObjectById = new Map();
       this.themeInteractiveObjects = [];
       this.themeAnimatedObjects = [];
+      this.themeSampledObjects = [];
+      this.themeVideoSampleColors = null;
       this.themeMovableDrag = null;
       if (this.themeGroup) this.themeGroup.clear();
     }
@@ -579,8 +653,9 @@
           Number(size[1] ?? 1),
           Number(size[2] ?? 1),
         );
-        const useLitMaterial = asset.material !== "basic" && (asset.lit === true || asset.roughness !== undefined || asset.metalness !== undefined || asset.emissive !== undefined);
-        const material = useLitMaterial && THREE.MeshStandardMaterial
+        const materialType = String(asset.material || "").toLowerCase();
+        const useSurfaceMaterial = materialType === "glass" || (asset.material !== "basic" && (asset.lit === true || asset.roughness !== undefined || asset.metalness !== undefined || asset.emissive !== undefined));
+        const material = useSurfaceMaterial && THREE.MeshStandardMaterial
           ? this.createThemeSurfaceMaterial(asset, "#334155")
           : new THREE.MeshBasicMaterial({
               color: this.resolveThemeColor(asset.color, "#334155"),
@@ -599,6 +674,7 @@
     createThemeSurfaceMaterial(asset, fallbackColor) {
       const opacity = clampNumber(this.resolveThemeOpacity(asset, 1), 0, 1, 1);
       const color = this.resolveThemeColor(asset.color, fallbackColor);
+      const materialType = String(asset.material || "").toLowerCase();
       if (asset.material === "basic" || !THREE.MeshStandardMaterial) {
         return new THREE.MeshBasicMaterial({
           color,
@@ -606,6 +682,35 @@
           transparent: opacity < 1,
           opacity,
         });
+      }
+      if (materialType === "glass") {
+        const glassOpacity = clampNumber(this.resolveThemeOpacity(asset, 0.32), 0.04, 0.85, 0.32);
+        const glassConfig = {
+          color,
+          roughness: clampNumber(this.resolveThemeNumber(asset.roughness, 0.04), 0, 1, 0.04),
+          metalness: clampNumber(this.resolveThemeNumber(asset.metalness, 0), 0, 1, 0),
+          emissive: this.resolveThemeColor(asset.emissive, "#000000"),
+          emissiveIntensity: clampNumber(this.resolveThemeNumber(asset.emissiveIntensity, 0), 0, 8, 0),
+          wireframe: Boolean(asset.wireframe),
+          transparent: true,
+          opacity: glassOpacity,
+          depthWrite: asset.depthWrite === true,
+          depthTest: asset.depthTest === false ? false : true,
+          side: THREE.DoubleSide,
+        };
+        if (THREE.MeshPhysicalMaterial) {
+          return new THREE.MeshPhysicalMaterial({
+            ...glassConfig,
+            transmission: clampNumber(this.resolveThemeNumber(asset.transmission, 0.62), 0, 1, 0.62),
+            thickness: clampNumber(this.resolveThemeNumber(asset.thickness, 0.08), 0, 5, 0.08),
+            ior: clampNumber(this.resolveThemeNumber(asset.ior, 1.45), 1, 2.333, 1.45),
+            clearcoat: clampNumber(this.resolveThemeNumber(asset.clearcoat, 0.85), 0, 1, 0.85),
+            clearcoatRoughness: clampNumber(this.resolveThemeNumber(asset.clearcoatRoughness, 0.08), 0, 1, 0.08),
+            attenuationColor: this.resolveThemeColor(asset.attenuationColor, asset.color || fallbackColor),
+            attenuationDistance: clampNumber(this.resolveThemeNumber(asset.attenuationDistance, 2.6), 0.01, 1000, 2.6),
+          });
+        }
+        return new THREE.MeshStandardMaterial(glassConfig);
       }
       return new THREE.MeshStandardMaterial({
         color,
@@ -669,6 +774,7 @@
 
     configureThemeObject(object, config, revision) {
       this.applyThemeTransform(object, config);
+      if (config.renderOrder !== undefined) object.renderOrder = Number(config.renderOrder) || 0;
       object.visible = this.resolveThemeBoolean(config.visibleSetting ? `$${config.visibleSetting}` : config.visible, true);
       object.userData.themeConfig = config;
       object.userData.themeRevision = revision;
@@ -676,6 +782,7 @@
       object.userData.themeBaseRotation = object.rotation.clone();
       object.userData.themeBaseScale = object.scale.clone();
       object.userData.themeBaseIntensity = Number(object.intensity ?? 0);
+      if (object.color?.clone) object.userData.themeBaseColor = object.color.clone();
       object.userData.themeBaseOpacity = Array.isArray(object.material)
         ? Number(object.material[0]?.opacity ?? 1)
         : Number(object.material?.opacity ?? 1);
@@ -688,6 +795,9 @@
       }
       if (config.animation) {
         this.themeAnimatedObjects.push(object);
+      }
+      if (config.videoSample) {
+        this.themeSampledObjects.push(object);
       }
     }
 
@@ -774,6 +884,9 @@
       this.resizeRenderer();
       this.renderer.setAnimationLoop(() => this.renderFrame());
       this.updatePlaybackControls();
+      if (this.settings.spatialAudio) {
+        this.setSpatialAudioEnabled(true).catch(() => {});
+      }
       document.body.classList.add("fp-three-xr-active");
     }
 
@@ -798,6 +911,15 @@
         this.xrSidePanelMesh.geometry?.dispose();
         this.xrSidePanelMesh.material?.dispose();
       }
+      if (this.mrDimMesh) {
+        this.mrDimMesh.geometry?.dispose();
+        this.mrDimMesh.material?.dispose();
+        this.mrDimMesh.parent?.remove?.(this.mrDimMesh);
+      }
+      if (this.videoMesh) {
+        this.videoMesh.geometry?.dispose();
+        this.videoMesh.material?.dispose();
+      }
       this.clearThemeObjects();
       if (this.backlightGroup) {
         this.disposeBacklight();
@@ -807,6 +929,8 @@
       this.scene = null;
       this.camera = null;
       this.videoMesh = null;
+      this.videoGeometryKey = "";
+      this.mrDimMesh = null;
       this.videoTexture = null;
       this.xrSidePanelMesh = null;
       this.xrSidePanelTexture = null;
@@ -814,12 +938,15 @@
       this.xrSidePanelContext = null;
       this.xrSidePanelHotspots = [];
       this.screenGroup = null;
+      this.screenSurfaceGroup = null;
       this.gridMesh = null;
       this.themeGroup = null;
       this.themeObjects = [];
       this.themeObjectById = new Map();
       this.themeInteractiveObjects = [];
       this.themeAnimatedObjects = [];
+      this.themeSampledObjects = [];
+      this.themeVideoSampleColors = null;
       this.themeSettingRenderKey = "";
       this.themeRaycaster = null;
       this.themePointer = null;
@@ -837,8 +964,11 @@
       this.backlightSampleMesh = null;
       this.backlightReadPixels = null;
       this.backlightReadData = null;
+      this.spatialAudioNodes = [];
       this.controllers = [];
       this.controllerLines = [];
+      this.xrThumbstickSeekDirection = 0;
+      this.xrThumbstickSeekAt = 0;
       this.activeGrab = null;
       this.desktopDrag = null;
       this.desktopKeys.clear();
@@ -848,6 +978,11 @@
       this.xrRaycaster = null;
       this.xrControllerRayMatrix = null;
       document.body.classList.remove("fp-three-xr-active");
+      if (this.settings.spatialAudio) {
+        this.rebuildSpatialAudioGraph();
+      } else {
+        this.enableAudioPassthrough();
+      }
     }
 
     buildOverlay() {
@@ -923,6 +1058,11 @@
               </label>
               <label class="fp-xr-range"><span>Backlight intensity <output data-role="backlight-intensity-label"></output></span><input class="form-range" type="range" min="0" max="150" step="5" data-role="backlight-intensity"></label>
               <div class="fp-xr-debug" data-role="backlight-debug" hidden></div>
+              <label class="fp-xr-check">
+                <input class="form-check-input" type="checkbox" data-role="overlay-spatial-audio">
+                <span>Spatial audio</span>
+              </label>
+              <div class="fp-xr-debug" data-role="spatial-audio-status"></div>
               <label class="fp-xr-field">
                 <span>View</span>
                 <select class="form-select form-select-sm" data-role="overlay-layout">
@@ -948,6 +1088,7 @@
               <label class="fp-xr-range"><span>Height pos <output data-role="y-label"></output></span><input class="form-range" type="range" min="-1.4" max="1.4" step="0.05" data-role="panel-y"></label>
               <label class="fp-xr-range"><span>Yaw <output data-role="yaw-label"></output></span><input class="form-range" type="range" min="-35" max="35" step="1" data-role="panel-yaw"></label>
               <label class="fp-xr-range"><span>Tilt <output data-role="pitch-label"></output></span><input class="form-range" type="range" min="-20" max="20" step="1" data-role="panel-pitch"></label>
+              <label class="fp-xr-range"><span>Screen curve <output data-role="curve-label"></output></span><input class="form-range" type="range" min="0" max="100" step="5" data-role="screen-curve"></label>
               <label class="fp-xr-range"><span>Distance <output data-role="distance-label"></output></span><input class="form-range" type="range" min="1.4" max="6" step="0.1" data-role="panel-distance"></label>
               <label class="fp-xr-range"><span>Room dim <output data-role="dim-label"></output></span><input class="form-range" type="range" min="0" max="100" step="5" data-role="room-dim"></label>
               <button class="btn btn-sm btn-outline-light w-100" type="button" data-action="reset-screen">
@@ -967,6 +1108,8 @@
       this.backlightSelect = this.overlay.querySelector("[data-role='backlight']");
       this.backlightIntensityInput = this.overlay.querySelector("[data-role='backlight-intensity']");
       this.backlightDebug = this.overlay.querySelector("[data-role='backlight-debug']");
+      this.overlaySpatialAudioInput = this.overlay.querySelector("[data-role='overlay-spatial-audio']");
+      this.spatialAudioStatusElement = this.overlay.querySelector("[data-role='spatial-audio-status']");
       this.overlayLayoutSelect = this.overlay.querySelector("[data-role='overlay-layout']");
       this.overlayEyeSelect = this.overlay.querySelector("[data-role='overlay-eye']");
       this.overlayEyeField = this.overlay.querySelector("[data-role='overlay-eye-field']");
@@ -977,6 +1120,7 @@
       this.yInput = this.overlay.querySelector("[data-role='panel-y']");
       this.yawInput = this.overlay.querySelector("[data-role='panel-yaw']");
       this.pitchInput = this.overlay.querySelector("[data-role='panel-pitch']");
+      this.curveInput = this.overlay.querySelector("[data-role='screen-curve']");
       this.distanceInput = this.overlay.querySelector("[data-role='panel-distance']");
       this.dimInput = this.overlay.querySelector("[data-role='room-dim']");
       this.backlightIntensityLabel = this.overlay.querySelector("[data-role='backlight-intensity-label']");
@@ -986,6 +1130,7 @@
       this.yLabel = this.overlay.querySelector("[data-role='y-label']");
       this.yawLabel = this.overlay.querySelector("[data-role='yaw-label']");
       this.pitchLabel = this.overlay.querySelector("[data-role='pitch-label']");
+      this.curveLabel = this.overlay.querySelector("[data-role='curve-label']");
       this.distanceLabel = this.overlay.querySelector("[data-role='distance-label']");
       this.dimLabel = this.overlay.querySelector("[data-role='dim-label']");
       this.playButton = this.overlay.querySelector("[data-action='play-toggle']");
@@ -1022,20 +1167,26 @@
         this.headsetModeSelect.value = this.settings.headsetMode;
         this.saveSettings();
         this.syncOverlayControls();
+        this.updateSceneLighting();
         this.updateInlineStatus();
       });
       this.themeSelect.addEventListener("change", () => {
         this.settings.theme = this.themeSelect.value || DEFAULT_SETTINGS.theme;
+        this.migrateThemeValueDefaults();
         this.saveSettings();
         this.themeSettingRenderKey = "";
         this.syncOverlayControls();
         this.applyTheme();
+        this.rebuildSpatialAudioGraph();
       });
       this.backlightSelect.addEventListener("change", () => {
         this.settings.backlightMode = isKnownBacklightMode(this.backlightSelect.value) ? this.backlightSelect.value : "off";
         this.saveSettings();
         this.syncOverlayControls();
         this.updateBacklight(true);
+      });
+      this.overlaySpatialAudioInput.addEventListener("change", () => {
+        this.setSpatialAudioEnabled(this.overlaySpatialAudioInput.checked);
       });
       this.aspectLockInput.addEventListener("change", () => {
         this.settings.aspectLocked = this.aspectLockInput.checked;
@@ -1067,6 +1218,7 @@
       this.yInput.addEventListener("input", () => this.updateNumericSetting("panelY", this.yInput.value));
       this.yawInput.addEventListener("input", () => this.updateNumericSetting("panelYaw", this.yawInput.value));
       this.pitchInput.addEventListener("input", () => this.updateNumericSetting("panelPitch", this.pitchInput.value));
+      this.curveInput.addEventListener("input", () => this.updateNumericSetting("screenCurve", this.curveInput.value));
       this.distanceInput.addEventListener("input", () => this.updateNumericSetting("distance", this.distanceInput.value));
       this.dimInput.addEventListener("input", () => this.updateNumericSetting("roomDim", this.dimInput.value));
       this.backlightIntensityInput.addEventListener("input", () => this.updateNumericSetting("backlightIntensity", this.backlightIntensityInput.value));
@@ -1078,6 +1230,7 @@
         this.headsetModeSelect.value = this.settings.headsetMode;
         this.headsetModeSelect.querySelector("option[value='mr']").disabled = !this.xrArSupported;
       }
+      if (this.spatialAudioInput) this.spatialAudioInput.checked = Boolean(this.settings.spatialAudio);
       if (!this.overlay) return;
       this.overlayHeadsetModeSelect.value = this.settings.headsetMode;
       this.overlayHeadsetModeSelect.querySelector("option[value='mr']").disabled = !this.xrArSupported;
@@ -1086,6 +1239,10 @@
       this.syncThemeSettingsControls();
       this.backlightSelect.value = this.settings.backlightMode;
       this.backlightIntensityInput.value = String(this.settings.backlightIntensity);
+      this.overlaySpatialAudioInput.checked = Boolean(this.settings.spatialAudio);
+      if (this.spatialAudioStatusElement) {
+        this.spatialAudioStatusElement.textContent = this.spatialAudioStatus || "Spatial audio off.";
+      }
       this.aspectLockInput.checked = Boolean(this.settings.aspectLocked);
       this.overlayLayoutSelect.value = this.settings.layout;
       this.overlayEyeSelect.value = this.settings.eye;
@@ -1096,6 +1253,7 @@
       this.yInput.value = String(this.settings.panelY);
       this.yawInput.value = String(this.settings.panelYaw);
       this.pitchInput.value = String(this.settings.panelPitch);
+      this.curveInput.value = String(this.settings.screenCurve);
       this.distanceInput.value = String(this.settings.distance);
       this.dimInput.value = String(this.settings.roomDim);
       this.widthLabel.textContent = `${this.settings.panelWidth.toFixed(1)}m`;
@@ -1104,6 +1262,7 @@
       this.yLabel.textContent = `${this.settings.panelY.toFixed(2)}m`;
       this.yawLabel.textContent = `${Math.round(this.settings.panelYaw)}°`;
       this.pitchLabel.textContent = `${Math.round(this.settings.panelPitch)}°`;
+      this.curveLabel.textContent = this.settings.screenCurve > 0 ? `${Math.round(this.settings.screenCurve)}%` : "Flat";
       this.distanceLabel.textContent = `${this.settings.distance.toFixed(1)}m`;
       this.dimLabel.textContent = `${Math.round(this.settings.roomDim)}%`;
       this.backlightIntensityLabel.textContent = `${Math.round(this.settings.backlightIntensity)}%`;
@@ -1140,6 +1299,7 @@
         panelY: [-1.4, 1.4],
         panelYaw: [-35, 35],
         panelPitch: [-20, 20],
+        screenCurve: [0, 100],
         distance: [1.4, 6],
         roomDim: [0, 100],
         backlightIntensity: [0, 150],
@@ -1149,6 +1309,7 @@
       this.syncOverlayControls();
       this.updateVideoGeometry();
       this.updateSceneLighting();
+      this.updateSpatialAudio();
       if (key === "backlightIntensity") this.updateBacklight(true);
     }
 
@@ -1166,6 +1327,7 @@
       this.saveSettings();
       this.syncOverlayControls();
       this.updateVideoGeometry();
+      this.updateSpatialAudio();
       this.updateBacklight(true);
     }
 
@@ -1198,6 +1360,7 @@
       this.saveSettings();
       this.syncOverlayControls();
       this.updateVideoGeometry();
+      this.updateSpatialAudio();
     }
 
     toggleSidePanel(force = null) {
@@ -1470,7 +1633,7 @@
       this.settings.roomViewY = clampNumber(
         this.settings.roomViewY + vertical,
         -0.8,
-        1.2,
+        1.8,
         DEFAULT_SETTINGS.roomViewY,
       );
       this.settings.roomViewZ = clampNumber(
@@ -1484,6 +1647,12 @@
 
     updateDesktopCamera() {
       if (!this.camera || this.xrSession) return;
+      const desktopConfig = isPlainObject(this.currentTheme().desktop) ? this.currentTheme().desktop : {};
+      const fov = clampNumber(Number(desktopConfig.fov), 45, 90, 60);
+      if (this.camera.fov !== fov) {
+        this.camera.fov = fov;
+        this.camera.updateProjectionMatrix();
+      }
       this.camera.position.set(this.settings.roomViewX, this.settings.roomViewY, this.settings.roomViewZ);
       this.camera.rotation.set(
         THREE.MathUtils.degToRad(this.settings.roomViewPitch),
@@ -1526,6 +1695,371 @@
       }
     }
 
+    themeWantsVideoSampling() {
+      const theme = this.currentTheme();
+      return Boolean(theme.videoSampling || this.themeSampledObjects.length);
+    }
+
+    updateThemeVideoSampling() {
+      if (!this.themeWantsVideoSampling() || !this.backlightSegments?.length) return;
+      const colors = this.sampleVideoEdgeColors();
+      this.themeVideoSampleColors = colors;
+      for (const object of this.themeSampledObjects) {
+        this.applyThemeVideoSample(object, colors);
+      }
+    }
+
+    applyThemeVideoSample(object, colors) {
+      const config = object?.userData?.themeConfig || {};
+      const sample = themeVideoSampleColor(colors, config.videoSample) || offBacklightColor();
+      const sampleVisible = isVisibleBacklightColor(sample);
+      const color = sampleVisible ? new THREE.Color(sample.r, sample.g, sample.b) : null;
+      const multiplier = clampNumber(this.resolveThemeNumber(config.videoSampleMultiplier, 1), 0, 20, 1);
+      const sampleLevel = sampleVisible ? clampNumber(Number(sample.opacity || 0) * multiplier, 0, 4, 0) : 0;
+      if (object.isLight && object.color) {
+        object.color.copy(color || object.userData.themeBaseColor || object.color);
+        const minIntensity = clampNumber(this.resolveThemeNumber(config.videoSampleMinIntensity, 0), 0, 20, 0);
+        const maxIntensity = clampNumber(this.resolveThemeNumber(config.videoSampleMaxIntensity, object.userData.themeBaseIntensity * 2.2 || 2), 0, 50, 2);
+        object.intensity = clampNumber(object.userData.themeBaseIntensity * sampleLevel, minIntensity, maxIntensity, object.userData.themeBaseIntensity);
+        return;
+      }
+      const target = String(config.videoSampleTarget || "emissive").toLowerCase();
+      for (const material of objectMaterials(object)) {
+        if (!material) continue;
+        if (!material.userData.themeBaseColor && material.color) material.userData.themeBaseColor = material.color.clone();
+        if (!material.userData.themeBaseEmissive && material.emissive) material.userData.themeBaseEmissive = material.emissive.clone();
+        if (material.userData.themeBaseEmissiveIntensity === undefined) {
+          material.userData.themeBaseEmissiveIntensity = Number(material.emissiveIntensity || 0);
+        }
+        if (target === "color" || target === "both") {
+          material.color?.copy(color || material.userData.themeBaseColor || material.color);
+        }
+        if ((target === "emissive" || target === "both") && material.emissive) {
+          material.emissive.copy(color || material.userData.themeBaseEmissive || material.emissive);
+          const base = Number(material.userData.themeBaseEmissiveIntensity || 0);
+          const min = clampNumber(this.resolveThemeNumber(config.videoSampleMinIntensity, base), 0, 20, base);
+          const max = clampNumber(this.resolveThemeNumber(config.videoSampleMaxIntensity, base + 2.5), 0, 50, base + 2.5);
+          material.emissiveIntensity = clampNumber(base + sampleLevel, min, max, base);
+        }
+        if (config.videoSampleOpacity) {
+          if (material.userData.themeBaseOpacity === undefined) material.userData.themeBaseOpacity = Number(material.opacity ?? 1);
+          material.opacity = clampNumber(material.userData.themeBaseOpacity * sampleLevel, 0, 1, material.userData.themeBaseOpacity);
+          material.transparent = material.transparent || material.opacity < 1;
+        }
+      }
+    }
+
+    async setSpatialAudioEnabled(enabled) {
+      const nextEnabled = Boolean(enabled);
+      this.settings.spatialAudio = nextEnabled;
+      this.saveSettings();
+      this.syncOverlayControls();
+      if (!nextEnabled) {
+        this.enableAudioPassthrough();
+        this.spatialAudioStatus = "Spatial audio off.";
+        this.syncOverlayControls();
+        this.updateInlineStatus();
+        this.updateXrSidePanelTexture(true);
+        return;
+      }
+      if (typeof this.options.onSpatialAudioPreference === "function") {
+        try {
+          await this.options.onSpatialAudioPreference(true, this);
+        } catch (error) {
+          this.spatialAudioStatus = error?.message || "Spatial audio source switch failed.";
+        }
+      }
+      if (!this.ensureSpatialAudioGraph()) {
+        this.settings.spatialAudio = false;
+        this.saveSettings();
+        this.syncOverlayControls();
+        this.updateInlineStatus();
+        return;
+      }
+      await this.spatialAudioGraph.context.resume().catch(() => {});
+      this.rebuildSpatialAudioGraph();
+      this.updateXrSidePanelTexture(true);
+    }
+
+    ensureSpatialAudioGraph() {
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+      if (!AudioContextClass) {
+        this.spatialAudioStatus = "Web Audio is unavailable in this browser.";
+        return null;
+      }
+      let graph = AUDIO_GRAPH_BY_VIDEO.get(this.video);
+      if (graph) {
+        this.spatialAudioGraph = graph;
+        return graph;
+      }
+      try {
+        const context = new AudioContextClass();
+        const source = context.createMediaElementSource(this.video);
+        source.channelInterpretation = "discrete";
+        const passthroughGain = context.createGain();
+        const masterGain = context.createGain();
+        graph = {
+          context,
+          source,
+          passthroughGain,
+          masterGain,
+          splitter: null,
+          nodes: [],
+          mode: "",
+        };
+        AUDIO_GRAPH_BY_VIDEO.set(this.video, graph);
+        this.spatialAudioGraph = graph;
+        this.connectAudioPassthrough(graph);
+        return graph;
+      } catch (error) {
+        this.spatialAudioStatus = error?.message || "Could not attach Web Audio to this video.";
+        return null;
+      }
+    }
+
+    rebuildSpatialAudioGraph() {
+      if (!this.settings.spatialAudio) {
+        this.enableAudioPassthrough();
+        return;
+      }
+      if (!window.THREE) {
+        this.spatialAudioStatus = "Spatial audio needs Three.js for speaker placement.";
+        this.syncOverlayControls();
+        this.updateInlineStatus();
+        return;
+      }
+      const graph = this.ensureSpatialAudioGraph();
+      if (!graph) return;
+      this.disconnectSpatialAudioGraph(graph);
+      const channelCount = this.spatialAudioChannelCount();
+      const labels = this.spatialAudioChannelLabels(channelCount);
+      const speakers = this.spatialSpeakerDefinitions(labels);
+      try {
+        graph.splitter = graph.context.createChannelSplitter(channelCount);
+        graph.splitter.channelInterpretation = "discrete";
+        graph.source.connect(graph.splitter);
+        graph.masterGain.connect(graph.context.destination);
+        graph.nodes = speakers.map((speaker, index) => this.connectSpatialSpeakerNode(graph, speaker, index));
+        graph.mode = "spatial";
+        this.spatialAudioGraph = graph;
+        this.spatialAudioNodes = graph.nodes;
+        this.updateSpatialAudioVolume();
+        this.updateSpatialAudio();
+        this.spatialAudioStatus = this.spatialAudioStatusText(channelCount, speakers);
+        this.syncOverlayControls();
+        this.updateInlineStatus();
+      } catch (error) {
+        this.spatialAudioStatus = error?.message || "Could not build spatial audio graph.";
+        this.enableAudioPassthrough();
+        this.syncOverlayControls();
+        this.updateInlineStatus();
+      }
+    }
+
+    connectSpatialSpeakerNode(graph, speaker, outputIndex) {
+      const gain = graph.context.createGain();
+      gain.gain.value = clampNumber(Number(speaker.gain), 0, 4, 1);
+      const nodeRecord = { speaker, gain, panner: null, lowpass: null };
+      graph.splitter.connect(gain, outputIndex);
+      if (speaker.lfe || normalizeSpeakerChannel(speaker.channel) === "LFE") {
+        const lowpass = graph.context.createBiquadFilter();
+        lowpass.type = "lowpass";
+        lowpass.frequency.value = clampNumber(Number(speaker.frequency), 40, 240, 120);
+        gain.connect(lowpass);
+        lowpass.connect(graph.masterGain);
+        nodeRecord.lowpass = lowpass;
+        return nodeRecord;
+      }
+      const panner = graph.context.createPanner();
+      panner.panningModel = speaker.panningModel === "equalpower" ? "equalpower" : "HRTF";
+      panner.distanceModel = speaker.distanceModel || "inverse";
+      panner.refDistance = clampNumber(Number(speaker.refDistance), 0.1, 20, 1.2);
+      panner.maxDistance = clampNumber(Number(speaker.maxDistance), 1, 1000, 18);
+      panner.rolloffFactor = clampNumber(Number(speaker.rolloffFactor), 0, 10, 0.6);
+      panner.coneInnerAngle = clampNumber(Number(speaker.coneInnerAngle), 0, 360, 360);
+      panner.coneOuterAngle = clampNumber(Number(speaker.coneOuterAngle), 0, 360, 360);
+      panner.coneOuterGain = clampNumber(Number(speaker.coneOuterGain), 0, 1, 0);
+      gain.connect(panner);
+      panner.connect(graph.masterGain);
+      nodeRecord.panner = panner;
+      return nodeRecord;
+    }
+
+    disconnectSpatialAudioGraph(graph = this.spatialAudioGraph) {
+      if (!graph) return;
+      safeDisconnect(graph.source);
+      safeDisconnect(graph.passthroughGain);
+      safeDisconnect(graph.masterGain);
+      safeDisconnect(graph.splitter);
+      for (const record of graph.nodes || []) {
+        safeDisconnect(record.gain);
+        safeDisconnect(record.panner);
+        safeDisconnect(record.lowpass);
+      }
+      graph.splitter = null;
+      graph.nodes = [];
+      graph.mode = "";
+      this.spatialAudioNodes = [];
+    }
+
+    enableAudioPassthrough() {
+      const graph = this.spatialAudioGraph || AUDIO_GRAPH_BY_VIDEO.get(this.video);
+      if (!graph) return;
+      this.disconnectSpatialAudioGraph(graph);
+      this.connectAudioPassthrough(graph);
+      this.spatialAudioStatus = "Spatial audio off.";
+      this.syncOverlayControls();
+      this.updateInlineStatus();
+    }
+
+    connectAudioPassthrough(graph) {
+      if (!graph) return;
+      safeDisconnect(graph.source);
+      safeDisconnect(graph.passthroughGain);
+      graph.source.connect(graph.passthroughGain);
+      graph.passthroughGain.connect(graph.context.destination);
+      graph.mode = "passthrough";
+      this.updateSpatialAudioVolume();
+    }
+
+    updateSpatialAudioVolume() {
+      const graph = this.spatialAudioGraph || AUDIO_GRAPH_BY_VIDEO.get(this.video);
+      if (!graph) return;
+      const gain = this.video.muted ? 0 : clampNumber(Number(this.video.volume), 0, 1, 1);
+      setAudioParamValue(graph.masterGain?.gain, gain, graph.context);
+      setAudioParamValue(graph.passthroughGain?.gain, gain, graph.context);
+    }
+
+    updateSpatialAudio() {
+      const graph = this.spatialAudioGraph;
+      if (!graph || graph.mode !== "spatial") return;
+      this.updateSpatialAudioVolume();
+      this.updateSpatialAudioListener(graph);
+      for (const record of graph.nodes || []) {
+        if (!record?.panner) continue;
+        const position = this.spatialSpeakerWorldPosition(record.speaker);
+        setPannerPosition(record.panner, position, graph.context);
+      }
+    }
+
+    updateSpatialAudioListener(graph) {
+      const listener = graph.context.listener;
+      if (!listener) return;
+      const camera = this.camera ? this.audioListenerCamera() : null;
+      if (!camera) {
+        setListenerPosition(listener, new THREE.Vector3(0, 0, 0), graph.context);
+        setListenerOrientation(listener, new THREE.Vector3(0, 0, -1), new THREE.Vector3(0, 1, 0), graph.context);
+        return;
+      }
+      camera.updateMatrixWorld?.();
+      const position = new THREE.Vector3().setFromMatrixPosition(camera.matrixWorld);
+      const quaternion = new THREE.Quaternion().setFromRotationMatrix(camera.matrixWorld);
+      const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(quaternion).normalize();
+      const up = new THREE.Vector3(0, 1, 0).applyQuaternion(quaternion).normalize();
+      setListenerPosition(listener, position, graph.context);
+      setListenerOrientation(listener, forward, up, graph.context);
+    }
+
+    audioListenerCamera() {
+      if (this.renderer?.xr?.isPresenting) {
+        const xrCamera = this.renderer.xr.getCamera(this.camera);
+        if (xrCamera) return xrCamera;
+      }
+      return this.camera;
+    }
+
+    spatialAudioMediaInfo() {
+      try {
+        return typeof this.options.mediaInfo === "function" ? this.options.mediaInfo() : this.options.mediaInfo;
+      } catch (error) {
+        return null;
+      }
+    }
+
+    spatialAudioChannelCount() {
+      const mediaInfo = this.spatialAudioMediaInfo() || {};
+      const defaultAudio = mediaInfo.defaultAudio || {};
+      const count = Number(mediaInfo.audioChannels || defaultAudio.channels || 0);
+      if (Number.isFinite(count) && count > 0) return clampNumber(Math.round(count), 1, 8, 2);
+      return 8;
+    }
+
+    spatialAudioChannelLabels(channelCount = this.spatialAudioChannelCount()) {
+      const mediaInfo = this.spatialAudioMediaInfo() || {};
+      const labels = Array.isArray(mediaInfo.audioChannelLabels) ? mediaInfo.audioChannelLabels : [];
+      if (labels.length) return labels.slice(0, channelCount).map((label) => normalizeSpeakerChannel(label));
+      return DEFAULT_AUDIO_CHANNEL_LABELS.slice(0, channelCount);
+    }
+
+    spatialSpeakerDefinitions(labels) {
+      const theme = this.currentTheme();
+      const themed = [
+        ...(Array.isArray(theme.speakers) ? theme.speakers : []),
+        ...(Array.isArray(theme.audio?.speakers) ? theme.audio.speakers : []),
+      ].filter((speaker) => isPlainObject(speaker));
+      return labels.map((label, index) => {
+        const channel = normalizeSpeakerChannel(label || DEFAULT_AUDIO_CHANNEL_LABELS[index] || `CH${index + 1}`);
+        const override = themed.find((speaker) => (
+          normalizeSpeakerChannel(speaker.channel || speaker.id) === channel
+          || Number(speaker.index) === index
+        ));
+        return this.resolveSpeakerDefinition(channel, index, override);
+      });
+    }
+
+    resolveSpeakerDefinition(channel, index, override = null) {
+      const base = defaultSpeakerDefinition(channel, index, this.settings);
+      if (!override) return base;
+      return {
+        ...base,
+        ...override,
+        channel,
+        themeProvided: true,
+        position: Array.isArray(override.position) ? override.position : base.position,
+        relativeTo: override.relativeTo || override.relative || base.relativeTo,
+        gain: override.gain ?? base.gain,
+      };
+    }
+
+    spatialSpeakerWorldPosition(speaker) {
+      const local = speakerVectorFromDefinition(speaker);
+      const relativeTo = String(speaker.relativeTo || "screen").toLowerCase();
+      if (relativeTo === "room" || relativeTo === "world") return local;
+      if (relativeTo === "listener" || relativeTo === "head") {
+        const camera = this.camera ? this.audioListenerCamera() : null;
+        if (!camera) return local;
+        camera.updateMatrixWorld?.();
+        const offset = local.clone().applyQuaternion(new THREE.Quaternion().setFromRotationMatrix(camera.matrixWorld));
+        return new THREE.Vector3().setFromMatrixPosition(camera.matrixWorld).add(offset);
+      }
+      const anchor = this.screenSurfaceGroup || this.screenGroup;
+      if (!anchor) return this.spatialDefaultScreenWorldPosition(local);
+      anchor.updateMatrixWorld?.();
+      return anchor.localToWorld(local.clone());
+    }
+
+    spatialDefaultScreenWorldPosition(local) {
+      const yaw = THREE.MathUtils.degToRad(clampNumber(Number(this.settings.panelYaw), -35, 35, DEFAULT_SETTINGS.panelYaw));
+      const pitch = THREE.MathUtils.degToRad(clampNumber(Number(this.settings.panelPitch), -20, 20, DEFAULT_SETTINGS.panelPitch));
+      const distance = clampNumber(Number(this.settings.distance), 1.4, 6, DEFAULT_SETTINGS.distance);
+      const origin = new THREE.Vector3(
+        clampNumber(Number(this.settings.panelX), -3, 3, DEFAULT_SETTINGS.panelX),
+        clampNumber(Number(this.settings.panelY), -1.4, 1.4, DEFAULT_SETTINGS.panelY),
+        -distance,
+      );
+      const rotation = new THREE.Euler(pitch, yaw, 0, "YXZ");
+      return local.clone().applyEuler(rotation).add(origin);
+    }
+
+    spatialAudioStatusText(channelCount, speakers) {
+      const mediaInfo = this.spatialAudioMediaInfo() || {};
+      const layout = mediaInfo.audioChannelLayout || `${channelCount}ch`;
+      const source = mediaInfo.spatialAudioCandidate || channelCount > 2 ? layout : `${layout}; stereo/mono source`;
+      const themed = speakers.some((speaker) => speaker.themeProvided);
+      const mode = this.inTheater ? "XR spatial audio" : "Headphone spatial audio";
+      return `${mode} on: ${source}${themed ? "; theme speaker layout" : "; default speaker layout"}.`;
+    }
+
     initThree() {
       this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: true, alpha: true });
       this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
@@ -1536,6 +2070,8 @@
       this.camera = new THREE.PerspectiveCamera(60, 1, 0.1, 100);
       this.camera.rotation.order = "YXZ";
       this.camera.position.set(0, 0, 0);
+      this.scene.add(this.camera);
+      this.initMrDimLayer();
       this.xrRaycaster = new THREE.Raycaster();
       this.xrControllerRayMatrix = new THREE.Matrix4();
       this.themeRaycaster = new THREE.Raycaster();
@@ -1544,6 +2080,8 @@
       this.scene.add(ambient);
       this.screenGroup = new THREE.Group();
       this.scene.add(this.screenGroup);
+      this.screenSurfaceGroup = new THREE.Group();
+      this.screenGroup.add(this.screenSurfaceGroup);
       this.themeGroup = new THREE.Group();
       this.scene.add(this.themeGroup);
       this.videoTexture = new THREE.VideoTexture(this.video);
@@ -1551,16 +2089,35 @@
       this.videoTexture.minFilter = THREE.LinearFilter;
       this.videoTexture.magFilter = THREE.LinearFilter;
       this.videoTexture.generateMipmaps = false;
-      const material = new THREE.MeshBasicMaterial({ map: this.videoTexture, side: THREE.DoubleSide });
-      this.videoMesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), material);
+      const material = new THREE.MeshBasicMaterial({ map: this.videoTexture, side: THREE.DoubleSide, transparent: true, opacity: 1 });
+      this.videoMesh = new THREE.Mesh(this.createVideoGeometry(), material);
+      this.videoMesh.renderOrder = 2;
       this.videoMesh.onBeforeRender = (_renderer, _scene, camera) => this.applyVideoTextureUvForCamera(camera);
-      this.screenGroup.add(this.videoMesh);
+      this.screenSurfaceGroup.add(this.videoMesh);
       this.initBacklight();
       this.initXrSidePanel();
       this.initXrControllers();
       this.applyTheme();
       this.updateSceneLighting();
       this.updateDesktopCamera();
+    }
+
+    initMrDimLayer() {
+      if (!this.camera) return;
+      const material = new THREE.MeshBasicMaterial({
+        color: 0x000000,
+        transparent: true,
+        opacity: 0,
+        depthTest: false,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+      });
+      this.mrDimMesh = new THREE.Mesh(new THREE.PlaneGeometry(12, 8), material);
+      this.mrDimMesh.name = "mr-room-dim-overlay";
+      this.mrDimMesh.visible = false;
+      this.mrDimMesh.renderOrder = -100;
+      this.mrDimMesh.position.set(0, 0, -2);
+      this.camera.add(this.mrDimMesh);
     }
 
     updateSceneLighting() {
@@ -1576,15 +2133,54 @@
       );
       if (this.gridMesh) this.gridMesh.visible = !mrActive && dim > 0.05;
       if (this.themeGroup) this.themeGroup.visible = !mrActive;
+      if (this.mrDimMesh?.material) {
+        const opacity = clampNumber((1 - dim) * 0.82, 0, 0.82, 0);
+        this.mrDimMesh.visible = mrActive && opacity > 0.01;
+        this.mrDimMesh.material.opacity = opacity;
+      }
+    }
+
+    createVideoGeometry() {
+      const curve = clampNumber(Number(this.settings.screenCurve), 0, 100, DEFAULT_SETTINGS.screenCurve) / 100;
+      if (curve <= 0.001) return new THREE.PlaneGeometry(1, 1, 1, 1);
+      const segments = Math.round(lerp(18, 48, curve));
+      const geometry = new THREE.PlaneGeometry(1, 1, segments, 1);
+      const positions = geometry.attributes.position;
+      const halfAngle = THREE.MathUtils.degToRad(70 * curve) / 2;
+      const sinHalfAngle = Math.max(0.001, Math.sin(halfAngle));
+      const depthScale = clampNumber(Number(this.settings.panelWidth), 1.4, 6, DEFAULT_SETTINGS.panelWidth);
+      for (let index = 0; index < positions.count; index += 1) {
+        const u = positions.getX(index) + 0.5;
+        const theta = (u - 0.5) * 2 * halfAngle;
+        positions.setX(index, Math.sin(theta) / (2 * sinHalfAngle));
+        positions.setZ(index, ((1 - Math.cos(theta)) / (2 * sinHalfAngle)) * depthScale);
+      }
+      positions.needsUpdate = true;
+      geometry.computeVertexNormals();
+      return geometry;
     }
 
     updateVideoGeometry() {
       if (!this.videoMesh) return;
+      const geometryKey = `${Number(this.settings.panelWidth).toFixed(3)}:${Number(this.settings.screenCurve).toFixed(1)}`;
+      if (this.videoGeometryKey !== geometryKey) {
+        const previousGeometry = this.videoMesh.geometry;
+        this.videoMesh.geometry = this.createVideoGeometry();
+        previousGeometry?.dispose?.();
+        this.videoGeometryKey = geometryKey;
+      }
       this.videoMesh.scale.set(this.settings.panelWidth, this.settings.panelHeight, 1);
       this.videoMesh.position.set(0, 0, 0);
       if (this.screenGroup) {
         this.screenGroup.position.set(this.settings.panelX, this.settings.panelY, -this.settings.distance);
-        this.screenGroup.rotation.set(0, THREE.MathUtils.degToRad(this.settings.panelYaw), 0);
+        this.screenGroup.rotation.set(0, 0, 0);
+      }
+      if (this.screenSurfaceGroup) {
+        this.screenSurfaceGroup.rotation.set(
+          THREE.MathUtils.degToRad(this.settings.panelPitch),
+          THREE.MathUtils.degToRad(this.settings.panelYaw),
+          0,
+        );
       }
       this.updateBacklightGeometry();
       this.updateXrSidePanelGeometry();
@@ -1666,8 +2262,8 @@
       if (!this.xrSession || !this.xrSidePanelMesh?.visible || !this.xrRaycaster || !this.xrControllerRayMatrix) return false;
       const hit = this.sidePanelHitForController(controller);
       if (!hit?.uv) return false;
-      const x = hit.uv.x * this.xrSidePanelCanvas.width;
-      const y = (1 - hit.uv.y) * this.xrSidePanelCanvas.height;
+      const x = hit.uv.x * XR_SIDE_PANEL_LOGICAL_SIZE;
+      const y = (1 - hit.uv.y) * XR_SIDE_PANEL_LOGICAL_SIZE;
       const hotspot = this.xrSidePanelHotspots.find((item) => (
         x >= item.x
         && x <= item.x + item.width
@@ -1735,17 +2331,24 @@
       const sizeStep = 0.2;
       const intensityStep = 10;
       const dimStep = 10;
+      const curveStep = 10;
       if (hotspot.action === "play") {
         this.togglePlayback();
       } else if (hotspot.action === "mute-video") {
         this.video.muted = !this.video.muted;
         this.updatePlaybackControls();
+      } else if (hotspot.action === "spatial-audio-toggle") {
+        this.setSpatialAudioEnabled(!this.settings.spatialAudio);
       } else if (hotspot.action === "recenter") {
         this.recenterScreen();
       } else if (hotspot.action === "size-down") {
         this.updatePanelSize("width", this.settings.panelWidth - sizeStep);
       } else if (hotspot.action === "size-up") {
         this.updatePanelSize("width", this.settings.panelWidth + sizeStep);
+      } else if (hotspot.action === "curve-down") {
+        this.updateNumericSetting("screenCurve", this.settings.screenCurve - curveStep);
+      } else if (hotspot.action === "curve-up") {
+        this.updateNumericSetting("screenCurve", this.settings.screenCurve + curveStep);
       } else if (hotspot.action === "intensity-down") {
         this.updateNumericSetting("backlightIntensity", this.settings.backlightIntensity - intensityStep);
       } else if (hotspot.action === "intensity-up") {
@@ -1771,6 +2374,13 @@
       const actuator = controller.userData.inputSource?.gamepad?.hapticActuators?.[0];
       if (actuator?.pulse) {
         actuator.pulse(0.35, 35).catch(() => {});
+      }
+    }
+
+    pulseControllerSeek(controller) {
+      const actuator = controller.userData.inputSource?.gamepad?.hapticActuators?.[0];
+      if (actuator?.pulse) {
+        actuator.pulse(0.22, 28).catch(() => {});
       }
     }
 
@@ -1805,10 +2415,52 @@
       this.screenGroup.position.copy(next);
     }
 
+    updateXrThumbstickScrub(now = performance.now()) {
+      if (!this.xrSession || !this.controllers.length) {
+        this.xrThumbstickSeekDirection = 0;
+        return;
+      }
+      const controller = this.controllers.find((item) => item.userData.inputSource?.handedness === "left")
+        || this.controllers.find((item) => !item.userData.inputSource?.handedness && item.userData.index === 0);
+      const axis = this.thumbstickHorizontalAxis(controller);
+      if (Math.abs(axis) < XR_THUMBSTICK_SEEK_RESET_ZONE) {
+        this.xrThumbstickSeekDirection = 0;
+        return;
+      }
+      if (Math.abs(axis) < XR_THUMBSTICK_SEEK_DEADZONE) return;
+      const direction = axis > 0 ? 1 : -1;
+      const repeatReady = now - this.xrThumbstickSeekAt >= XR_THUMBSTICK_SEEK_REPEAT_MS;
+      if (this.xrThumbstickSeekDirection === direction && !repeatReady) return;
+      this.xrThumbstickSeekDirection = direction;
+      this.xrThumbstickSeekAt = now;
+      this.seekVideoBy(direction * XR_THUMBSTICK_SEEK_SECONDS);
+      if (controller) this.pulseControllerSeek(controller);
+    }
+
+    thumbstickHorizontalAxis(controller) {
+      const axes = controller?.userData?.inputSource?.gamepad?.axes;
+      if (!axes?.length) return 0;
+      let best = 0;
+      for (const index of [2, 0]) {
+        const value = Number(axes[index] || 0);
+        if (Math.abs(value) > Math.abs(best)) best = value;
+      }
+      return best;
+    }
+
+    seekVideoBy(seconds) {
+      const duration = Number(this.video.duration || 0);
+      if (!duration || !Number.isFinite(duration)) return;
+      const currentTime = Number(this.video.currentTime || 0);
+      this.video.currentTime = clampNumber(currentTime + seconds, 0, duration, currentTime);
+      this.updatePlaybackControls();
+      this.updateXrSidePanelTexture(true);
+    }
+
     initBacklight() {
       this.backlightGroup = new THREE.Group();
       this.backlightGroup.position.set(0, 0, -0.1);
-      this.screenGroup.add(this.backlightGroup);
+      (this.screenSurfaceGroup || this.screenGroup).add(this.backlightGroup);
       this.backlightTexture = createBacklightGlowTexture();
       const segments = Object.entries(BACKLIGHT_SEGMENT_COUNTS).flatMap(([side, count]) => (
         Array.from({ length: count }, (_value, index) => ({
@@ -2087,7 +2739,8 @@
         const window = this.displayedVideoSampleWindow();
         const output = emptyBacklightColorMap();
         const edgeDepth = 0.32;
-        for (const segment of this.backlightSegments) {
+        for (const segmentMesh of this.backlightSegments) {
+          const segment = segmentMesh.userData.backlightSegment || {};
           const start = segment.index / segment.count;
           const end = (segment.index + 1) / segment.count;
           let color = null;
@@ -2153,8 +2806,10 @@
           this.setBacklightSampleStatus(`${sample.source}: broad ${sample.debug || "visible"}`);
           return broadOutput;
         }
-        this.setBacklightSampleStatus(this.lastVideoBacklightColors ? `${sample.source}: blank, using last` : `${sample.source}: blank`);
-        return this.lastVideoBacklightColors || offBacklightColors();
+        const offColors = offBacklightColors();
+        this.lastVideoBacklightColors = offColors;
+        this.setBacklightSampleStatus(`${sample.source}: blank`);
+        return offColors;
       } catch (error) {
         this.setBacklightSampleStatus(this.lastVideoBacklightColors ? "last: sample error" : "off: sample error");
         return this.lastVideoBacklightColors || offBacklightColors();
@@ -2321,6 +2976,10 @@
       const height = Math.max(1, Math.floor(rect.height));
       this.renderer.setSize(width, height, false);
       this.camera.aspect = width / height;
+      if (!this.xrSession) {
+        const desktopConfig = isPlainObject(this.currentTheme().desktop) ? this.currentTheme().desktop : {};
+        this.camera.fov = clampNumber(Number(desktopConfig.fov), 45, 90, 60);
+      }
       this.camera.updateProjectionMatrix();
     }
 
@@ -2330,7 +2989,10 @@
         this.videoTexture.needsUpdate = true;
       }
       this.updateControllerDrag();
+      this.updateXrThumbstickScrub();
       this.updateBacklight();
+      this.updateThemeVideoSampling();
+      this.updateSpatialAudio();
       this.updateXrSidePanelTexture();
       this.updatePlaybackControls();
       const now = performance.now();
@@ -2350,6 +3012,9 @@
       let session = null;
       try {
         await this.video.play().catch(() => {});
+        if (this.settings.spatialAudio) {
+          await this.spatialAudioGraph?.context?.resume?.().catch(() => {});
+        }
         const sessionMode = this.settings.headsetMode === "mr" && this.xrArSupported ? "immersive-ar" : "immersive-vr";
         session = await this.requestImmersiveSession(sessionMode);
         this.xrSession = session;
@@ -2406,11 +3071,15 @@
 
     initXrSidePanel() {
       this.xrSidePanelCanvas = document.createElement("canvas");
-      this.xrSidePanelCanvas.width = 1024;
-      this.xrSidePanelCanvas.height = 1024;
+      this.xrSidePanelCanvas.width = XR_SIDE_PANEL_TEXTURE_SIZE;
+      this.xrSidePanelCanvas.height = XR_SIDE_PANEL_TEXTURE_SIZE;
       this.xrSidePanelContext = this.xrSidePanelCanvas.getContext("2d");
       this.xrSidePanelTexture = new THREE.CanvasTexture(this.xrSidePanelCanvas);
       this.xrSidePanelTexture.colorSpace = THREE.SRGBColorSpace;
+      this.xrSidePanelTexture.minFilter = THREE.LinearMipmapLinearFilter;
+      this.xrSidePanelTexture.magFilter = THREE.LinearFilter;
+      this.xrSidePanelTexture.generateMipmaps = true;
+      this.xrSidePanelTexture.anisotropy = Math.min(8, this.renderer?.capabilities?.getMaxAnisotropy?.() || 1);
       const material = new THREE.MeshBasicMaterial({
         map: this.xrSidePanelTexture,
         side: THREE.DoubleSide,
@@ -2418,6 +3087,7 @@
       });
       this.xrSidePanelMesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), material);
       this.xrSidePanelMesh.visible = false;
+      this.xrSidePanelMesh.renderOrder = 3;
       this.screenGroup.add(this.xrSidePanelMesh);
       this.updateXrSidePanelGeometry();
       this.updateXrSidePanelTexture(true);
@@ -2427,13 +3097,16 @@
       if (!this.xrSidePanelMesh) return;
       const sideWidth = clampNumber(this.settings.panelWidth * 0.48, 1.25, 2.05, 1.55);
       const sideHeight = clampNumber(this.settings.panelHeight, 1.05, 3.2, 1.8);
+      const gap = 0.38;
+      const panelAngle = XR_SIDE_PANEL_ANGLE;
+      const leftEdgeZ = 0.08;
       this.xrSidePanelMesh.scale.set(sideWidth, sideHeight, 1);
       this.xrSidePanelMesh.position.set(
-        this.settings.panelWidth / 2 + 0.35 + sideWidth / 2,
+        this.settings.panelWidth / 2 + gap + Math.cos(panelAngle) * (sideWidth / 2),
         0,
-        0.04,
+        leftEdgeZ - Math.sin(panelAngle) * (sideWidth / 2),
       );
-      this.xrSidePanelMesh.rotation.set(0, -0.12, 0);
+      this.xrSidePanelMesh.rotation.set(0, panelAngle, 0);
     }
 
     updateXrSidePanelTexture(force = false) {
@@ -2444,11 +3117,14 @@
       this.lastSidePanelTextureAt = now;
 
       const context = this.xrSidePanelContext;
-      const width = this.xrSidePanelCanvas.width;
-      const height = this.xrSidePanelCanvas.height;
+      const textureScale = this.xrSidePanelCanvas.width / XR_SIDE_PANEL_LOGICAL_SIZE;
+      const width = XR_SIDE_PANEL_LOGICAL_SIZE;
+      const height = XR_SIDE_PANEL_LOGICAL_SIZE;
       const lines = this.collectSidePanelLines();
       const hotspots = [];
-      context.clearRect(0, 0, width, height);
+      context.setTransform(1, 0, 0, 1, 0, 0);
+      context.clearRect(0, 0, this.xrSidePanelCanvas.width, this.xrSidePanelCanvas.height);
+      context.setTransform(textureScale, 0, 0, textureScale, 0, 0);
       context.fillStyle = "rgba(8, 13, 24, 0.94)";
       roundRect(context, 0, 0, width, height, 44);
       context.fill();
@@ -2491,6 +3167,7 @@
       const buttons = [
         { label: this.video.paused ? "Play" : "Pause", action: "play" },
         { label: this.video.muted || this.video.volume === 0 ? "Unmute video" : "Mute video", action: "mute-video" },
+        { label: this.settings.spatialAudio ? "Audio 3D off" : "Audio 3D on", action: "spatial-audio-toggle" },
         { label: "Recenter", action: "recenter" },
         { label: "Size -", action: "size-down" },
         { label: "Size +", action: "size-up" },
@@ -2499,6 +3176,7 @@
         { label: "Light +", action: "intensity-up" },
         { label: "Room dim -", action: "dim-down" },
         { label: "Room dim +", action: "dim-up" },
+        { label: "Curve +", action: "curve-up" },
         ...this.collectVoiceActionButtons().slice(0, 2),
       ];
       buttons.slice(0, 12).forEach((button, index) => {
@@ -2638,6 +3316,144 @@
 
   function isKnownBacklightMode(value) {
     return ["off", "soft", "dynamic", "video"].includes(value);
+  }
+
+  function normalizeSpeakerChannel(value) {
+    const channel = String(value || "").trim().toUpperCase().replace(/[\s_-]+/g, "");
+    const aliases = {
+      LEFT: "L",
+      RIGHT: "R",
+      CENTER: "C",
+      CENTRE: "C",
+      SUB: "LFE",
+      SUBWOOFER: "LFE",
+      LOWFREQUENCY: "LFE",
+      LS: "SL",
+      RS: "SR",
+      LEFTSURROUND: "SL",
+      RIGHTSURROUND: "SR",
+      SURROUNDLEFT: "SL",
+      SURROUNDRIGHT: "SR",
+      LEFTSIDE: "SL",
+      RIGHTSIDE: "SR",
+      LEFTBACK: "BL",
+      RIGHTBACK: "BR",
+      BACKLEFT: "BL",
+      BACKRIGHT: "BR",
+      BACKCENTER: "BC",
+      CENTERSURROUND: "BC",
+    };
+    return aliases[channel] || channel || "";
+  }
+
+  function defaultSpeakerDefinition(channel, index, settings) {
+    const panelWidth = clampNumber(Number(settings.panelWidth), 1.4, 6, DEFAULT_SETTINGS.panelWidth);
+    const distance = clampNumber(Number(settings.distance), 1.4, 6, DEFAULT_SETTINGS.distance);
+    const sideX = Math.max(1.15, panelWidth * 0.48);
+    const rearX = Math.max(1.45, panelWidth * 0.58);
+    const rearZ = distance + 0.7;
+    const backZ = distance + 1.45;
+    const definitions = {
+      L: { position: [-sideX, 0.02, 0.08] },
+      R: { position: [sideX, 0.02, 0.08] },
+      C: { position: [0, 0.02, 0.04] },
+      LFE: { position: [0, -0.85, 0.55], lfe: true, gain: 0.8 },
+      SL: { position: [-rearX, 0.02, rearZ] },
+      SR: { position: [rearX, 0.02, rearZ] },
+      BL: { position: [-rearX, 0.02, backZ] },
+      BR: { position: [rearX, 0.02, backZ] },
+      BC: { position: [0, 0.02, backZ] },
+      FLC: { position: [-sideX * 0.55, 0.18, 0.02] },
+      FRC: { position: [sideX * 0.55, 0.18, 0.02] },
+    };
+    const fallbackAngle = index === 0 ? -30 : index === 1 ? 30 : 0;
+    return {
+      channel,
+      relativeTo: "screen",
+      gain: 1,
+      refDistance: 1.2,
+      rolloffFactor: 0.6,
+      ...(definitions[channel] || {
+        relativeTo: "listener",
+        angle: fallbackAngle,
+        distance: 2.2,
+        height: 0,
+      }),
+    };
+  }
+
+  function speakerVectorFromDefinition(speaker) {
+    if (Array.isArray(speaker.position)) {
+      return new THREE.Vector3(
+        Number(speaker.position[0] || 0),
+        Number(speaker.position[1] || 0),
+        Number(speaker.position[2] || 0),
+      );
+    }
+    const angle = Number(speaker.angle ?? speaker.azimuth);
+    const radius = clampNumber(Number(speaker.distance ?? speaker.radius), 0.1, 20, 2.2);
+    const height = clampNumber(Number(speaker.height ?? speaker.y), -5, 5, 0);
+    if (Number.isFinite(angle)) {
+      const radians = THREE.MathUtils.degToRad(angle);
+      return new THREE.Vector3(Math.sin(radians) * radius, height, -Math.cos(radians) * radius);
+    }
+    return new THREE.Vector3(0, height, -radius);
+  }
+
+  function safeDisconnect(node) {
+    try {
+      node?.disconnect?.();
+    } catch (error) {
+      // Already disconnected.
+    }
+  }
+
+  function setAudioParamValue(param, value, context) {
+    if (!param) return;
+    const now = context?.currentTime || 0;
+    const when = now + 0.015;
+    if (typeof param.linearRampToValueAtTime === "function") {
+      param.cancelScheduledValues?.(now);
+      param.linearRampToValueAtTime(value, when);
+    } else {
+      param.value = value;
+    }
+  }
+
+  function setPannerPosition(panner, position, context) {
+    setAudioParamValue(panner.positionX, position.x, context);
+    setAudioParamValue(panner.positionY, position.y, context);
+    setAudioParamValue(panner.positionZ, position.z, context);
+    if (!panner.positionX && typeof panner.setPosition === "function") {
+      panner.setPosition(position.x, position.y, position.z);
+    }
+  }
+
+  function setListenerPosition(listener, position, context) {
+    setAudioParamValue(listener.positionX, position.x, context);
+    setAudioParamValue(listener.positionY, position.y, context);
+    setAudioParamValue(listener.positionZ, position.z, context);
+    if (!listener.positionX && typeof listener.setPosition === "function") {
+      listener.setPosition(position.x, position.y, position.z);
+    }
+  }
+
+  function setListenerOrientation(listener, forward, up, context) {
+    setAudioParamValue(listener.forwardX, forward.x, context);
+    setAudioParamValue(listener.forwardY, forward.y, context);
+    setAudioParamValue(listener.forwardZ, forward.z, context);
+    setAudioParamValue(listener.upX, up.x, context);
+    setAudioParamValue(listener.upY, up.y, context);
+    setAudioParamValue(listener.upZ, up.z, context);
+    if (!listener.forwardX && typeof listener.setOrientation === "function") {
+      listener.setOrientation(forward.x, forward.y, forward.z, up.x, up.y, up.z);
+    }
+  }
+
+  function isLegacyDesktopRoomView(stored) {
+    const viewKeys = ["roomViewX", "roomViewY", "roomViewZ", "roomViewYaw", "roomViewPitch"];
+    if (!viewKeys.some((key) => Object.prototype.hasOwnProperty.call(stored, key))) return false;
+    return viewKeys.every((key) => Math.abs(Number(stored[key] || 0)) < 0.001);
   }
 
   function clampNumber(value, min, max, fallback) {
@@ -2869,6 +3685,65 @@
     return `avg ${avg} max ${Math.round(max)}`;
   }
 
+  function objectMaterials(object) {
+    const materials = [];
+    object?.traverse?.((child) => {
+      if (Array.isArray(child.material)) {
+        materials.push(...child.material.filter(Boolean));
+      } else if (child.material) {
+        materials.push(child.material);
+      }
+    });
+    if (!materials.length && object?.material) {
+      if (Array.isArray(object.material)) materials.push(...object.material.filter(Boolean));
+      else materials.push(object.material);
+    }
+    return materials;
+  }
+
+  function themeVideoSampleColor(colors, region = "average") {
+    const key = String(region || "average").toLowerCase();
+    if (key === "average" || key === "center" || key === "all") return averageBacklightColorMap(colors);
+    if (key.includes("-")) {
+      const sideColors = colors?.[key];
+      if (Array.isArray(sideColors)) return averageVisibleColors(sideColors);
+    }
+    if (["top", "bottom", "left", "right"].includes(key)) {
+      return averageVisibleColors(colors?.[key] || []);
+    }
+    if (key === "vertical") return averageVisibleColors([...(colors?.left || []), ...(colors?.right || [])]);
+    if (key === "horizontal") return averageVisibleColors([...(colors?.top || []), ...(colors?.bottom || [])]);
+    return averageBacklightColorMap(colors);
+  }
+
+  function averageBacklightColorMap(colors) {
+    return averageVisibleColors(Object.values(colors || {}).flatMap((sideColors) => Array.isArray(sideColors) ? sideColors : []));
+  }
+
+  function averageVisibleColors(colors) {
+    let r = 0;
+    let g = 0;
+    let b = 0;
+    let weight = 0;
+    let opacity = 0;
+    for (const color of colors || []) {
+      if (!isVisibleBacklightColor(color)) continue;
+      const colorWeight = Math.max(0.01, Number(color.opacity || 0));
+      r += Number(color.r || 0) * colorWeight;
+      g += Number(color.g || 0) * colorWeight;
+      b += Number(color.b || 0) * colorWeight;
+      opacity += Number(color.opacity || 0);
+      weight += colorWeight;
+    }
+    if (!weight) return offBacklightColor();
+    return {
+      r: clampNumber(r / weight, 0, 1, 0),
+      g: clampNumber(g / weight, 0, 1, 0),
+      b: clampNumber(b / weight, 0, 1, 0),
+      opacity: clampNumber(opacity / Math.max(1, colors.length), 0, 1, 0),
+    };
+  }
+
   function averageSampleRegion(data, width, height, region) {
     const x0 = Math.max(0, Math.min(width - 1, Math.floor(region.x0 * width)));
     const x1 = Math.max(x0 + 1, Math.min(width, Math.ceil(region.x1 * width)));
@@ -2963,8 +3838,9 @@
   }
 
   function sampleExpandedBacklightColors(data, width, height, window, segments) {
-    const output = { top: [], bottom: [], left: [], right: [] };
-    for (const segment of segments || []) {
+    const output = emptyBacklightColorMap();
+    for (const item of segments || []) {
+      const segment = item?.userData?.backlightSegment || item;
       if (!output[segment.side]) continue;
       output[segment.side][segment.index] = sampleExpandedSegmentRegion(data, width, height, window, segment);
     }
@@ -2972,7 +3848,7 @@
   }
 
   function fallbackBacklightColors(color = null, opacity = null) {
-    const output = { top: [], bottom: [], left: [], right: [] };
+    const output = emptyBacklightColorMap();
     for (const side of Object.keys(output)) {
       const count = BACKLIGHT_SEGMENT_COUNTS[side] || 1;
       for (let index = 0; index < count; index += 1) {
@@ -2985,7 +3861,7 @@
   }
 
   function offBacklightColors() {
-    const output = { top: [], bottom: [], left: [], right: [] };
+    const output = emptyBacklightColorMap();
     for (const side of Object.keys(output)) {
       const count = BACKLIGHT_SEGMENT_COUNTS[side] || 1;
       for (let index = 0; index < count; index += 1) {
