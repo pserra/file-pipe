@@ -333,6 +333,39 @@ class ConnectorSecurity:
 SESSION_TOKENS: Dict[str, float] = {}
 
 
+def parse_byte_size(value: object, default: int = 0) -> int:
+    if value is None or value == "":
+        return max(0, int(default))
+    if isinstance(value, (int, float)):
+        return max(0, int(value))
+    text = str(value).strip().lower().replace(" ", "")
+    multipliers = {
+        "k": 1024,
+        "kb": 1024,
+        "m": 1024**2,
+        "mb": 1024**2,
+        "g": 1024**3,
+        "gb": 1024**3,
+        "t": 1024**4,
+        "tb": 1024**4,
+    }
+    suffix = ""
+    for candidate in sorted(multipliers, key=len, reverse=True):
+        if text.endswith(candidate):
+            suffix = candidate
+            text = text[: -len(candidate)]
+            break
+    try:
+        number = float(text)
+    except ValueError:
+        return max(0, int(default))
+    return max(0, int(number * multipliers.get(suffix, 1)))
+
+
+TRANSCODE_CACHE_MAX_BYTES = parse_byte_size(os.environ.get("FILE_PIPE_TRANSCODE_CACHE_MAX_BYTES", "0"))
+TRANSCODE_CACHE_PRUNE_LOCK = threading.Lock()
+
+
 def add_cors_headers(response):
     if request.path.startswith("/admin"):
         return response
@@ -1970,6 +2003,147 @@ def hls_segment_path(
     return hls_cache_dir(resource_id, url, audio_profile, video_profile, stereo_processor, resolution_scale) / f"segment-{segment_index:06d}.ts"
 
 
+def transcode_cache_entry_size(path: Path) -> int:
+    try:
+        if path.is_file():
+            return path.stat().st_size
+        total = 0
+        for child in path.rglob("*"):
+            if child.is_file():
+                try:
+                    total += child.stat().st_size
+                except OSError:
+                    continue
+        return total
+    except OSError:
+        return 0
+
+
+def transcode_cache_entry_mtime(path: Path) -> float:
+    try:
+        if path.is_file():
+            return path.stat().st_mtime
+        latest = path.stat().st_mtime
+        for child in path.rglob("*"):
+            try:
+                latest = max(latest, child.stat().st_mtime)
+            except OSError:
+                continue
+        return latest
+    except OSError:
+        return 0.0
+
+
+def is_transcode_cache_entry(path: Path) -> bool:
+    if path.is_file():
+        return path.suffix in {".mp4", ".part"} or ".part." in path.name or path.name.endswith(".job.json")
+    return path.is_dir() and path.name.endswith("-hls")
+
+
+def transcode_cache_delete_priority(path: Path) -> int:
+    name = path.name.lower()
+    if path.is_file() and (".part" in name or name.endswith(".job.json")):
+        return 0
+    if path.is_dir():
+        try:
+            if (path / ".last-error.json").exists():
+                return 5
+        except OSError:
+            pass
+    if path.is_dir() and TRANSCODE_VIDEO_PROFILE_STEREO_FULL_SBS in name:
+        return 10
+    if path.is_dir() and TRANSCODE_VIDEO_PROFILE_STEREO_SBS in name:
+        return 15
+    if path.is_dir() and name.endswith("-hls"):
+        return 20
+    if TRANSCODE_AUDIO_PROFILE_SPATIAL in name:
+        return 35
+    if path.suffix == ".mp4":
+        return 40
+    return 50
+
+
+def transcode_cache_entries() -> List[Path]:
+    try:
+        directory = TRANSCODE_CACHE_DIR.expanduser()
+        if not directory.exists():
+            return []
+        return [path for path in directory.iterdir() if is_transcode_cache_entry(path)]
+    except OSError:
+        return []
+
+
+def transcode_cache_total_size() -> int:
+    return sum(transcode_cache_entry_size(path) for path in transcode_cache_entries())
+
+
+def protected_cache_roots(paths: Optional[List[Path]] = None) -> List[Path]:
+    roots: List[Path] = []
+    for path in paths or []:
+        try:
+            candidate = path.expanduser().resolve()
+        except OSError:
+            candidate = path.expanduser()
+        if candidate.is_file() or candidate.suffix:
+            candidate = candidate.parent
+        roots.append(candidate)
+    return roots
+
+
+def is_protected_cache_path(path: Path, protected_roots: List[Path]) -> bool:
+    try:
+        resolved = path.expanduser().resolve()
+    except OSError:
+        resolved = path.expanduser()
+    return any(resolved == root or root in resolved.parents for root in protected_roots)
+
+
+def enforce_transcode_cache_limit(protect_paths: Optional[List[Path]] = None, extra_needed: int = 0) -> Dict[str, object]:
+    max_bytes = max(0, int(TRANSCODE_CACHE_MAX_BYTES or 0))
+    if max_bytes <= 0:
+        return {"enabled": False, "maxBytes": 0, "size": transcode_cache_total_size(), "deleted": 0, "bytesDeleted": 0}
+    with TRANSCODE_CACHE_PRUNE_LOCK:
+        entries = transcode_cache_entries()
+        size = sum(transcode_cache_entry_size(path) for path in entries)
+        target_size = max(0, max_bytes - max(0, int(extra_needed or 0)))
+        if size <= target_size:
+            return {"enabled": True, "maxBytes": max_bytes, "size": size, "deleted": 0, "bytesDeleted": 0}
+        protected_roots = protected_cache_roots(protect_paths)
+        deleted = 0
+        bytes_deleted = 0
+        candidates = sorted(
+            entries,
+            key=lambda path: (
+                transcode_cache_delete_priority(path),
+                transcode_cache_entry_mtime(path),
+                -transcode_cache_entry_size(path),
+            ),
+        )
+        for path in candidates:
+            if size <= target_size:
+                break
+            if is_protected_cache_path(path, protected_roots):
+                continue
+            try:
+                entry_size = transcode_cache_entry_size(path)
+                if path.is_dir():
+                    shutil.rmtree(path)
+                else:
+                    path.unlink()
+            except OSError:
+                continue
+            deleted += 1
+            bytes_deleted += entry_size
+            size = max(0, size - entry_size)
+        return {
+            "enabled": True,
+            "maxBytes": max_bytes,
+            "size": size,
+            "deleted": deleted,
+            "bytesDeleted": bytes_deleted,
+        }
+
+
 def hls_segment_error_path(path: Path) -> Path:
     return path.parent / ".last-error.json"
 
@@ -2250,6 +2424,9 @@ def create_hls_segment(
     with lock:
         if not path.exists() or path.stat().st_size == 0:
             path.parent.mkdir(parents=True, exist_ok=True)
+            source_size = parse_int(media_info.get("size")) or parse_int(RESOURCE_METADATA_CACHE.get(resource_id, {}).get("size")) or 0
+            estimated_segment_size = int(math.ceil(source_size / max(1, segment_count))) if source_size else 0
+            enforce_transcode_cache_limit([path.parent], estimated_segment_size)
             temp_path = path.with_name(f"{path.stem}.{os.getpid()}.part{path.suffix}")
             if temp_path.exists():
                 temp_path.unlink()
@@ -2296,6 +2473,7 @@ def create_hls_segment(
                 write_hls_segment_error(path, segment_index, audio_profile, normalized_video_profile, normalized_stereo_processor, str(exc))
                 raise
     stat = path.stat()
+    enforce_transcode_cache_limit([path.parent])
     return {
         "path": str(path),
         "size": stat.st_size,
@@ -2686,6 +2864,7 @@ def start_transcoded_file(
         }
 
     TRANSCODE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    enforce_transcode_cache_limit([part_path, path], parse_int(media_info.get("size")) or 0)
     if part_path.exists():
         part_path.unlink()
     command = build_transcode_command(url, media_info, str(part_path), ffmpeg_path, fragmented=True, audio_profile=profile)
@@ -2718,6 +2897,7 @@ def start_transcoded_file(
                 stat = path.stat()
                 update_transcode_progress(resource_id, profile, status="complete", percent=100, size=stat.st_size, progressive=False)
                 remove_transcode_job(path)
+                enforce_transcode_cache_limit([path])
             except Exception as exc:
                 write_transcode_job(path, resource_id, url, media_info, profile, status="error", error=str(exc))
                 if part_path.exists():
@@ -2895,12 +3075,14 @@ def recover_interrupted_work() -> Dict[str, object]:
                 recovered_jobs += 1
         except Exception:
             failed_jobs += 1
+    prune_result = enforce_transcode_cache_limit()
     return {
         "started": True,
         "recoveredJobs": recovered_jobs,
         "failedJobs": failed_jobs,
         "deletedTempFiles": deleted_temp_files,
         "deletedEmptyHlsDirs": deleted_empty_hls_dirs,
+        "cachePrune": prune_result,
     }
 
 
@@ -2932,6 +3114,7 @@ def ensure_transcoded_file(
         if not path.exists() or path.stat().st_size == 0:
             TRANSCODE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
             temp_path = transcode_part_path(resource_id, url, profile)
+            enforce_transcode_cache_limit([temp_path, path], parse_int(media_info.get("size")) or 0)
             if temp_path.exists():
                 temp_path.unlink()
             command = build_transcode_command(url, media_info, str(temp_path), ffmpeg_path, fragmented=False, audio_profile=profile)
@@ -2951,6 +3134,7 @@ def ensure_transcoded_file(
                 temp_path.replace(path)
                 alias_transcode_cache_by_md5(resource_id, url, cached_resource_md5(resource_id), profile)
                 remove_transcode_job(path)
+                enforce_transcode_cache_limit([path])
             except Exception as exc:
                 write_transcode_job(path, resource_id, url, media_info, profile, status="error", error=str(exc))
                 if temp_path.exists():
@@ -2966,6 +3150,7 @@ def ensure_transcoded_file(
         "audioProfile": profile,
     }
     update_transcode_progress(resource_id, profile, status="complete", percent=100, size=stat.st_size)
+    enforce_transcode_cache_limit([path])
     return result
 
 
@@ -3383,6 +3568,12 @@ def create_connector_app(security: Optional[ConnectorSecurity] = None):
                 "serviceEnabled": CONNECTOR_SERVICE_ENABLED,
                 "settings": CONNECTOR_SETTINGS,
                 "backgroundWork": background_work_stats(),
+                "cache": {
+                    "cacheDir": str(TRANSCODE_CACHE_DIR.expanduser()),
+                    "size": transcode_cache_total_size(),
+                    "maxCacheBytes": int(TRANSCODE_CACHE_MAX_BYTES or 0),
+                    "limitEnabled": int(TRANSCODE_CACHE_MAX_BYTES or 0) > 0,
+                },
                 **auth_state(security),
             }
         )
@@ -3951,6 +4142,8 @@ def main():
     parser.add_argument("--port", default=8765, type=int)
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--password", default=os.environ.get("FILE_PIPE_CONNECTOR_PASSWORD"))
+    parser.add_argument("--cache-dir", default=os.environ.get("FILE_PIPE_TRANSCODE_CACHE_DIR"), help="Transcode cache directory.")
+    parser.add_argument("--max-cache-size", default=os.environ.get("FILE_PIPE_TRANSCODE_CACHE_MAX_BYTES"), help="Maximum transcode cache size, e.g. 500GB. Use 0 for no limit.")
     parser.add_argument("--cert", help="TLS certificate file for HTTPS.")
     parser.add_argument("--key", help="TLS private key file for HTTPS.")
     parser.add_argument("--no-tls", action="store_true", help="Serve plain HTTP. Use only for isolated local testing.")
@@ -3965,6 +4158,11 @@ def main():
         help="Allow password login over plain HTTP. Use only for isolated local testing.",
     )
     args = parser.parse_args()
+    global TRANSCODE_CACHE_DIR, TRANSCODE_CACHE_MAX_BYTES
+    if args.cache_dir:
+        TRANSCODE_CACHE_DIR = Path(args.cache_dir).expanduser()
+    if args.max_cache_size is not None:
+        TRANSCODE_CACHE_MAX_BYTES = parse_byte_size(args.max_cache_size)
 
     ssl_context = None
     if args.cert or args.key:

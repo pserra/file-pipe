@@ -288,6 +288,8 @@ def transcode_files() -> List[Dict[str, object]]:
 
 def cache_payload() -> Dict[str, object]:
     entries = transcode_files()
+    max_cache_bytes = int(getattr(local_connector, "TRANSCODE_CACHE_MAX_BYTES", 0) or 0)
+    size = sum(int(entry["size"]) for entry in entries)
     groups: Dict[str, Dict[str, object]] = {}
     for entry in entries:
         category = str(entry.get("category") or "other")
@@ -311,7 +313,10 @@ def cache_payload() -> Dict[str, object]:
         "files": entries,
         "groups": sorted(groups.values(), key=lambda item: CACHE_CATEGORY_ORDER.get(str(item["category"]), 99)),
         "count": len(entries),
-        "size": sum(int(entry["size"]) for entry in entries),
+        "size": size,
+        "maxCacheBytes": max_cache_bytes,
+        "availableBytes": max(0, max_cache_bytes - size) if max_cache_bytes else 0,
+        "limitEnabled": max_cache_bytes > 0,
     }
 
 
@@ -327,6 +332,37 @@ def safe_cache_path(name: str) -> Path:
     if path.suffix not in {".mp4", ".part"}:
         raise ValueError("Invalid cache file.")
     return path
+
+
+def cache_background_work_busy() -> bool:
+    stats = local_connector.background_work_stats()
+    return any(
+        int(stats.get(key) or 0) > 0
+        for key in ("transcodeActive", "transcodeQueued", "hlsPrefetchActive", "hlsPrefetchQueued", "runningTranscodes", "hlsPrefetching")
+    )
+
+
+def move_cache_directory(current_dir: Path, target_dir: Path) -> Dict[str, object]:
+    current = current_dir.expanduser().resolve()
+    target = target_dir.expanduser().resolve()
+    if current == target:
+        return {"moved": False, "bytesMoved": 0, "entryCount": 0}
+    if current in target.parents:
+        raise ValueError("Choose a cache folder outside the current cache folder.")
+    if target.exists() and any(target.iterdir()):
+        raise ValueError("Choose an empty folder for the cache move.")
+    target.mkdir(parents=True, exist_ok=True)
+    bytes_moved = path_size(current) if current.exists() else 0
+    entry_count = 0
+    if current.exists():
+        for child in current.iterdir():
+            shutil.move(str(child), str(target / child.name))
+            entry_count += 1
+        try:
+            current.rmdir()
+        except OSError:
+            shutil.rmtree(current)
+    return {"moved": True, "bytesMoved": bytes_moved, "entryCount": entry_count}
 
 
 def applescript_quote(value: str) -> str:
@@ -504,6 +540,39 @@ def create_admin_blueprint(security, runtime):
             path.unlink()
         return jsonify({"ok": True, "deleted": 1, "bytesDeleted": size, "cache": cache_payload()})
 
+    @blueprint.post("/admin/api/cache/prune")
+    def admin_prune_cache():
+        result = local_connector.enforce_transcode_cache_limit()
+        return jsonify({"ok": True, **result, "cache": cache_payload()})
+
+    @blueprint.post("/admin/api/cache/move")
+    def admin_move_cache():
+        if cache_background_work_busy():
+            return jsonify({"error": "Cache work is active. Wait for transcodes, HLS prefetches, and 3D prebuilds to finish before moving the cache."}), 409
+        payload = request.get_json(silent=True) or {}
+        target = Path(str(payload.get("cacheDir") or payload.get("path") or "")).expanduser()
+        if not str(target).strip():
+            return jsonify({"error": "Choose a destination cache folder."}), 400
+        current = cache_dir()
+        try:
+            move_result = move_cache_directory(current, target)
+        except (OSError, ValueError) as exc:
+            return jsonify({"error": f"Could not move cache: {exc}"}), 400
+        updated = normalize_config({**runtime.config, "cacheDir": str(target)})
+        runtime.save_config(updated)
+        local_connector.TRANSCODE_CACHE_DIR = Path(updated["cacheDir"]).expanduser()
+        local_connector.CONNECTOR_SETTINGS = public_connector_settings(updated)
+        return jsonify(
+            {
+                "ok": True,
+                **move_result,
+                "config": public_config(runtime.config),
+                "configPath": str(runtime.config_path),
+                "settings": public_connector_settings(runtime.config),
+                "cache": cache_payload(),
+            }
+        )
+
     @blueprint.post("/admin/api/discover")
     def admin_discover():
         servers = local_connector.discover_servers()
@@ -566,6 +635,8 @@ def create_admin_blueprint(security, runtime):
         local_connector.CONNECTOR_SETTINGS = public_connector_settings(updated)
         if cache_changed:
             local_connector.TRANSCODE_CACHE_DIR = Path(updated["cacheDir"]).expanduser()
+        local_connector.TRANSCODE_CACHE_MAX_BYTES = int(updated.get("maxCacheBytes") or 0)
+        prune_result = local_connector.enforce_transcode_cache_limit()
         if network_changed:
             runtime.mark_restart_required()
         return jsonify(
@@ -576,6 +647,7 @@ def create_admin_blueprint(security, runtime):
                 "serviceEnabled": bool(local_connector.CONNECTOR_SERVICE_ENABLED),
                 "settings": public_connector_settings(runtime.config),
                 "cache": cache_payload(),
+                "cachePrune": prune_result,
             }
         )
 
@@ -1188,7 +1260,14 @@ ADMIN_HTML = r"""<!doctype html>
       .path-picker {
         display: grid;
         gap: 0.55rem;
-        grid-template-columns: minmax(0, 1fr) auto;
+        grid-template-columns: minmax(0, 1fr) auto auto;
+      }
+
+      .input-suffix {
+        align-self: center;
+        color: var(--muted);
+        font-size: 0.85rem;
+        font-weight: 700;
       }
 
       .field-hint {
@@ -1501,7 +1580,16 @@ ADMIN_HTML = r"""<!doctype html>
                 <div class="path-picker">
                   <input id="cache-dir" autocomplete="off">
                   <button class="secondary" id="choose-cache-dir" type="button">Choose</button>
+                  <button class="secondary" id="move-cache" type="button">Move cache here</button>
                 </div>
+                <span class="field-hint">Use Move cache here to relocate existing cached files and remove the old folder.</span>
+              </label>
+              <label>Maximum cache size
+                <div class="path-picker">
+                  <input id="max-cache-gb" type="number" min="0" step="0.1">
+                  <span class="input-suffix">GB</span>
+                </div>
+                <span class="field-hint">Set 0 for no automatic cache limit. When over the limit, older and lower-priority generated files are removed first.</span>
               </label>
             </div>
           </details>
@@ -1605,6 +1693,7 @@ ADMIN_HTML = r"""<!doctype html>
           <div class="actions" style="margin-top:0;">
             <button class="secondary" id="show-all-cache" type="button">Show all</button>
             <button class="secondary" id="refresh-cache" type="button">Refresh cache</button>
+            <button class="secondary" id="prune-cache" type="button">Prune to limit</button>
             <button class="danger" id="clear-cache" type="button">Clear all</button>
           </div>
         </div>
@@ -1707,6 +1796,7 @@ ADMIN_HTML = r"""<!doctype html>
         setValue("host", config.host);
         setValue("port", config.port);
         setValue("cache-dir", config.cacheDir);
+        setValue("max-cache-gb", config.maxCacheBytes ? (Number(config.maxCacheBytes) / (1024 ** 3)).toFixed(1).replace(/\.0$/, "") : "0");
         setValue("host-name", config.hostName);
         setChecked("use-tls", config.useTls);
         setChecked("service-enabled", config.serviceEnabled);
@@ -1766,7 +1856,11 @@ ADMIN_HTML = r"""<!doctype html>
       function renderCache(cache) {
         document.getElementById("cache-count").textContent = cache.count || 0;
         document.getElementById("cache-size").textContent = formatBytes(cache.size || 0);
-        document.getElementById("cache-path").textContent = `Cache: ${cache.cacheDir}`;
+        const limit = Number(cache.maxCacheBytes || 0);
+        const limitText = limit > 0
+          ? `Limit: ${formatBytes(limit)} (${formatBytes(cache.availableBytes || 0)} available)`
+          : "Limit: unlimited";
+        document.getElementById("cache-path").textContent = `Cache: ${cache.cacheDir} • ${limitText}`;
         renderCacheGroups(cache);
         document.getElementById("cache-filter-label").textContent = cacheFilter === "all"
           ? "Showing all generated files and segment folders."
@@ -1908,6 +2002,7 @@ ADMIN_HTML = r"""<!doctype html>
           host: document.getElementById("host").value.trim(),
           port: Number(document.getElementById("port").value),
           cacheDir: document.getElementById("cache-dir").value.trim(),
+          maxCacheBytes: Math.max(0, Number(document.getElementById("max-cache-gb").value || 0)) * (1024 ** 3),
           hostName: document.getElementById("host-name").value.trim(),
           useTls: document.getElementById("use-tls").checked,
           serviceEnabled: document.getElementById("service-enabled").checked,
@@ -1927,7 +2022,11 @@ ADMIN_HTML = r"""<!doctype html>
         document.getElementById("clear-password").checked = false;
         renderCache(result.cache);
         await refresh();
-        log("Settings saved.");
+        if (result.cachePrune?.deleted) {
+          log(`Settings saved. Pruned ${result.cachePrune.deleted} cache entr${result.cachePrune.deleted === 1 ? "y" : "ies"} (${formatBytes(result.cachePrune.bytesDeleted || 0)}).`);
+        } else {
+          log("Settings saved.");
+        }
       }
 
       async function chooseCacheDir() {
@@ -1942,7 +2041,26 @@ ADMIN_HTML = r"""<!doctype html>
           return;
         }
         document.getElementById("cache-dir").value = payload.path || "";
-        log("Cache folder selected. Save settings to apply it.");
+        log("Cache folder selected. Use Move cache here to relocate existing cached files, or Save settings to switch without moving.");
+      }
+
+      async function moveCache() {
+        const cacheDir = document.getElementById("cache-dir").value.trim();
+        if (!cacheDir) {
+          log("Choose a cache folder first.");
+          return;
+        }
+        if (!confirm("Move the existing transcode cache to this folder and remove the old cache folder?")) return;
+        const payload = await api("/admin/api/cache/move", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ cacheDir }),
+        });
+        renderConfig(payload.config, payload.configPath || document.getElementById("config-path").textContent.replace(/^Config: /, ""));
+        renderCache(payload.cache);
+        log(payload.moved
+          ? `Moved ${payload.entryCount || 0} cache entr${payload.entryCount === 1 ? "y" : "ies"} (${formatBytes(payload.bytesMoved || 0)}).`
+          : "Cache folder is already current.");
       }
 
       async function scanServers() {
@@ -1969,6 +2087,14 @@ ADMIN_HTML = r"""<!doctype html>
         const payload = await api("/admin/api/cache", { method: "DELETE" });
         renderCache(payload.cache);
         log(`Deleted ${payload.deleted} cached file(s).`);
+      }
+
+      async function pruneCache() {
+        const payload = await api("/admin/api/cache/prune", { method: "POST" });
+        renderCache(payload.cache);
+        log(payload.deleted
+          ? `Pruned ${payload.deleted} cache entr${payload.deleted === 1 ? "y" : "ies"} (${formatBytes(payload.bytesDeleted || 0)}).`
+          : "Cache is already within the configured limit.");
       }
 
       async function deleteCacheFile(name) {
@@ -2001,6 +2127,7 @@ ADMIN_HTML = r"""<!doctype html>
       wire("save-config", saveConfig);
       wire("use-lan-host", useLanHost);
       wire("choose-cache-dir", chooseCacheDir);
+      wire("move-cache", moveCache);
       wire("scan", scanServers);
       wire("refresh", async () => {
         await refresh();
@@ -2008,6 +2135,7 @@ ADMIN_HTML = r"""<!doctype html>
       });
       wire("clear-connections", clearConnections);
       wire("refresh-cache", refreshCache);
+      wire("prune-cache", pruneCache);
       wire("clear-cache", clearCache);
       wire("show-all-cache", async () => {
         cacheFilter = "all";

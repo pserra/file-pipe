@@ -68,6 +68,7 @@ def parse_args():
     parser.add_argument("--host", help="Host to bind for this run. Defaults to saved config.")
     parser.add_argument("--port", type=int, help="Port to bind for this run. Defaults to saved config.")
     parser.add_argument("--cache-dir", help="Transcode cache directory for this run.")
+    parser.add_argument("--max-cache-size", help="Maximum transcode cache size for this run, e.g. 500GB. Use 0 for no limit.")
     parser.add_argument("--tls", action="store_true", help="Force HTTPS for this run.")
     parser.add_argument("--no-tls", action="store_true", help="Force HTTP for this run.")
     parser.add_argument("--no-browser", action="store_true", help="Do not open the management UI automatically.")
@@ -83,6 +84,8 @@ def apply_cli_overrides(config: Dict[str, object], args) -> Dict[str, object]:
         updated["port"] = args.port
     if args.cache_dir:
         updated["cacheDir"] = str(Path(args.cache_dir).expanduser())
+    if args.max_cache_size:
+        updated["maxCacheBytes"] = args.max_cache_size
     if args.tls:
         updated["useTls"] = True
     if args.no_tls:
@@ -231,6 +234,7 @@ def main() -> int:
 
     os.environ.setdefault("FILE_PIPE_SSL_DIR", str(default_ssl_dir()))
     os.environ["FILE_PIPE_TRANSCODE_CACHE_DIR"] = str(active_cache_dir)
+    os.environ["FILE_PIPE_TRANSCODE_CACHE_MAX_BYTES"] = str(config.get("maxCacheBytes") or 0)
 
     import local_connector
     from local_connector import ConnectorSecurity, create_connector_app
@@ -238,6 +242,7 @@ def main() -> int:
     from standalone_admin import create_admin_blueprint
 
     local_connector.TRANSCODE_CACHE_DIR = active_cache_dir
+    local_connector.TRANSCODE_CACHE_MAX_BYTES = int(config.get("maxCacheBytes") or 0)
     local_connector.CONNECTOR_SERVICE_ENABLED = bool(config["serviceEnabled"])
     local_connector.CONNECTOR_SETTINGS = public_connector_settings(config)
 

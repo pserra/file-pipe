@@ -47,6 +47,7 @@ def default_config() -> Dict[str, Any]:
         "openBrowser": True,
         "allowInsecurePassword": False,
         "cacheDir": str(default_cache_dir()),
+        "maxCacheBytes": 0,
         "passwordHash": None,
         "hostName": "",
         "pinnedWatchRoom": False,
@@ -80,6 +81,35 @@ def normalize_path(value: Any, default: Path) -> str:
     return str(Path(text).expanduser())
 
 
+def normalize_byte_size(value: Any, default: int = 0) -> int:
+    if value is None or value == "":
+        return max(0, int(default))
+    if isinstance(value, (int, float)):
+        return max(0, int(value))
+    text = str(value).strip().lower().replace(" ", "")
+    multipliers = {
+        "k": 1024,
+        "kb": 1024,
+        "m": 1024**2,
+        "mb": 1024**2,
+        "g": 1024**3,
+        "gb": 1024**3,
+        "t": 1024**4,
+        "tb": 1024**4,
+    }
+    suffix = ""
+    for candidate in sorted(multipliers, key=len, reverse=True):
+        if text.endswith(candidate):
+            suffix = candidate
+            text = text[: -len(candidate)]
+            break
+    try:
+        number = float(text)
+    except ValueError:
+        return max(0, int(default))
+    return max(0, int(number * multipliers.get(suffix, 1)))
+
+
 def normalize_config(raw: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     raw = raw or {}
     defaults = default_config()
@@ -95,6 +125,7 @@ def normalize_config(raw: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         defaults["allowInsecurePassword"],
     )
     config["cacheDir"] = normalize_path(raw.get("cacheDir"), default_cache_dir())
+    config["maxCacheBytes"] = normalize_byte_size(raw.get("maxCacheBytes", raw.get("maxCacheSize")), defaults["maxCacheBytes"])
     config["hostName"] = str(raw.get("hostName") or "").strip()[:80]
     config["pinnedWatchRoom"] = normalize_bool(raw.get("pinnedWatchRoom"), defaults["pinnedWatchRoom"])
     password_hash = raw.get("passwordHash")
