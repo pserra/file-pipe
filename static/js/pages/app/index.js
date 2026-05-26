@@ -2051,8 +2051,18 @@ document.addEventListener("alpine:init", () => {
         this.hostHls.on(Hls.Events.ERROR, (_event, data) => {
           if (this.recoverHostHlsAppendError(data)) return;
           if (data?.fatal) {
-            this.error = data.details || "The segmented media player failed.";
+            this.error = `${data.details || data.type || "The segmented media player failed."}${data.error?.message ? `: ${data.error.message}` : ""}`;
+          } else if (data?.details) {
+            this.playerStatus = `Segmented playback is recovering: ${data.details}.`;
           }
+        });
+        this.hostHls.on(Hls.Events.FRAG_LOADING, (_event, data) => {
+          const prefix = isStereoVideoProfile(this.playerSource?.videoProfile) ? "Generating 3D" : "Loading";
+          this.playerStatus = `${prefix} segment ${Number(data?.frag?.sn || 0) + 1}...`;
+        });
+        this.hostHls.on(Hls.Events.FRAG_LOADED, (_event, data) => {
+          const prefix = isStereoVideoProfile(this.playerSource?.videoProfile) ? "Buffered 3D" : "Buffered";
+          this.playerStatus = `${prefix} segment ${Number(data?.frag?.sn || 0) + 1}.`;
         });
         this.hostHls.loadSource(this.playerUrl);
         this.hostHls.attachMedia(video);

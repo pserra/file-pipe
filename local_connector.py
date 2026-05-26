@@ -287,7 +287,7 @@ HLS_SEGMENT_SECONDS = int(os.environ.get("FILE_PIPE_HLS_SEGMENT_SECONDS", "6"))
 HLS_PREFETCH_SEGMENTS = int(os.environ.get("FILE_PIPE_HLS_PREFETCH_SEGMENTS", "4"))
 HLS_STEREO3D_PREFETCH_SEGMENTS = int(os.environ.get("FILE_PIPE_HLS_STEREO3D_PREFETCH_SEGMENTS", "1"))
 HLS_ACCURATE_SEEK_WINDOW_SECONDS = float(os.environ.get("FILE_PIPE_HLS_ACCURATE_SEEK_WINDOW_SECONDS", "8"))
-HLS_SEGMENT_CACHE_VERSION = "hls-v2"
+HLS_SEGMENT_CACHE_VERSION = "hls-v3"
 HLS_STEREO3D_DEPTH_PERCENT = float(os.environ.get("FILE_PIPE_HLS_STEREO3D_DEPTH_PERCENT", "3.5"))
 HLS_STEREO3D_PROCESSOR = os.environ.get("FILE_PIPE_HLS_STEREO3D_PROCESSOR", TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT)
 PROGRESSIVE_TRANSCODE_START_PERCENT = int(os.environ.get("FILE_PIPE_PROGRESSIVE_TRANSCODE_START_PERCENT", "3"))
@@ -1543,8 +1543,10 @@ def stereo_sbs_filter(input_label: str, video_profile: str = TRANSCODE_VIDEO_PRO
     depth = hls_stereo3d_depth_fraction()
     offset = f"floor(iw*{depth:.4f}/2)*2"
     crop_width = f"iw-2*{offset}"
-    divisor = (1 - (2 * depth)) if normalize_transcode_video_profile(video_profile) == TRANSCODE_VIDEO_PROFILE_STEREO_FULL_SBS else 2 * (1 - (2 * depth))
-    eye_width = f"trunc(iw/{divisor:.6f}/2)*2"
+    if normalize_transcode_video_profile(video_profile) == TRANSCODE_VIDEO_PROFILE_STEREO_FULL_SBS:
+        eye_width = "trunc(iw/2)*2"
+    else:
+        eye_width = "trunc(iw/4)*2"
     return (
         f"{input_label}scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p,split=2[fp3dl][fp3dr];"
         f"[fp3dl]crop={crop_width}:ih:{offset}:0,scale={eye_width}:ih[fp3dleft];"

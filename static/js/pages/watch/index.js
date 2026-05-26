@@ -1118,9 +1118,21 @@ document.addEventListener("alpine:init", () => {
         this.viewerHls.on(Hls.Events.ERROR, (_event, data) => {
           if (this.recoverViewerHlsAppendError(data)) return;
           if (data?.fatal) {
-            this.error = data.details || "The live stream player failed.";
+            this.error = `${data.details || data.type || "The live stream player failed."}${data.error?.message ? `: ${data.error.message}` : ""}`;
             this.status = "";
+          } else if (data?.details) {
+            this.status = `Live stream is recovering: ${data.details}.`;
           }
+        });
+        this.viewerHls.on(Hls.Events.FRAG_LOADING, (_event, data) => {
+          const metadata = this.playbackMetadata();
+          const prefix = metadata?.videoProfile && metadata.videoProfile !== "2d" ? "Generating 3D" : "Loading";
+          this.status = `${prefix} live segment ${Number(data?.frag?.sn || 0) + 1}...`;
+        });
+        this.viewerHls.on(Hls.Events.FRAG_LOADED, (_event, data) => {
+          const metadata = this.playbackMetadata();
+          const prefix = metadata?.videoProfile && metadata.videoProfile !== "2d" ? "Buffered 3D" : "Buffered";
+          this.status = `${prefix} live segment ${Number(data?.frag?.sn || 0) + 1}.`;
         });
         this.viewerHls.loadSource(this.videoUrl);
         this.viewerHls.attachMedia(video);
@@ -1433,6 +1445,11 @@ document.addEventListener("alpine:init", () => {
       const metadata = plainData(playbackMetadata);
       const hlsStream = this.isHlsStream() || isHlsPlaybackMetadata(metadata);
       if (hlsStream) {
+        const videoProfile = metadata.videoProfile || metadata.playbackProfile?.videoProfile || "2d";
+        if (videoProfile && videoProfile !== "2d") {
+          this.mediaPrefetchStatus = "3D segments are generated and cached on demand.";
+          return;
+        }
         const hls = metadata.hls || {};
         const duration = Math.max(0, Number(hls.duration || 0));
         const segmentDuration = Math.max(1, Number(hls.segmentDuration || 8));

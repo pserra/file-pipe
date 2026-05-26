@@ -964,6 +964,9 @@
         this.updateInlineStatus("Three.js did not load. Reload the page and try again.");
         return;
       }
+      if (isKnownLayout(this.options.sourceLayout) && this.options.sourceLayout !== "mono") {
+        this.setLayout(this.options.sourceLayout, { persist: false });
+      }
       this.inTheater = true;
       this.buildOverlay();
       this.initThree();
