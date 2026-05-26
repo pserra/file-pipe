@@ -6,6 +6,7 @@ import json
 import math
 import mimetypes
 import os
+import queue
 import secrets
 import shlex
 import shutil
@@ -18,7 +19,7 @@ import uuid
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 from urllib.parse import urljoin
 
 import requests
@@ -199,6 +200,48 @@ class ReadAheadFileCache:
             self.entries.pop(evict_key, None)
 
 
+class BackgroundTaskPool:
+    def __init__(self, name: str, max_workers: int):
+        self.name = name
+        self.max_workers = max(1, max_workers)
+        self.tasks: queue.Queue[Callable[[], None]] = queue.Queue()
+        self.active = 0
+        self.lock = threading.Lock()
+        for index in range(self.max_workers):
+            thread = threading.Thread(
+                target=self._worker,
+                daemon=True,
+                name=f"{self.name}-{index + 1}",
+            )
+            thread.start()
+
+    def submit(self, task: Callable[[], None]) -> None:
+        self.tasks.put(task)
+
+    def stats(self) -> Dict[str, int]:
+        with self.lock:
+            active = self.active
+        return {
+            "workers": self.max_workers,
+            "active": active,
+            "queued": self.tasks.qsize(),
+        }
+
+    def _worker(self) -> None:
+        while True:
+            task = self.tasks.get()
+            with self.lock:
+                self.active += 1
+            try:
+                task()
+            except Exception:
+                pass
+            finally:
+                with self.lock:
+                    self.active -= 1
+                self.tasks.task_done()
+
+
 SERVER_CACHE: Dict[str, DlnaServer] = {}
 RESOURCE_CACHE: Dict[str, object] = {}
 RESOURCE_METADATA_CACHE: Dict[str, Dict[str, object]] = {}
@@ -242,16 +285,26 @@ TRANSCODE_STEREO_PROCESSORS = {
 TRANSCODE_CACHE_DIR = Path(os.environ.get("FILE_PIPE_TRANSCODE_CACHE_DIR", "instance/transcodes"))
 HLS_SEGMENT_SECONDS = int(os.environ.get("FILE_PIPE_HLS_SEGMENT_SECONDS", "6"))
 HLS_PREFETCH_SEGMENTS = int(os.environ.get("FILE_PIPE_HLS_PREFETCH_SEGMENTS", "4"))
+HLS_STEREO3D_PREFETCH_SEGMENTS = int(os.environ.get("FILE_PIPE_HLS_STEREO3D_PREFETCH_SEGMENTS", "1"))
 HLS_ACCURATE_SEEK_WINDOW_SECONDS = float(os.environ.get("FILE_PIPE_HLS_ACCURATE_SEEK_WINDOW_SECONDS", "8"))
 HLS_SEGMENT_CACHE_VERSION = "hls-v2"
 HLS_STEREO3D_DEPTH_PERCENT = float(os.environ.get("FILE_PIPE_HLS_STEREO3D_DEPTH_PERCENT", "3.5"))
 HLS_STEREO3D_PROCESSOR = os.environ.get("FILE_PIPE_HLS_STEREO3D_PROCESSOR", TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT)
 PROGRESSIVE_TRANSCODE_START_PERCENT = int(os.environ.get("FILE_PIPE_PROGRESSIVE_TRANSCODE_START_PERCENT", "3"))
 PROGRESSIVE_TRANSCODE_MIN_BYTES = int(os.environ.get("FILE_PIPE_PROGRESSIVE_TRANSCODE_MIN_BYTES", str(2 * 1024 * 1024)))
+TRANSCODE_WORKERS = max(1, int(os.environ.get("FILE_PIPE_TRANSCODE_WORKERS", "1")))
+HLS_PREFETCH_WORKERS = max(1, int(os.environ.get("FILE_PIPE_HLS_PREFETCH_WORKERS", "2")))
 TRANSCODE_LOCKS: Dict[str, threading.Lock] = {}
+TRANSCODE_LOCKS_LOCK = threading.Lock()
 TRANSCODE_PROGRESS: Dict[str, Dict[str, object]] = {}
+TRANSCODE_RUNNING: set[str] = set()
+TRANSCODE_RUNNING_LOCK = threading.Lock()
+TRANSCODE_EXECUTOR = BackgroundTaskPool("file-pipe-transcode", TRANSCODE_WORKERS)
+HLS_PREFETCH_EXECUTOR = BackgroundTaskPool("file-pipe-hls-prefetch", HLS_PREFETCH_WORKERS)
 HLS_PREFETCHING: set[str] = set()
 HLS_PREFETCH_LOCK = threading.Lock()
+RECOVERY_STARTED = False
+RECOVERY_LOCK = threading.Lock()
 MEDIA_TOOL_DIRS = [
     "/opt/homebrew/bin",
     "/usr/local/bin",
@@ -1837,6 +1890,106 @@ def hls_segment_path(
     return hls_cache_dir(resource_id, url, audio_profile, video_profile, stereo_processor) / f"segment-{segment_index:06d}.ts"
 
 
+def transcode_job_path(path: Path) -> Path:
+    return path.with_suffix(".job.json")
+
+
+def transcode_path_from_job_path(path: Path) -> Path:
+    text = str(path)
+    if text.endswith(".job.json"):
+        return Path(text[: -len(".job.json")] + ".mp4")
+    return path.with_suffix(".mp4")
+
+
+def write_json_atomic(path: Path, payload: Dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(f".{os.getpid()}.tmp")
+    temp_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    temp_path.replace(path)
+
+
+def write_transcode_job(
+    path: Path,
+    resource_id: str,
+    url: str,
+    media_info: Dict[str, object],
+    audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
+    status: str = "running",
+    error: str = "",
+) -> None:
+    payload = {
+        "version": 1,
+        "kind": "stable-mp4",
+        "resourceId": resource_id,
+        "url": url,
+        "audioProfile": normalize_transcode_audio_profile(audio_profile),
+        "mediaInfo": media_info,
+        "status": status,
+        "error": error,
+        "updatedAt": int(time.time()),
+    }
+    write_json_atomic(transcode_job_path(path), payload)
+
+
+def remove_transcode_job(path: Path) -> None:
+    try:
+        transcode_job_path(path).unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
+
+
+def hls_prefetch_window(video_profile: str, stereo_processor: str = TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT) -> int:
+    base_window = max(0, HLS_PREFETCH_SEGMENTS)
+    if base_window <= 0:
+        return 0
+    if not is_stereo_video_profile(video_profile):
+        return base_window
+    stereo_window = max(0, HLS_STEREO3D_PREFETCH_SEGMENTS)
+    if normalize_stereo_processor(stereo_processor) != TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT:
+        return min(base_window, stereo_window)
+    return min(base_window, max(1, stereo_window))
+
+
+def submit_transcode_future(key: str, worker) -> bool:
+    with TRANSCODE_RUNNING_LOCK:
+        if key in TRANSCODE_RUNNING:
+            return False
+        TRANSCODE_RUNNING.add(key)
+
+    def wrapped() -> None:
+        try:
+            worker()
+        finally:
+            with TRANSCODE_RUNNING_LOCK:
+                TRANSCODE_RUNNING.discard(key)
+
+    TRANSCODE_EXECUTOR.submit(wrapped)
+    return True
+
+
+def background_work_stats() -> Dict[str, object]:
+    with TRANSCODE_RUNNING_LOCK:
+        running_transcodes = len(TRANSCODE_RUNNING)
+    with HLS_PREFETCH_LOCK:
+        hls_prefetching = len(HLS_PREFETCHING)
+    transcode_pool = TRANSCODE_EXECUTOR.stats()
+    hls_pool = HLS_PREFETCH_EXECUTOR.stats()
+    return {
+        "transcodeWorkers": TRANSCODE_WORKERS,
+        "hlsPrefetchWorkers": HLS_PREFETCH_WORKERS,
+        "transcodeActive": transcode_pool["active"],
+        "transcodeQueued": transcode_pool["queued"],
+        "hlsPrefetchActive": hls_pool["active"],
+        "hlsPrefetchQueued": hls_pool["queued"],
+        "hlsPrefetchSegments": HLS_PREFETCH_SEGMENTS,
+        "hlsStereo3dPrefetchSegments": HLS_STEREO3D_PREFETCH_SEGMENTS,
+        "runningTranscodes": running_transcodes,
+        "hlsPrefetching": hls_prefetching,
+    }
+
+
 def remember_resource_checksum(resource_id: str, checksum: Dict[str, object]) -> None:
     md5 = str(checksum.get("md5") or "").strip().lower()
     if not md5:
@@ -2033,13 +2186,14 @@ def prefetch_hls_segments(
     video_profile: str = TRANSCODE_VIDEO_PROFILE_2D,
     stereo_processor: str = TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT,
 ) -> None:
-    if HLS_PREFETCH_SEGMENTS <= 0:
+    prefetch_count = hls_prefetch_window(video_profile, stereo_processor)
+    if prefetch_count <= 0:
         return
     try:
         segment_count = int(hls_duration_info(media_info)["segmentCount"])
     except RuntimeError:
         return
-    for segment_index in range(start_index, min(segment_count, start_index + HLS_PREFETCH_SEGMENTS)):
+    for segment_index in range(start_index, min(segment_count, start_index + prefetch_count)):
         path = hls_segment_path(resource_id, url, segment_index, audio_profile, video_profile, stereo_processor)
         try:
             if path.exists() and path.stat().st_size > 0:
@@ -2061,14 +2215,15 @@ def prefetch_hls_segments(
                 with HLS_PREFETCH_LOCK:
                     HLS_PREFETCHING.discard(prefetch_key)
 
-        threading.Thread(target=worker, daemon=True, name="file-pipe-hls-prefetch").start()
+        HLS_PREFETCH_EXECUTOR.submit(worker)
 
 
 def lock_for_transcode(path: Path) -> threading.Lock:
     key = str(path)
-    if key not in TRANSCODE_LOCKS:
-        TRANSCODE_LOCKS[key] = threading.Lock()
-    return TRANSCODE_LOCKS[key]
+    with TRANSCODE_LOCKS_LOCK:
+        if key not in TRANSCODE_LOCKS:
+            TRANSCODE_LOCKS[key] = threading.Lock()
+        return TRANSCODE_LOCKS[key]
 
 
 def update_transcode_progress(
@@ -2277,6 +2432,7 @@ def start_transcoded_file(
     if part_path.exists():
         part_path.unlink()
     command = build_transcode_command(url, media_info, str(part_path), ffmpeg_path, fragmented=True, audio_profile=profile)
+    write_transcode_job(path, resource_id, url, media_info, profile, status="running")
     update_transcode_progress(
         resource_id,
         profile,
@@ -2294,7 +2450,9 @@ def start_transcoded_file(
         lock = lock_for_transcode(path)
         with lock:
             try:
+                write_transcode_job(path, resource_id, url, media_info, profile, status="running")
                 run_transcode_command(command, part_path, resource_id, parse_float(media_info.get("duration")), profile)
+                write_transcode_job(path, resource_id, url, media_info, profile, status="finalizing")
                 update_transcode_progress(resource_id, profile, status="finalizing", percent=99, size=part_path.stat().st_size)
                 remux_fragmented_mp4_to_faststart(part_path, path, ffmpeg_path)
                 if part_path.exists():
@@ -2302,11 +2460,13 @@ def start_transcoded_file(
                 alias_transcode_cache_by_md5(resource_id, url, cached_resource_md5(resource_id), profile)
                 stat = path.stat()
                 update_transcode_progress(resource_id, profile, status="complete", percent=100, size=stat.st_size, progressive=False)
-            except Exception:
+                remove_transcode_job(path)
+            except Exception as exc:
+                write_transcode_job(path, resource_id, url, media_info, profile, status="error", error=str(exc))
                 if part_path.exists():
                     part_path.unlink()
 
-    threading.Thread(target=worker, daemon=True).start()
+    submit_transcode_future(transcode_progress_key(resource_id, profile), worker)
     return {
         "path": str(part_path),
         "size": 0,
@@ -2340,6 +2500,123 @@ def wait_for_progressive_transcode(
     raise RuntimeError("Timed out waiting for enough transcoded video to start playback.")
 
 
+def recover_transcode_job(job_path: Path) -> bool:
+    try:
+        payload = json.loads(job_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, dict) or payload.get("kind") != "stable-mp4":
+        return False
+    resource_id = str(payload.get("resourceId") or "").strip()
+    url = str(payload.get("url") or "").strip()
+    if not resource_id or not url:
+        return False
+    audio_profile = normalize_transcode_audio_profile(payload.get("audioProfile"))
+    path = transcode_path_from_job_path(job_path)
+    if path.exists() and path.stat().st_size > 0:
+        remove_transcode_job(path)
+        return False
+    media_info = payload.get("mediaInfo") if isinstance(payload.get("mediaInfo"), dict) else {}
+    if not media_info:
+        try:
+            media_info = cached_probe_media(url)
+        except Exception as exc:
+            update_transcode_progress(resource_id, audio_profile, status="error", error=f"Could not recover transcode job: {exc}")
+            return False
+
+    ffmpeg_path = find_media_tool("ffmpeg")
+    if not ffmpeg_path:
+        update_transcode_progress(resource_id, audio_profile, status="error", error="ffmpeg is not installed or is not on PATH.")
+        return False
+    part_path = transcode_part_path(resource_id, url, audio_profile)
+    if part_path.exists():
+        try:
+            part_path.unlink()
+        except OSError:
+            pass
+    command = build_transcode_command(url, media_info, str(part_path), ffmpeg_path, fragmented=True, audio_profile=audio_profile)
+    update_transcode_progress(
+        resource_id,
+        audio_profile,
+        status="running",
+        percent=0,
+        seconds=0,
+        duration=parse_float(media_info.get("duration")),
+        size=0,
+        estimatedFinalSize=parse_int(media_info.get("size")) or 0,
+        error="",
+        progressive=True,
+        recovered=True,
+    )
+
+    def worker() -> None:
+        lock = lock_for_transcode(path)
+        with lock:
+            try:
+                write_transcode_job(path, resource_id, url, media_info, audio_profile, status="running")
+                run_transcode_command(command, part_path, resource_id, parse_float(media_info.get("duration")), audio_profile)
+                write_transcode_job(path, resource_id, url, media_info, audio_profile, status="finalizing")
+                update_transcode_progress(resource_id, audio_profile, status="finalizing", percent=99, size=part_path.stat().st_size, recovered=True)
+                remux_fragmented_mp4_to_faststart(part_path, path, ffmpeg_path)
+                if part_path.exists():
+                    part_path.unlink()
+                alias_transcode_cache_by_md5(resource_id, url, cached_resource_md5(resource_id), audio_profile)
+                stat = path.stat()
+                update_transcode_progress(resource_id, audio_profile, status="complete", percent=100, size=stat.st_size, progressive=False, recovered=True)
+                remove_transcode_job(path)
+            except Exception as exc:
+                write_transcode_job(path, resource_id, url, media_info, audio_profile, status="error", error=str(exc))
+                update_transcode_progress(resource_id, audio_profile, status="error", error=str(exc), recovered=True)
+                if part_path.exists():
+                    try:
+                        part_path.unlink()
+                    except OSError:
+                        pass
+
+    return submit_transcode_future(transcode_progress_key(resource_id, audio_profile), worker)
+
+
+def cleanup_stale_hls_temp_files() -> int:
+    deleted = 0
+    try:
+        candidates = list(TRANSCODE_CACHE_DIR.glob("**/*.part"))
+    except OSError:
+        return 0
+    for path in candidates:
+        if path.suffix != ".part":
+            continue
+        try:
+            path.unlink()
+            deleted += 1
+        except OSError:
+            continue
+    return deleted
+
+
+def recover_interrupted_work() -> Dict[str, object]:
+    global RECOVERY_STARTED
+    with RECOVERY_LOCK:
+        if RECOVERY_STARTED:
+            return {"started": False}
+        RECOVERY_STARTED = True
+    TRANSCODE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    deleted_temp_files = cleanup_stale_hls_temp_files()
+    recovered_jobs = 0
+    failed_jobs = 0
+    for job_path in TRANSCODE_CACHE_DIR.glob("*.job.json"):
+        try:
+            if recover_transcode_job(job_path):
+                recovered_jobs += 1
+        except Exception:
+            failed_jobs += 1
+    return {
+        "started": True,
+        "recoveredJobs": recovered_jobs,
+        "failedJobs": failed_jobs,
+        "deletedTempFiles": deleted_temp_files,
+    }
+
+
 def ensure_transcoded_file(
     resource_id: str,
     url: str,
@@ -2371,6 +2648,7 @@ def ensure_transcoded_file(
             if temp_path.exists():
                 temp_path.unlink()
             command = build_transcode_command(url, media_info, str(temp_path), ffmpeg_path, fragmented=False, audio_profile=profile)
+            write_transcode_job(path, resource_id, url, media_info, profile, status="running")
             update_transcode_progress(
                 resource_id,
                 profile,
@@ -2385,7 +2663,9 @@ def ensure_transcoded_file(
                 run_transcode_command(command, temp_path, resource_id, parse_float(media_info.get("duration")), profile)
                 temp_path.replace(path)
                 alias_transcode_cache_by_md5(resource_id, url, cached_resource_md5(resource_id), profile)
-            except Exception:
+                remove_transcode_job(path)
+            except Exception as exc:
+                write_transcode_job(path, resource_id, url, media_info, profile, status="error", error=str(exc))
                 if temp_path.exists():
                     temp_path.unlink()
                 raise
@@ -2784,6 +3064,7 @@ def resource_probe_target(resource_id: str) -> Optional[str]:
 
 def create_connector_app(security: Optional[ConnectorSecurity] = None):
     security = security or ConnectorSecurity()
+    recover_interrupted_work()
     app = Flask(__name__)
     app.after_request(add_cors_headers)
 
@@ -2814,6 +3095,7 @@ def create_connector_app(security: Optional[ConnectorSecurity] = None):
                 "service": "file-pipe-local-connector",
                 "serviceEnabled": CONNECTOR_SERVICE_ENABLED,
                 "settings": CONNECTOR_SETTINGS,
+                "backgroundWork": background_work_stats(),
                 **auth_state(security),
             }
         )
@@ -3374,6 +3656,7 @@ def main():
         port=args.port,
         debug=args.debug,
         ssl_context=ssl_context,
+        threaded=True,
     )
 
 

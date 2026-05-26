@@ -228,6 +228,8 @@ scripts/setup_depth_processors.sh
 
 The setup script installs a dedicated helper under `~/Library/Application Support/File Pipe/depth-processors` on macOS, creates a separate Python virtualenv, installs the optional ML dependencies, and warms up the Depth Anything V2 Small and Apple Core ML Depth Anything V2 Small models. The Local connector auto-discovers that helper, including when launched from `File Pipe Connector.app`. Manual command hooks are still supported with `FILE_PIPE_DEPTH_ANYTHING_V2_SMALL_COMMAND`, `FILE_PIPE_DEPTH_ANYTHING_V2_BASE_COMMAND`, `FILE_PIPE_COREML_DEPTH_ANYTHING_V2_SMALL_COMMAND`, or the generic `FILE_PIPE_STEREO3D_COMMAND`. Command templates receive `{input}`, `{output}`, `{start}`, `{duration}`, `{layout}`, `{video_profile}`, `{processor}`, and `{depth_percent}`.
 
+The connector bounds expensive background work so segment prefetch and Stable MP4 jobs do not create unbounded threads. Tune `FILE_PIPE_TRANSCODE_WORKERS` for concurrent Stable MP4 jobs, `FILE_PIPE_HLS_PREFETCH_WORKERS` for concurrent segment prefetch jobs, and `FILE_PIPE_HLS_STEREO3D_PREFETCH_SEGMENTS` for the smaller 3D/depth prefetch window. Completed HLS segments and MP4 caches survive restarts. In-progress Stable MP4 jobs write a small `.job.json` manifest next to the target cache file and are restarted when the connector comes back up; incomplete HLS segments are regenerated on demand.
+
 ## Security model
 
 File Pipe is designed so the hosted Flask app never receives the decryption key and never needs plaintext media.

@@ -444,6 +444,7 @@ def create_admin_blueprint(security, runtime):
                     "serverCount": len(local_connector.SERVER_CACHE),
                     "resourceCount": len(local_connector.RESOURCE_CACHE),
                 },
+                "backgroundWork": local_connector.background_work_stats(),
                 "readAhead": local_connector.READ_AHEAD_CACHE.stats(),
                 "config": public_config(runtime.config),
                 "settings": public_connector_settings(runtime.config),
