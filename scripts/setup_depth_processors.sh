@@ -85,7 +85,7 @@ HLS requests, start the connector with one of:
 
 Manual command templates, if needed:
 
-  FILE_PIPE_DEPTH_ANYTHING_V2_SMALL_COMMAND='$DEPTH_HOME/.venv/bin/python' '$DEPTH_HOME/depth_anything_stereo.py' --processor depth-anything-v2-small --input {input} --output {output} --start {start} --duration {duration} --layout {layout} --video-profile {video_profile} --depth-percent {depth_percent}
+  FILE_PIPE_DEPTH_ANYTHING_V2_SMALL_COMMAND='$DEPTH_HOME/.venv/bin/python' '$DEPTH_HOME/depth_anything_stereo.py' --processor depth-anything-v2-small --input {input} --output {output} --start {start} --duration {duration} --layout {layout} --video-profile {video_profile} --depth-percent {depth_percent} --resolution-scale {resolution_scale}
 
-  FILE_PIPE_COREML_DEPTH_ANYTHING_V2_SMALL_COMMAND='$DEPTH_HOME/.venv/bin/python' '$DEPTH_HOME/depth_anything_stereo.py' --processor coreml-depth-anything-v2-small --input {input} --output {output} --start {start} --duration {duration} --layout {layout} --video-profile {video_profile} --depth-percent {depth_percent}
+  FILE_PIPE_COREML_DEPTH_ANYTHING_V2_SMALL_COMMAND='$DEPTH_HOME/.venv/bin/python' '$DEPTH_HOME/depth_anything_stereo.py' --processor coreml-depth-anything-v2-small --input {input} --output {output} --start {start} --duration {duration} --layout {layout} --video-profile {video_profile} --depth-percent {depth_percent} --resolution-scale {resolution_scale}
 EOF

@@ -211,6 +211,7 @@ async function handleWatchHlsMedia(event, url, client, sessionId, metadata) {
         segmentIndex,
         videoProfile: profile.videoProfile,
         stereoProcessor: profile.stereoProcessor,
+        resolutionScale: profile.resolutionScale,
       });
     },
     cancel() {
@@ -341,7 +342,8 @@ function startHlsPrefetch(client, message) {
   const segmentCount = Math.max(1, Number(hls.segmentCount || Math.ceil(duration / segmentDuration) || 1));
   const startIndex = Math.max(0, Number(message.startIndex || 0));
   const endIndex = Math.min(segmentCount - 1, Number(message.endIndex ?? segmentCount - 1));
-  const key = prefetchKey("watch", message.sessionId, metadata);
+  const profile = hlsRequestProfile(metadata);
+  const key = `${prefetchKey("watch", message.sessionId, metadata)}:${profile.videoProfile}:${profile.stereoProcessor || "none"}:${profile.resolutionScale || "1"}`;
   const previous = prefetchTasks.get(key);
   if (previous) previous.cancelled = true;
   const task = { cancelled: false };
@@ -379,6 +381,7 @@ async function runHlsPrefetch(task, client, options) {
         sourceVersion: metadata.sourceVersion || 0,
         videoProfile: profile.videoProfile,
         stereoProcessor: profile.stereoProcessor,
+        resolutionScale: profile.resolutionScale,
       }, info);
       cachedSegments += 1;
       postPrefetchProgress(client, "watch", sessionId, "hls", cachedSegments, totalSegments);
@@ -438,6 +441,7 @@ function buildHlsPlaylist(metadata, profile = hlsRequestProfile(metadata)) {
   if (sourceVersion) segmentParams.set("v", sourceVersion);
   if (profile.videoProfile && profile.videoProfile !== "2d") segmentParams.set("video_profile", profile.videoProfile);
   if (profile.stereoProcessor) segmentParams.set("stereo_processor", profile.stereoProcessor);
+  if (profile.videoProfile && profile.videoProfile !== "2d") segmentParams.set("stereo_scale", profile.resolutionScale || "0.5");
   const segmentQuery = segmentParams.toString() ? `?${segmentParams.toString()}` : "";
   const lines = [
     "#EXTM3U",
@@ -479,19 +483,38 @@ function hlsStereoProcessor(metadata = {}) {
   return String(metadata.stereoProcessor || metadata.playbackProfile?.stereoProcessor || "");
 }
 
+function hlsResolutionScale(metadata = {}) {
+  return normalizeHlsResolutionScale(
+    metadata.resolutionScale
+      || metadata.hls?.resolutionScale
+      || metadata.playbackProfile?.resolutionScale
+      || "",
+  );
+}
+
 function hlsRequestProfile(metadata = {}, url = null) {
   const params = url?.searchParams;
   const videoProfile = normalizeHlsVideoProfile(params?.get("video_profile") || params?.get("videoProfile") || hlsVideoProfile(metadata));
   const stereoProcessor = videoProfile === "2d"
     ? ""
     : String(params?.get("stereo_processor") || params?.get("stereoProcessor") || hlsStereoProcessor(metadata) || "");
-  return { videoProfile, stereoProcessor };
+  const resolutionScale = videoProfile === "2d"
+    ? "1"
+    : normalizeHlsResolutionScale(params?.get("stereo_scale") || params?.get("resolution_scale") || params?.get("resolutionScale") || hlsResolutionScale(metadata));
+  return { videoProfile, stereoProcessor, resolutionScale };
 }
 
 function normalizeHlsVideoProfile(value = "") {
   const profile = String(value || "").toLowerCase();
   if (["full-sbs", "fsbs", "3d-full", "full-3d", "3d-full-sbs", "stereo-full-sbs"].includes(profile)) return "3d-full-sbs";
   return ["3d", "3d-sbs", "sbs", "half-sbs", "stereo-sbs"].includes(profile) ? "3d-sbs" : "2d";
+}
+
+function normalizeHlsResolutionScale(value = "") {
+  const scale = String(value || "").trim().toLowerCase().replace(/x$/, "");
+  if (["1", "1.0", "100", "100%"].includes(scale)) return "1";
+  if (["0.75", ".75", "075", "75", "75%"].includes(scale)) return "0.75";
+  return "0.5";
 }
 
 function isLinearProgressiveMetadata(metadata) {
@@ -675,7 +698,7 @@ function rangeCacheInfo(kind, metadata, start, end, contentType) {
 }
 
 function hlsCacheInfo(metadata, segmentIndex, contentType, profile = hlsRequestProfile(metadata)) {
-  const profileKey = `${profile.videoProfile || "2d"}:${profile.stereoProcessor || "none"}`;
+  const profileKey = `${profile.videoProfile || "2d"}:${profile.stereoProcessor || "none"}:${profile.resolutionScale || "1"}`;
   return {
     kind: "hls",
     url: `https://file-pipe-cache.local/watch/${mediaIdentity(metadata)}/v${cacheVersion(metadata)}/${encodeURIComponent(profileKey)}/hls/${segmentIndex}`,

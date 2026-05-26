@@ -1317,8 +1317,10 @@ document.addEventListener("alpine:init", () => {
         if (hlsStream) {
           const videoProfile = playbackMetadata.videoProfile || playbackMetadata.playbackProfile?.videoProfile || "2d";
           const stereoProcessor = playbackMetadata.stereoProcessor || playbackMetadata.playbackProfile?.stereoProcessor || "";
+          const resolutionScale = playbackMetadata.resolutionScale || playbackMetadata.hls?.resolutionScale || playbackMetadata.playbackProfile?.resolutionScale || "0.5";
           if (videoProfile && videoProfile !== "2d") videoParams.set("video_profile", videoProfile);
           if (stereoProcessor) videoParams.set("stereo_processor", stereoProcessor);
+          if (videoProfile && videoProfile !== "2d") videoParams.set("stereo_scale", resolutionScale);
         }
         this.videoUrl = `/watch-media/${this.roomId}/${fileName}?${videoParams.toString()}`;
         this.streamingReady = true;
@@ -1404,7 +1406,7 @@ document.addEventListener("alpine:init", () => {
     },
 
     async registerServiceWorker() {
-      const registration = await navigator.serviceWorker.register("/bigscreen-sw.js?v=13", { scope: "/" });
+      const registration = await navigator.serviceWorker.register("/bigscreen-sw.js?v=14", { scope: "/" });
       await navigator.serviceWorker.ready;
       if (!navigator.serviceWorker.controller) {
         await new Promise((resolve) => {
@@ -1499,6 +1501,7 @@ document.addEventListener("alpine:init", () => {
         sourceVersion: this.sourceVersion,
         videoProfile: message.videoProfile || metadata?.videoProfile || metadata?.playbackProfile?.videoProfile || "2d",
         stereoProcessor: message.stereoProcessor || metadata?.stereoProcessor || metadata?.playbackProfile?.stereoProcessor || "",
+        resolutionScale: message.resolutionScale || metadata?.resolutionScale || metadata?.hls?.resolutionScale || metadata?.playbackProfile?.resolutionScale || "0.5",
         prefetch: Boolean(message.prefetch),
       })) {
         this.postWorkerMessage({

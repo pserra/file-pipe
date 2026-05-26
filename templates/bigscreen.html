@@ -12,7 +12,7 @@
     <script defer src="{{ url_for('static', filename='js/player/playback-progress.js', v='2') }}"></script>
     <script>window.FILE_PIPE_P2P_CONFIG = {{ p2p_config()|tojson }};</script>
     <script defer src="{{ url_for('static', filename='js/pages/bigscreen/helpers.js', v='1') }}"></script>
-    <script defer src="{{ url_for('static', filename='js/pages/bigscreen/index.js', v='18') }}"></script>
+    <script defer src="{{ url_for('static', filename='js/pages/bigscreen/index.js', v='19') }}"></script>
     <script defer src="{{ local_static_or_cdn('vendor/alpinejs/cdn.min.js', 'https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js') }}"></script>
   </head>
   <body class="bg-black text-white" x-data="bigscreenPlayer('{{ session_id }}')" x-init="initBigscreen()">

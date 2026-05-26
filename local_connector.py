@@ -290,6 +290,7 @@ HLS_ACCURATE_SEEK_WINDOW_SECONDS = float(os.environ.get("FILE_PIPE_HLS_ACCURATE_
 HLS_SEGMENT_CACHE_VERSION = "hls-v3"
 HLS_STEREO3D_DEPTH_PERCENT = float(os.environ.get("FILE_PIPE_HLS_STEREO3D_DEPTH_PERCENT", "3.5"))
 HLS_STEREO3D_PROCESSOR = os.environ.get("FILE_PIPE_HLS_STEREO3D_PROCESSOR", TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT)
+HLS_STEREO3D_RESOLUTION_SCALE = os.environ.get("FILE_PIPE_HLS_STEREO3D_RESOLUTION_SCALE", "0.5")
 PROGRESSIVE_TRANSCODE_START_PERCENT = int(os.environ.get("FILE_PIPE_PROGRESSIVE_TRANSCODE_START_PERCENT", "3"))
 PROGRESSIVE_TRANSCODE_MIN_BYTES = int(os.environ.get("FILE_PIPE_PROGRESSIVE_TRANSCODE_MIN_BYTES", str(2 * 1024 * 1024)))
 TRANSCODE_WORKERS = max(1, int(os.environ.get("FILE_PIPE_TRANSCODE_WORKERS", "1")))
@@ -297,6 +298,7 @@ HLS_PREFETCH_WORKERS = max(1, int(os.environ.get("FILE_PIPE_HLS_PREFETCH_WORKERS
 TRANSCODE_LOCKS: Dict[str, threading.Lock] = {}
 TRANSCODE_LOCKS_LOCK = threading.Lock()
 TRANSCODE_PROGRESS: Dict[str, Dict[str, object]] = {}
+HLS_PREBUILD_PROGRESS: Dict[str, Dict[str, object]] = {}
 TRANSCODE_RUNNING: set[str] = set()
 TRANSCODE_RUNNING_LOCK = threading.Lock()
 TRANSCODE_EXECUTOR = BackgroundTaskPool("file-pipe-transcode", TRANSCODE_WORKERS)
@@ -1194,6 +1196,30 @@ def normalize_stereo_processor(value: object) -> str:
     return aliases.get(processor, TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT)
 
 
+def normalize_stereo3d_resolution_scale(value: object) -> str:
+    text = str(value or "").strip().lower().replace("x", "")
+    aliases = {
+        "": "0.5",
+        "1": "1",
+        "1.0": "1",
+        "100": "1",
+        "100%": "1",
+        "0.75": "0.75",
+        ".75": "0.75",
+        "75": "0.75",
+        "75%": "0.75",
+        "0.5": "0.5",
+        ".5": "0.5",
+        "50": "0.5",
+        "50%": "0.5",
+    }
+    return aliases.get(text, "0.5")
+
+
+def stereo3d_resolution_scale_value(value: object) -> float:
+    return float(normalize_stereo3d_resolution_scale(value))
+
+
 def transcode_video_layout(video_profile: str) -> str:
     profile = normalize_transcode_video_profile(video_profile)
     if profile == TRANSCODE_VIDEO_PROFILE_STEREO_FULL_SBS:
@@ -1238,6 +1264,16 @@ def request_stereo_processor() -> str:
         or request.args.get("depth_processor")
         or request.args.get("depthProcessor")
         or HLS_STEREO3D_PROCESSOR
+    )
+
+
+def request_stereo3d_resolution_scale() -> str:
+    return normalize_stereo3d_resolution_scale(
+        request.args.get("stereo_scale")
+        or request.args.get("stereoScale")
+        or request.args.get("resolution_scale")
+        or request.args.get("resolutionScale")
+        or HLS_STEREO3D_RESOLUTION_SCALE
     )
 
 
@@ -1539,8 +1575,14 @@ def hls_stereo3d_depth_fraction() -> float:
     return max(0.005, min(0.08, HLS_STEREO3D_DEPTH_PERCENT / 100.0))
 
 
-def stereo_sbs_filter(input_label: str, video_profile: str = TRANSCODE_VIDEO_PROFILE_STEREO_SBS, output_label: str = "[v]") -> str:
+def stereo_sbs_filter(
+    input_label: str,
+    video_profile: str = TRANSCODE_VIDEO_PROFILE_STEREO_SBS,
+    output_label: str = "[v]",
+    resolution_scale: str = "0.5",
+) -> str:
     depth = hls_stereo3d_depth_fraction()
+    scale = stereo3d_resolution_scale_value(resolution_scale)
     offset = f"floor(iw*{depth:.4f}/2)*2"
     crop_width = f"iw-2*{offset}"
     if normalize_transcode_video_profile(video_profile) == TRANSCODE_VIDEO_PROFILE_STEREO_FULL_SBS:
@@ -1548,7 +1590,7 @@ def stereo_sbs_filter(input_label: str, video_profile: str = TRANSCODE_VIDEO_PRO
     else:
         eye_width = "trunc(iw/4)*2"
     return (
-        f"{input_label}scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p,split=2[fp3dl][fp3dr];"
+        f"{input_label}scale=trunc(iw*{scale:.2f}/2)*2:trunc(ih*{scale:.2f}/2)*2,format=yuv420p,split=2[fp3dl][fp3dr];"
         f"[fp3dl]crop={crop_width}:ih:{offset}:0,scale={eye_width}:ih[fp3dleft];"
         f"[fp3dr]crop={crop_width}:ih:0:0,scale={eye_width}:ih[fp3dright];"
         f"[fp3dleft][fp3dright]hstack=inputs=2,setsar=1,format=yuv420p{output_label}"
@@ -1564,6 +1606,7 @@ def build_hls_segment_command(
     ffmpeg_path: str = "ffmpeg",
     audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
     video_profile: str = TRANSCODE_VIDEO_PROFILE_2D,
+    resolution_scale: str = "0.5",
 ) -> List[str]:
     normalized_video_profile = normalize_transcode_video_profile(video_profile)
     video_index, audio_index = default_stream_indexes(probe)
@@ -1583,7 +1626,7 @@ def build_hls_segment_command(
     command.extend(["-t", f"{duration:.3f}"])
     use_stereo_sbs = video_index is not None and is_stereo_video_profile(normalized_video_profile)
     if use_stereo_sbs:
-        command.extend(["-filter_complex", stereo_sbs_filter(f"[0:{video_index}]", normalized_video_profile)])
+        command.extend(["-filter_complex", stereo_sbs_filter(f"[0:{video_index}]", normalized_video_profile, resolution_scale=resolution_scale)])
     if video_index is not None:
         command.extend(["-map", "[v]" if use_stereo_sbs else f"0:{video_index}"])
     if audio_index is not None:
@@ -1690,6 +1733,8 @@ def default_stereo_processor_command_template(processor: str) -> str:
             "{video_profile}",
             "--depth-percent",
             "{depth_percent}",
+            "--resolution-scale",
+            "{resolution_scale}",
         ]
     )
 
@@ -1701,6 +1746,7 @@ def build_external_stereo_segment_command(
     duration: float,
     video_profile: str,
     stereo_processor: str,
+    resolution_scale: str = "0.5",
 ) -> List[str]:
     processor = normalize_stereo_processor(stereo_processor)
     template = stereo_processor_command_template(processor)
@@ -1718,6 +1764,7 @@ def build_external_stereo_segment_command(
         "video_profile": normalize_transcode_video_profile(video_profile),
         "processor": processor,
         "depth_percent": f"{hls_stereo3d_depth_fraction() * 100:.3f}",
+        "resolution_scale": normalize_stereo3d_resolution_scale(resolution_scale),
     }
     quoted = {key: shlex.quote(str(value)) for key, value in values.items()}
     return shlex.split(template.format(**quoted))
@@ -1748,6 +1795,7 @@ def transcode_profile_cache_suffix(
     audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
     video_profile: str = TRANSCODE_VIDEO_PROFILE_2D,
     stereo_processor: str = TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT,
+    resolution_scale: str = "0.5",
 ) -> str:
     audio = normalize_transcode_audio_profile(audio_profile)
     video = normalize_transcode_video_profile(video_profile)
@@ -1759,6 +1807,8 @@ def transcode_profile_cache_suffix(
         parts.append(video)
         if processor != TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT:
             parts.append(processor)
+        scale = normalize_stereo3d_resolution_scale(resolution_scale)
+        parts.append(f"scale-{scale.replace('.', '')}")
     return f"-{'-'.join(parts)}" if parts else ""
 
 
@@ -1766,6 +1816,7 @@ def transcode_profile_cache_key(
     audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
     video_profile: str = TRANSCODE_VIDEO_PROFILE_2D,
     stereo_processor: str = TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT,
+    resolution_scale: str = "0.5",
 ) -> str:
     audio = normalize_transcode_audio_profile(audio_profile)
     video = normalize_transcode_video_profile(video_profile)
@@ -1777,6 +1828,7 @@ def transcode_profile_cache_key(
         parts.append(video)
         if processor != TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT:
             parts.append(processor)
+        parts.append(f"scale-{normalize_stereo3d_resolution_scale(resolution_scale)}")
     return f":{':'.join(parts)}" if parts else ""
 
 
@@ -1796,10 +1848,11 @@ def source_hls_cache_dir(
     audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
     video_profile: str = TRANSCODE_VIDEO_PROFILE_2D,
     stereo_processor: str = TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT,
+    resolution_scale: str = "0.5",
 ) -> Path:
-    profile_key = transcode_profile_cache_key(audio_profile, video_profile, stereo_processor)
+    profile_key = transcode_profile_cache_key(audio_profile, video_profile, stereo_processor, resolution_scale)
     url_hash = hashlib.sha256(f"{TRANSCODE_CACHE_VERSION}{profile_key}:{HLS_SEGMENT_CACHE_VERSION}:{HLS_SEGMENT_SECONDS}:{url}".encode("utf-8")).hexdigest()[:16]
-    return TRANSCODE_CACHE_DIR / f"{resource_id}-{url_hash}{transcode_profile_cache_suffix(audio_profile, video_profile, stereo_processor)}-hls"
+    return TRANSCODE_CACHE_DIR / f"{resource_id}-{url_hash}{transcode_profile_cache_suffix(audio_profile, video_profile, stereo_processor, resolution_scale)}-hls"
 
 
 def cached_resource_md5(resource_id: str) -> str:
@@ -1818,8 +1871,9 @@ def md5_hls_cache_dir(
     audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
     video_profile: str = TRANSCODE_VIDEO_PROFILE_2D,
     stereo_processor: str = TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT,
+    resolution_scale: str = "0.5",
 ) -> Path:
-    profile_part = transcode_profile_cache_suffix(audio_profile, video_profile, stereo_processor)
+    profile_part = transcode_profile_cache_suffix(audio_profile, video_profile, stereo_processor, resolution_scale)
     return TRANSCODE_CACHE_DIR / f"md5-{TRANSCODE_CACHE_VERSION}{profile_part}-{HLS_SEGMENT_CACHE_VERSION}-{HLS_SEGMENT_SECONDS}s-{md5}-hls"
 
 
@@ -1842,12 +1896,13 @@ def hls_cache_candidates(
     audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
     video_profile: str = TRANSCODE_VIDEO_PROFILE_2D,
     stereo_processor: str = TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT,
+    resolution_scale: str = "0.5",
 ) -> List[Path]:
     candidates: List[Path] = []
     md5 = cached_resource_md5(resource_id)
     if md5:
-        candidates.append(md5_hls_cache_dir(md5, audio_profile, video_profile, stereo_processor))
-    candidates.append(source_hls_cache_dir(resource_id, url, audio_profile, video_profile, stereo_processor))
+        candidates.append(md5_hls_cache_dir(md5, audio_profile, video_profile, stereo_processor, resolution_scale))
+    candidates.append(source_hls_cache_dir(resource_id, url, audio_profile, video_profile, stereo_processor, resolution_scale))
     return candidates
 
 
@@ -1895,11 +1950,12 @@ def hls_cache_dir(
     audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
     video_profile: str = TRANSCODE_VIDEO_PROFILE_2D,
     stereo_processor: str = TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT,
+    resolution_scale: str = "0.5",
 ) -> Path:
-    for path in hls_cache_candidates(resource_id, url, audio_profile, video_profile, stereo_processor):
+    for path in hls_cache_candidates(resource_id, url, audio_profile, video_profile, stereo_processor, resolution_scale):
         if path.exists():
             return path
-    return hls_cache_candidates(resource_id, url, audio_profile, video_profile, stereo_processor)[0]
+    return hls_cache_candidates(resource_id, url, audio_profile, video_profile, stereo_processor, resolution_scale)[0]
 
 
 def hls_segment_path(
@@ -1909,8 +1965,9 @@ def hls_segment_path(
     audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
     video_profile: str = TRANSCODE_VIDEO_PROFILE_2D,
     stereo_processor: str = TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT,
+    resolution_scale: str = "0.5",
 ) -> Path:
-    return hls_cache_dir(resource_id, url, audio_profile, video_profile, stereo_processor) / f"segment-{segment_index:06d}.ts"
+    return hls_cache_dir(resource_id, url, audio_profile, video_profile, stereo_processor, resolution_scale) / f"segment-{segment_index:06d}.ts"
 
 
 def hls_segment_error_path(path: Path) -> Path:
@@ -2110,6 +2167,7 @@ def hls_playlist(
     audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
     video_profile: str = TRANSCODE_VIDEO_PROFILE_2D,
     stereo_processor: str = TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT,
+    resolution_scale: str = "0.5",
 ) -> str:
     info = hls_duration_info(media_info)
     duration = float(info["duration"])
@@ -2127,6 +2185,7 @@ def hls_playlist(
         processor = normalize_stereo_processor(stereo_processor)
         if processor != TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT:
             query_parts.append(f"stereo_processor={processor}")
+        query_parts.append(f"stereo_scale={normalize_stereo3d_resolution_scale(resolution_scale)}")
     token_query = f"?{'&'.join(query_parts)}" if query_parts else ""
     lines = [
         "#EXTM3U",
@@ -2155,9 +2214,10 @@ def ensure_hls_segment(
     audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
     video_profile: str = TRANSCODE_VIDEO_PROFILE_2D,
     stereo_processor: str = TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT,
+    resolution_scale: str = "0.5",
 ) -> Dict[str, object]:
-    artifact = create_hls_segment(resource_id, url, media_info, segment_index, audio_profile, video_profile, stereo_processor)
-    prefetch_hls_segments(resource_id, url, media_info, segment_index + 1, audio_profile, video_profile, stereo_processor)
+    artifact = create_hls_segment(resource_id, url, media_info, segment_index, audio_profile, video_profile, stereo_processor, resolution_scale)
+    prefetch_hls_segments(resource_id, url, media_info, segment_index + 1, audio_profile, video_profile, stereo_processor, resolution_scale)
     return artifact
 
 
@@ -2169,9 +2229,11 @@ def create_hls_segment(
     audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
     video_profile: str = TRANSCODE_VIDEO_PROFILE_2D,
     stereo_processor: str = TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT,
+    resolution_scale: str = "0.5",
 ) -> Dict[str, object]:
     normalized_video_profile = normalize_transcode_video_profile(video_profile)
     normalized_stereo_processor = normalize_stereo_processor(stereo_processor) if is_stereo_video_profile(normalized_video_profile) else TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT
+    normalized_resolution_scale = normalize_stereo3d_resolution_scale(resolution_scale) if is_stereo_video_profile(normalized_video_profile) else "1"
     ffmpeg_path = find_media_tool("ffmpeg")
     if not ffmpeg_path:
         raise RuntimeError("ffmpeg is not installed or is not on PATH.")
@@ -2183,7 +2245,7 @@ def create_hls_segment(
     segment_duration = int(info["segmentDuration"])
     start_time = segment_index * segment_duration
     segment_length = max(0.1, min(segment_duration, duration - start_time))
-    path = hls_segment_path(resource_id, url, segment_index, audio_profile, normalized_video_profile, normalized_stereo_processor)
+    path = hls_segment_path(resource_id, url, segment_index, audio_profile, normalized_video_profile, normalized_stereo_processor, normalized_resolution_scale)
     lock = lock_for_transcode(path)
     with lock:
         if not path.exists() or path.stat().st_size == 0:
@@ -2203,6 +2265,7 @@ def create_hls_segment(
                     ffmpeg_path,
                     audio_profile,
                     normalized_video_profile,
+                    normalized_resolution_scale,
                 )
             else:
                 command_env = external_stereo_processor_env(ffmpeg_path)
@@ -2213,6 +2276,7 @@ def create_hls_segment(
                     segment_length,
                     normalized_video_profile,
                     normalized_stereo_processor,
+                    normalized_resolution_scale,
                 )
             try:
                 subprocess.run(command, capture_output=True, text=True, check=True, env=command_env)
@@ -2242,6 +2306,7 @@ def create_hls_segment(
         "videoProfile": normalized_video_profile,
         "videoLayout": transcode_video_layout(normalized_video_profile),
         "stereoProcessor": normalized_stereo_processor,
+        "resolutionScale": normalized_resolution_scale,
         **info,
     }
 
@@ -2254,6 +2319,7 @@ def prefetch_hls_segments(
     audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
     video_profile: str = TRANSCODE_VIDEO_PROFILE_2D,
     stereo_processor: str = TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT,
+    resolution_scale: str = "0.5",
 ) -> None:
     prefetch_count = hls_prefetch_window(video_profile, stereo_processor)
     if prefetch_count <= 0:
@@ -2263,7 +2329,7 @@ def prefetch_hls_segments(
     except RuntimeError:
         return
     for segment_index in range(start_index, min(segment_count, start_index + prefetch_count)):
-        path = hls_segment_path(resource_id, url, segment_index, audio_profile, video_profile, stereo_processor)
+        path = hls_segment_path(resource_id, url, segment_index, audio_profile, video_profile, stereo_processor, resolution_scale)
         try:
             if path.exists() and path.stat().st_size > 0:
                 continue
@@ -2277,7 +2343,7 @@ def prefetch_hls_segments(
 
         def worker(index=segment_index, prefetch_key=key) -> None:
             try:
-                create_hls_segment(resource_id, url, media_info, index, audio_profile, video_profile, stereo_processor)
+                create_hls_segment(resource_id, url, media_info, index, audio_profile, video_profile, stereo_processor, resolution_scale)
             except Exception:
                 pass
             finally:
@@ -2285,6 +2351,128 @@ def prefetch_hls_segments(
                     HLS_PREFETCHING.discard(prefetch_key)
 
         HLS_PREFETCH_EXECUTOR.submit(worker)
+
+
+def hls_prebuild_progress_key(
+    resource_id: str,
+    audio_profile: str,
+    video_profile: str,
+    stereo_processor: str,
+    resolution_scale: str,
+) -> str:
+    return ":".join(
+        [
+            "hls-prebuild",
+            resource_id,
+            normalize_transcode_audio_profile(audio_profile),
+            normalize_transcode_video_profile(video_profile),
+            normalize_stereo_processor(stereo_processor),
+            normalize_stereo3d_resolution_scale(resolution_scale),
+        ]
+    )
+
+
+def hls_cache_summary(
+    resource_id: str,
+    url: str,
+    media_info: Dict[str, object],
+    audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
+    video_profile: str = TRANSCODE_VIDEO_PROFILE_2D,
+    stereo_processor: str = TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT,
+    resolution_scale: str = "0.5",
+) -> Dict[str, object]:
+    info = hls_duration_info(media_info)
+    path = hls_cache_dir(resource_id, url, audio_profile, video_profile, stereo_processor, resolution_scale)
+    cached_segments = 0
+    size = 0
+    if path.exists():
+        for child in path.glob("segment-*.ts"):
+            try:
+                stat = child.stat()
+            except OSError:
+                continue
+            if stat.st_size > 0:
+                cached_segments += 1
+                size += stat.st_size
+    segment_count = int(info["segmentCount"])
+    return {
+        "path": str(path),
+        "size": size,
+        "cachedSegments": cached_segments,
+        "segmentCount": segment_count,
+        "complete": cached_segments >= segment_count,
+        "audioProfile": normalize_transcode_audio_profile(audio_profile),
+        "videoProfile": normalize_transcode_video_profile(video_profile),
+        "videoLayout": transcode_video_layout(video_profile),
+        "stereoProcessor": normalize_stereo_processor(stereo_processor) if is_stereo_video_profile(video_profile) else "",
+        "resolutionScale": normalize_stereo3d_resolution_scale(resolution_scale) if is_stereo_video_profile(video_profile) else "1",
+        **info,
+    }
+
+
+def resource_has_stereo3d_hls_cache(resource_id: str) -> bool:
+    patterns = [f"{resource_id}-*3d*-hls"]
+    md5 = cached_resource_md5(resource_id)
+    if md5:
+        patterns.append(f"md5-{TRANSCODE_CACHE_VERSION}-*3d*-{md5}-hls")
+    candidates: List[Path] = []
+    try:
+        for pattern in patterns:
+            candidates.extend(TRANSCODE_CACHE_DIR.glob(pattern))
+    except OSError:
+        return False
+    for path in candidates:
+        if not path.is_dir():
+            continue
+        try:
+            if any(child.is_file() and child.suffix == ".ts" and child.stat().st_size > 0 for child in path.iterdir()):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def start_hls_prebuild(
+    resource_id: str,
+    url: str,
+    media_info: Dict[str, object],
+    audio_profile: str,
+    video_profile: str,
+    stereo_processor: str,
+    resolution_scale: str,
+) -> Dict[str, object]:
+    if not is_stereo_video_profile(video_profile):
+        raise RuntimeError("3D prebuild requires a generated stereo video profile.")
+    key = hls_prebuild_progress_key(resource_id, audio_profile, video_profile, stereo_processor, resolution_scale)
+    summary = hls_cache_summary(resource_id, url, media_info, audio_profile, video_profile, stereo_processor, resolution_scale)
+    if summary["complete"]:
+        HLS_PREBUILD_PROGRESS[key] = {"status": "cached", "percent": 100, **summary}
+        return HLS_PREBUILD_PROGRESS[key]
+
+    def worker() -> None:
+        try:
+            total = int(summary["segmentCount"])
+            cached = int(summary["cachedSegments"])
+            HLS_PREBUILD_PROGRESS[key] = {"status": "running", "percent": int((cached / total) * 100) if total else 0, **summary}
+            for index in range(total):
+                create_hls_segment(resource_id, url, media_info, index, audio_profile, video_profile, stereo_processor, resolution_scale)
+                current = hls_cache_summary(resource_id, url, media_info, audio_profile, video_profile, stereo_processor, resolution_scale)
+                percent = int((int(current["cachedSegments"]) / max(1, total)) * 100)
+                HLS_PREBUILD_PROGRESS[key] = {"status": "running", "percent": min(99, percent), **current}
+            current = hls_cache_summary(resource_id, url, media_info, audio_profile, video_profile, stereo_processor, resolution_scale)
+            HLS_PREBUILD_PROGRESS[key] = {"status": "complete", "percent": 100, **current}
+        except Exception as exc:
+            current = summary
+            try:
+                current = hls_cache_summary(resource_id, url, media_info, audio_profile, video_profile, stereo_processor, resolution_scale)
+            except Exception:
+                pass
+            HLS_PREBUILD_PROGRESS[key] = {"status": "error", "percent": HLS_PREBUILD_PROGRESS.get(key, {}).get("percent", 0), "error": str(exc), **current}
+
+    submitted = submit_transcode_future(key, worker)
+    status = {"status": "queued" if submitted else "running", "percent": int((int(summary["cachedSegments"]) / max(1, int(summary["segmentCount"]))) * 100), **summary}
+    HLS_PREBUILD_PROGRESS.setdefault(key, status)
+    return HLS_PREBUILD_PROGRESS[key]
 
 
 def lock_for_transcode(path: Path) -> threading.Lock:
@@ -3417,6 +3605,7 @@ def create_connector_app(security: Optional[ConnectorSecurity] = None):
         media_info["resource"] = RESOURCE_METADATA_CACHE.get(resource_id, {})
         media_info["transcodedCached"] = transcoded_file_cached(resource_id, url)
         media_info["spatialTranscodedCached"] = transcoded_file_cached(resource_id, url, TRANSCODE_AUDIO_PROFILE_SPATIAL)
+        media_info["stereo3dHlsCached"] = resource_has_stereo3d_hls_cache(resource_id)
         media_info["transcodeStatus"] = TRANSCODE_PROGRESS.get(transcode_progress_key(resource_id), {})
         media_info["spatialTranscodeStatus"] = TRANSCODE_PROGRESS.get(transcode_progress_key(resource_id, TRANSCODE_AUDIO_PROFILE_SPATIAL), {})
         media_info["transcodeAudioProfiles"] = {
@@ -3432,6 +3621,8 @@ def create_connector_app(security: Optional[ConnectorSecurity] = None):
             },
             "defaultProcessor": normalize_stereo_processor(HLS_STEREO3D_PROCESSOR),
             "processors": stereo_processor_options(),
+            "resolutionScales": ["1", "0.75", "0.5"],
+            "defaultResolutionScale": normalize_stereo3d_resolution_scale(HLS_STEREO3D_RESOLUTION_SCALE),
         }
         return jsonify(media_info)
 
@@ -3487,9 +3678,10 @@ def create_connector_app(security: Optional[ConnectorSecurity] = None):
             audio_profile = request_transcode_audio_profile()
             video_profile = request_transcode_video_profile()
             stereo_processor = request_stereo_processor()
+            resolution_scale = request_stereo3d_resolution_scale()
             media_info = cached_probe_media(url)
             info = hls_duration_info(media_info)
-            prefetch_hls_segments(resource_id, url, media_info, 0, audio_profile, video_profile, stereo_processor)
+            prefetch_hls_segments(resource_id, url, media_info, 0, audio_profile, video_profile, stereo_processor, resolution_scale)
         except subprocess.TimeoutExpired:
             return jsonify({"error": "Timed out while probing media tracks."}), 504
         except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
@@ -3505,10 +3697,63 @@ def create_connector_app(security: Optional[ConnectorSecurity] = None):
                 "videoProfile": video_profile,
                 "videoLayout": transcode_video_layout(video_profile),
                 "stereoProcessor": normalize_stereo_processor(stereo_processor) if is_stereo_video_profile(video_profile) else "",
+                "resolutionScale": normalize_stereo3d_resolution_scale(resolution_scale) if is_stereo_video_profile(video_profile) else "1",
                 "mediaInfo": media_info,
                 **info,
             }
         )
+
+    @app.get("/resources/<resource_id>/hls-prebuild-status")
+    def resource_hls_prebuild_status(resource_id: str):
+        auth_error = require_auth(security)
+        if auth_error:
+            return auth_error
+        url = resource_probe_target(resource_id)
+        if not url:
+            return jsonify({"error": "Unknown resource. Browse the file again."}), 404
+        try:
+            audio_profile = request_transcode_audio_profile()
+            video_profile = request_transcode_video_profile()
+            stereo_processor = request_stereo_processor()
+            resolution_scale = request_stereo3d_resolution_scale()
+            media_info = cached_probe_media(url)
+            summary = hls_cache_summary(resource_id, url, media_info, audio_profile, video_profile, stereo_processor, resolution_scale)
+            key = hls_prebuild_progress_key(resource_id, audio_profile, video_profile, stereo_processor, resolution_scale)
+            progress = HLS_PREBUILD_PROGRESS.get(key, {})
+        except subprocess.TimeoutExpired:
+            return jsonify({"error": "Timed out while probing media tracks."}), 504
+        except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
+            return jsonify({"error": f"Could not probe media tracks: {exc}"}), 502
+        except RuntimeError as exc:
+            return jsonify({"error": str(exc)}), 422
+        status = progress.get("status") or ("complete" if summary["complete"] else ("partial" if summary["cachedSegments"] else "idle"))
+        percent = progress.get("percent")
+        if percent is None:
+            percent = int((int(summary["cachedSegments"]) / max(1, int(summary["segmentCount"]))) * 100)
+        return jsonify({"ok": True, "status": status, "percent": percent, **summary, **({"error": progress.get("error")} if progress.get("error") else {})})
+
+    @app.post("/resources/<resource_id>/hls-prebuild")
+    def resource_hls_prebuild(resource_id: str):
+        auth_error = require_auth(security)
+        if auth_error:
+            return auth_error
+        url = resource_probe_target(resource_id)
+        if not url:
+            return jsonify({"error": "Unknown resource. Browse the file again."}), 404
+        try:
+            audio_profile = request_transcode_audio_profile()
+            video_profile = request_transcode_video_profile()
+            stereo_processor = request_stereo_processor()
+            resolution_scale = request_stereo3d_resolution_scale()
+            media_info = cached_probe_media(url)
+            progress = start_hls_prebuild(resource_id, url, media_info, audio_profile, video_profile, stereo_processor, resolution_scale)
+        except subprocess.TimeoutExpired:
+            return jsonify({"error": "Timed out while probing media tracks."}), 504
+        except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
+            return jsonify({"error": f"Could not probe media tracks: {exc}"}), 502
+        except RuntimeError as exc:
+            return jsonify({"error": str(exc)}), 422
+        return jsonify({"ok": True, **progress})
 
     @app.get("/resources/<resource_id>/hls/playlist.m3u8")
     def resource_hls_playlist(resource_id: str):
@@ -3522,9 +3767,10 @@ def create_connector_app(security: Optional[ConnectorSecurity] = None):
             audio_profile = request_transcode_audio_profile()
             video_profile = request_transcode_video_profile()
             stereo_processor = request_stereo_processor()
+            resolution_scale = request_stereo3d_resolution_scale()
             media_info = cached_probe_media(url)
-            playlist = hls_playlist(resource_id, media_info, request.args.get("access_token", ""), audio_profile, video_profile, stereo_processor)
-            prefetch_hls_segments(resource_id, url, media_info, 0, audio_profile, video_profile, stereo_processor)
+            playlist = hls_playlist(resource_id, media_info, request.args.get("access_token", ""), audio_profile, video_profile, stereo_processor, resolution_scale)
+            prefetch_hls_segments(resource_id, url, media_info, 0, audio_profile, video_profile, stereo_processor, resolution_scale)
         except subprocess.TimeoutExpired:
             return jsonify({"error": "Timed out while probing media tracks."}), 504
         except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
@@ -3549,8 +3795,9 @@ def create_connector_app(security: Optional[ConnectorSecurity] = None):
             audio_profile = request_transcode_audio_profile()
             video_profile = request_transcode_video_profile()
             stereo_processor = request_stereo_processor()
+            resolution_scale = request_stereo3d_resolution_scale()
             media_info = cached_probe_media(url)
-            artifact = ensure_hls_segment(resource_id, url, media_info, segment_index, audio_profile, video_profile, stereo_processor)
+            artifact = ensure_hls_segment(resource_id, url, media_info, segment_index, audio_profile, video_profile, stereo_processor, resolution_scale)
         except IndexError as exc:
             return jsonify({"error": str(exc)}), 416
         except subprocess.TimeoutExpired:

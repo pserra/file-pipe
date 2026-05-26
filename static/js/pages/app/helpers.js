@@ -407,6 +407,13 @@ function videoLayoutLabel(value) {
   return normalizeStereo3dLayout(value) === "full-sbs" ? "Full SBS" : "Half SBS";
 }
 
+function normalizeStereo3dResolutionScale(value) {
+  const scale = String(value || "").trim().toLowerCase().replace(/x$/, "");
+  if (["1", "1.0", "100", "100%"].includes(scale)) return "1";
+  if (["0.75", ".75", "075", "75", "75%"].includes(scale)) return "0.75";
+  return "0.5";
+}
+
 function normalizeStereo3dProcessor(value) {
   const processor = String(value || "").trim().toLowerCase().replace(/_/g, "-");
   const aliases = {

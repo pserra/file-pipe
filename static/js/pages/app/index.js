@@ -34,6 +34,12 @@ document.addEventListener("alpine:init", () => {
     hostVideoMode: localStorage.getItem("filePipeHostVideoMode") || "normal",
     stereo3dLayout: localStorage.getItem("filePipeStereo3dLayout") || "half-sbs",
     stereo3dProcessor: localStorage.getItem("filePipeStereo3dProcessor") || "ffmpeg-shift",
+    stereo3dResolutionScale: normalizeStereo3dResolutionScale(localStorage.getItem("filePipeStereo3dResolutionScale") || "0.5"),
+    stereo3dResolutionScaleOptions: [
+      { id: "1", label: "1x", description: "No downscaling; Full SBS doubles source width" },
+      { id: "0.75", label: "0.75x", description: "Balanced quality and generation speed" },
+      { id: "0.5", label: "0.5x", description: "Fastest browser-friendly cache" },
+    ],
     stereo3dProcessorOptions: stereo3dProcessorOptions(),
     shareProgress: 0,
     shareStatus: "",
@@ -95,6 +101,11 @@ document.addEventListener("alpine:init", () => {
     playerTranscodeAvailablePercent: 0,
     playerTranscodeComplete: false,
     hostLinearPlaybackTime: 0,
+    hostPlaybackBufferSeconds: 0,
+    hostPlaybackBufferPercent: 0,
+    hls3dPrebuildItemId: null,
+    hls3dPrebuildProgress: 0,
+    hls3dPrebuildStatus: "",
     playerPeers: {},
     playerShareProgress: 0,
     playerMd5: "",
@@ -329,6 +340,9 @@ document.addEventListener("alpine:init", () => {
       const videoProfile = normalizeTranscodeVideoProfile(options.videoProfile);
       const stereoProcessor = normalizeStereo3dProcessor(options.stereoProcessor);
       const stereoscopic = isStereoVideoProfile(videoProfile);
+      const resolutionScale = stereoscopic
+        ? normalizeStereo3dResolutionScale(options.resolutionScale || this.stereo3dResolutionScale)
+        : "1";
       if (audioProfile !== "spatial" && !stereoscopic) return path;
       const url = new URL(path, "https://file-pipe.local");
       if (audioProfile === "spatial") url.searchParams.set("audio_profile", "spatial");
@@ -336,6 +350,7 @@ document.addEventListener("alpine:init", () => {
         url.searchParams.set("video_profile", "3d");
         if (videoProfile === "3d-full-sbs") url.searchParams.set("sbs_layout", "full");
         if (stereoProcessor !== "ffmpeg-shift") url.searchParams.set("stereo_processor", stereoProcessor);
+        url.searchParams.set("stereo_scale", resolutionScale);
       }
       return `${url.pathname}${url.search}`;
     },
@@ -622,19 +637,27 @@ document.addEventListener("alpine:init", () => {
     itemMediaBadges(item) {
       if (item?.type === "container") return [];
       const resource = this.selectedResourceForItem(item);
-      const labels = this.resourceDetailLabels(resource, this.mediaInfoForItem(item));
+      const mediaInfo = this.mediaInfoForItem(item);
+      const labels = this.resourceDetailLabels(resource, mediaInfo);
       if (this.itemLooks3d(item, resource) && !labels.some((label) => label.includes("SBS") || label === "3D")) {
         labels.splice(1, 0, "3D");
       }
-      return labels.slice(0, 4);
+      if (mediaInfo?.stereo3dHlsCached && !labels.includes("3D cached")) {
+        labels.splice(Math.min(2, labels.length), 0, "3D cached");
+      }
+      return labels.slice(0, 5);
     },
 
     itemMediaSummary(item) {
       if (item?.type === "container") return "Folder";
       const resource = this.selectedResourceForItem(item);
-      const labels = this.resourceDetailLabels(resource, this.mediaInfoForItem(item));
+      const mediaInfo = this.mediaInfoForItem(item);
+      const labels = this.resourceDetailLabels(resource, mediaInfo);
       if (this.itemLooks3d(item, resource) && !labels.some((label) => label.includes("SBS") || label === "3D")) {
         labels.splice(1, 0, "3D");
+      }
+      if (mediaInfo?.stereo3dHlsCached && !labels.includes("3D cached")) {
+        labels.splice(Math.min(2, labels.length), 0, "3D cached");
       }
       if (labels.length) return labels.join(" / ");
       return item?.class || resource?.protocolInfo || "";
@@ -760,6 +783,18 @@ document.addEventListener("alpine:init", () => {
       return option?.label || "Fast ffmpeg shift";
     },
 
+    stereo3dResolutionScaleLabel(scale = this.stereo3dResolutionScale) {
+      const normalized = normalizeStereo3dResolutionScale(scale);
+      const option = this.stereo3dResolutionScaleOptions.find((candidate) => candidate.id === normalized);
+      return option?.label || "0.5x";
+    },
+
+    stereo3dResolutionScaleDescription(scale = this.stereo3dResolutionScale) {
+      const normalized = normalizeStereo3dResolutionScale(scale);
+      const option = this.stereo3dResolutionScaleOptions.find((candidate) => candidate.id === normalized);
+      return option?.description || "";
+    },
+
     hostSpatialAudioEnabled() {
       return Boolean(this.hostXrPlayer?.settings?.spatialAudio);
     },
@@ -773,6 +808,7 @@ document.addEventListener("alpine:init", () => {
       return [
         this.transcodePlaybackModeLabel(),
         this.stereo3dLayoutLabel(),
+        `3D ${this.stereo3dResolutionScaleLabel()}`,
         this.hostSpatialAudioEnabled() ? "Spatial audio" : "Stereo audio",
       ].join(" / ");
     },
@@ -1091,6 +1127,65 @@ document.addEventListener("alpine:init", () => {
       }
     },
 
+    async prebuild3dCacheForItem(item) {
+      const resource = this.selectedResourceForItem(item);
+      if (!resource || !resource.proxyPath || !this.isVideoItem(item)) {
+        this.error = "Choose a video file to build a 3D cache.";
+        return;
+      }
+      const videoProfile = videoProfileForStereo3dLayout(this.stereo3dLayout);
+      const stereoProcessor = normalizeStereo3dProcessor(this.stereo3dProcessor);
+      if (stereoProcessor === "webgpu-depth-anything-v2-small") {
+        this.error = "WebGPU 3D is generated inside the viewer and does not create connector cache. Choose ffmpeg, Depth Anything, or Core ML to prebuild.";
+        return;
+      }
+      const profileOptions = {
+        videoProfile,
+        stereoProcessor,
+        resolutionScale: this.stereo3dResolutionScale,
+      };
+      const statusPath = this.connectorPathWithProfiles(`${resource.proxyPath}/hls-prebuild-status`, profileOptions);
+      const startPath = this.connectorPathWithProfiles(`${resource.proxyPath}/hls-prebuild`, profileOptions);
+      const layoutLabel = this.stereo3dLayoutLabel();
+      const scaleLabel = this.stereo3dResolutionScaleLabel();
+      this.hls3dPrebuildItemId = item.id;
+      this.hls3dPrebuildProgress = 0;
+      this.hls3dPrebuildStatus = "";
+      this.transcodeProgress = 0;
+      this.transcodeStatus = `Preparing ${layoutLabel} ${scaleLabel} 3D cache for ${item.title}...`;
+      this.error = "";
+      try {
+        let progress = await this.request(startPath, { method: "POST" });
+        for (;;) {
+          const cachedSegments = Number(progress.cachedSegments || 0);
+          const segmentCount = Math.max(1, Number(progress.segmentCount || 1));
+          const percent = Math.max(0, Math.min(100, Number(progress.percent || Math.round((cachedSegments / segmentCount) * 100))));
+          this.hls3dPrebuildProgress = percent;
+          this.transcodeProgress = percent;
+          this.hls3dPrebuildStatus = `${cachedSegments}/${segmentCount} segments cached`;
+          this.transcodeStatus = `${progress.status === "queued" ? "Queued" : "Building"} ${layoutLabel} ${scaleLabel} 3D cache for ${item.title}... ${percent}%`;
+          if (progress.error) throw new Error(progress.error);
+          if (progress.complete || progress.status === "complete" || progress.status === "cached" || percent >= 100) break;
+          await sleep(1500);
+          progress = await this.request(statusPath);
+        }
+        const mediaInfo = await this.request(`${resource.proxyPath}/media-info`);
+        this.fileMediaStatus = {
+          ...this.fileMediaStatus,
+          [this.mediaStatusKey(item)]: this.mediaStatusFromInfo(mediaInfo),
+        };
+        this.transcodeStatus = `${item.title} has a ${layoutLabel} ${scaleLabel} 3D cache (${this.formatBytes(progress.size || 0)}).`;
+        this.transcodeProgress = 100;
+      } catch (error) {
+        this.error = error.message;
+        this.hls3dPrebuildStatus = "";
+        this.transcodeStatus = "";
+        this.transcodeProgress = 0;
+      } finally {
+        this.hls3dPrebuildItemId = null;
+      }
+    },
+
     pollTranscodeProgress(resource, title, target = "list", audioProfile = "stereo") {
       let stopped = false;
       const statusPath = this.connectorPathWithAudioProfile(`${resource.proxyPath}/transcode-status`, audioProfile);
@@ -1263,6 +1358,17 @@ document.addEventListener("alpine:init", () => {
       const changed = this.stereo3dProcessor !== nextProcessor;
       this.stereo3dProcessor = nextProcessor;
       localStorage.setItem("filePipeStereo3dProcessor", this.stereo3dProcessor);
+      if (changed && this.hostVideoMode === "hls3d" && this.playerSource && !this.playerLoading) {
+        await this.launchHostStereo3dStream();
+      }
+      if (changed) await this.refreshCurrentWatchRoom3dMetadata();
+    },
+
+    async setStereo3dResolutionScale(scale) {
+      const nextScale = normalizeStereo3dResolutionScale(scale);
+      const changed = this.stereo3dResolutionScale !== nextScale;
+      this.stereo3dResolutionScale = nextScale;
+      localStorage.setItem("filePipeStereo3dResolutionScale", this.stereo3dResolutionScale);
       if (changed && this.hostVideoMode === "hls3d" && this.playerSource && !this.playerLoading) {
         await this.launchHostStereo3dStream();
       }
@@ -1753,16 +1859,19 @@ document.addEventListener("alpine:init", () => {
       const stereoProcessor = generated3d
         ? normalizeStereo3dProcessor(options.stereoProcessor || hlsInfo?.stereoProcessor)
         : "";
-      const profileOptions = { audioProfile, videoProfile, stereoProcessor };
+      const resolutionScale = generated3d
+        ? normalizeStereo3dResolutionScale(options.resolutionScale || hlsInfo?.resolutionScale || this.stereo3dResolutionScale)
+        : "1";
+      const profileOptions = { audioProfile, videoProfile, stereoProcessor, resolutionScale };
       const playlistPath = this.connectorPathWithProfiles(hlsInfo.playlistPath || `${resource.proxyPath}/hls/playlist.m3u8`, profileOptions);
       const segmentPath = (index) => this.connectorPathWithProfiles(`${resource.proxyPath}/hls/segments/${Number(index || 0)}.ts`, profileOptions);
-      const sourceLabel = `${this.sourceLabel(this.selectedServer)} ${generated3d ? `${videoLayoutLabel(videoLayout)} generated 3D ` : ""}live segmented transcode`;
+      const sourceLabel = `${this.sourceLabel(this.selectedServer)} ${generated3d ? `${videoLayoutLabel(videoLayout)} ${this.stereo3dResolutionScaleLabel(resolutionScale)} generated 3D ` : ""}live segmented transcode`;
       return {
         title: item.title,
         type: "application/vnd.apple.mpegurl",
         size: Number(mediaInfo?.size || hlsInfo?.mediaInfo?.size || resource.size || 0),
         contentKey: `connector:${resource.proxyPath}`,
-        variantContentKey: `connector:${resource.proxyPath}:hls:${audioProfile}:${videoProfile}:${stereoProcessor || "none"}`,
+        variantContentKey: `connector:${resource.proxyPath}:hls:${audioProfile}:${videoProfile}:${stereoProcessor || "none"}:${resolutionScale}`,
         sourceLabel,
         mediaInfo: hlsInfo.mediaInfo || mediaInfo,
         playbackProfile: {
@@ -1773,6 +1882,7 @@ document.addEventListener("alpine:init", () => {
           videoLayout,
           stereoscopic: generated3d,
           stereoProcessor,
+          resolutionScale,
           audioCodec: "aac",
           audioChannels: audioProfile === "spatial" ? Number(mediaInfo?.audioChannels || mediaInfo?.defaultAudio?.channels || 0) : Math.min(2, Number(mediaInfo?.audioChannels || 2)),
           audioChannelLayout: audioProfile === "spatial" ? (mediaInfo?.audioChannelLayout || "") : "stereo",
@@ -1785,6 +1895,7 @@ document.addEventListener("alpine:init", () => {
           duration: Number(hlsInfo.duration || mediaInfo?.duration || 0),
           segmentDuration: Number(hlsInfo.segmentDuration || 8),
           segmentCount: Number(hlsInfo.segmentCount || 0),
+          resolutionScale,
         },
         readHlsSegment: async (segmentIndex) => {
           const response = await fetch(`${this.connectorUrl}${segmentPath(segmentIndex)}`, {
@@ -1803,6 +1914,7 @@ document.addEventListener("alpine:init", () => {
         videoLayout,
         stereoscopic: generated3d,
         stereoProcessor,
+        resolutionScale,
         spatialAudioProfile: audioProfile,
         spatialAudioReady: audioProfile === "spatial",
       };
@@ -1813,10 +1925,14 @@ document.addEventListener("alpine:init", () => {
       const requestedStereoProcessor = isStereoVideoProfile(requestedVideoProfile)
         ? normalizeStereo3dProcessor(options.stereoProcessor || this.stereo3dProcessor)
         : "";
+      const requestedResolutionScale = isStereoVideoProfile(requestedVideoProfile)
+        ? normalizeStereo3dResolutionScale(options.resolutionScale || this.stereo3dResolutionScale)
+        : "1";
       if (
         this.playerSource?.readHlsSegment
         && normalizeTranscodeVideoProfile(this.playerSource.videoProfile || "2d") === requestedVideoProfile
         && normalizeStereo3dProcessor(this.playerSource.stereoProcessor || "") === normalizeStereo3dProcessor(requestedStereoProcessor)
+        && (!isStereoVideoProfile(requestedVideoProfile) || normalizeStereo3dResolutionScale(this.playerSource.resolutionScale || this.playerSource.playbackProfile?.resolutionScale) === requestedResolutionScale)
       ) return this.playerSource;
       const launch = this.playerConnectorLaunch;
       if (!launch?.resource?.proxyPath || !launch?.item) {
@@ -1830,6 +1946,7 @@ document.addEventListener("alpine:init", () => {
         audioProfile,
         videoProfile: requestedVideoProfile,
         stereoProcessor: requestedStereoProcessor,
+        resolutionScale: requestedResolutionScale,
       }));
       const transcodeParts = launch.transcodeParts?.length ? launch.transcodeParts : ["video to H.264/AAC"];
       return this.hlsWatchSourceFromConnector(
@@ -1838,7 +1955,7 @@ document.addEventListener("alpine:init", () => {
         hlsInfo.mediaInfo || launch.mediaInfo,
         transcodeParts,
         hlsInfo,
-        { audioProfile, videoProfile: requestedVideoProfile, stereoProcessor: requestedStereoProcessor },
+        { audioProfile, videoProfile: requestedVideoProfile, stereoProcessor: requestedStereoProcessor, resolutionScale: requestedResolutionScale },
       );
     },
 
@@ -1855,6 +1972,7 @@ document.addEventListener("alpine:init", () => {
         videoLayout: "mono",
         stereoscopic: false,
         stereoProcessor,
+        resolutionScale: "1",
         localStereoProcessor: true,
         targetVideoProfile,
         targetVideoLayout,
@@ -1864,6 +1982,7 @@ document.addEventListener("alpine:init", () => {
           videoLayout: "mono",
           stereoscopic: false,
           stereoProcessor,
+          resolutionScale: "1",
           localStereoProcessor: true,
           targetVideoProfile,
           targetVideoLayout,
@@ -1937,7 +2056,11 @@ document.addEventListener("alpine:init", () => {
       this.playerLoading = true;
       this.error = "";
       try {
-        const source = await this.liveWatchSourceForCurrentPlayer({ videoProfile, stereoProcessor });
+        const source = await this.liveWatchSourceForCurrentPlayer({
+          videoProfile,
+          stereoProcessor,
+          resolutionScale: this.stereo3dResolutionScale,
+        });
         if (!source?.playlistUrl) throw new Error("Could not prepare the 3D stream for host playback.");
         this.teardownHostHlsPlayer();
         this.playerSource = {
@@ -2063,11 +2186,16 @@ document.addEventListener("alpine:init", () => {
         this.hostHls.on(Hls.Events.FRAG_LOADED, (_event, data) => {
           const prefix = isStereoVideoProfile(this.playerSource?.videoProfile) ? "Buffered 3D" : "Buffered";
           this.playerStatus = `${prefix} segment ${Number(data?.frag?.sn || 0) + 1}.`;
+          this.updateHostPlaybackBuffer();
         });
+        if (Hls.Events.BUFFER_APPENDED) {
+          this.hostHls.on(Hls.Events.BUFFER_APPENDED, () => this.updateHostPlaybackBuffer());
+        }
         this.hostHls.loadSource(this.playerUrl);
         this.hostHls.attachMedia(video);
         this.hostHls.on(Hls.Events.MANIFEST_PARSED, () => {
           this.prepareHostPlayerMedia();
+          this.updateHostPlaybackBuffer();
         });
         return;
       }
@@ -2688,6 +2816,7 @@ document.addEventListener("alpine:init", () => {
       video.muted = false;
       video.volume = this.mediaVolume;
       this.updateHostLinearPlaybackTime();
+      this.updateHostPlaybackBuffer();
       this.attachHostPlaybackProgress(video);
       this.attachHostXrPlayer(video);
       this.setHostAudioOutput();
@@ -2738,6 +2867,22 @@ document.addEventListener("alpine:init", () => {
       const video = document.getElementById("host-video-player");
       if (!video || video.seeking) return;
       this.hostLinearPlaybackTime = video.currentTime || 0;
+    },
+
+    updateHostPlaybackBuffer() {
+      const video = document.getElementById("host-video-player");
+      if (!video || !this.playerUrl) {
+        this.hostPlaybackBufferSeconds = 0;
+        this.hostPlaybackBufferPercent = 0;
+        return;
+      }
+      const currentTime = video.currentTime || 0;
+      const bufferedUntil = mediaBufferedUntil(video, currentTime);
+      const seconds = Number.isFinite(bufferedUntil)
+        ? Math.max(0, bufferedUntil - currentTime)
+        : SYNC_BUFFER_SECONDS;
+      this.hostPlaybackBufferSeconds = Math.round(seconds * 10) / 10;
+      this.hostPlaybackBufferPercent = Math.max(0, Math.min(100, Math.round((seconds / SYNC_BUFFER_SECONDS) * 100)));
     },
 
     attachHostXrPlayer(video) {
@@ -2939,7 +3084,7 @@ document.addEventListener("alpine:init", () => {
       const stereo3dProcessor = normalizeStereo3dProcessor(this.stereo3dProcessor);
       if (isStereoVideoProfile(hlsSource?.videoProfile)) {
         hls3dSource = hlsSource;
-        this.playerRoom3dStatus = `${videoLayoutLabel(hls3dSource.videoLayout || this.stereo3dLayout)} 3D stream is active for this room.`;
+        this.playerRoom3dStatus = `${videoLayoutLabel(hls3dSource.videoLayout || this.stereo3dLayout)} ${this.stereo3dResolutionScaleLabel(hls3dSource.resolutionScale)} 3D stream is active for this room.`;
       } else if (hlsSource && mediaInfoStereo3dCandidate(hlsSource.mediaInfo || source.mediaInfo) && this.canCreateLiveWatchRoom()) {
         if (stereo3dProcessor === "webgpu-depth-anything-v2-small") {
           hls3dSource = this.localWebGpuHls3dSource(hlsSource, stereo3dVideoProfile);
@@ -2949,8 +3094,9 @@ document.addEventListener("alpine:init", () => {
             hls3dSource = await this.liveWatchSourceForCurrentPlayer({
               videoProfile: stereo3dVideoProfile,
               stereoProcessor: stereo3dProcessor,
+              resolutionScale: this.stereo3dResolutionScale,
             });
-            this.playerRoom3dStatus = `${videoLayoutLabel(hls3dSource.videoLayout || this.stereo3dLayout)} 3D stream is available via ${this.stereo3dProcessorLabel()}.`;
+            this.playerRoom3dStatus = `${videoLayoutLabel(hls3dSource.videoLayout || this.stereo3dLayout)} ${this.stereo3dResolutionScaleLabel(hls3dSource.resolutionScale)} 3D stream is available via ${this.stereo3dProcessorLabel()}.`;
           } catch (error) {
             hls3dSource = null;
             this.playerRoom3dError = `3D stream is not available: ${error.message}`;
@@ -3004,10 +3150,15 @@ document.addEventListener("alpine:init", () => {
         hostCapabilities: this.hostMediaCapabilities,
         sourceVersion: this.playerSourceVersion,
         streamMode: isHlsLive ? "hls" : "range",
+        videoProfile: source.videoProfile || source.playbackProfile?.videoProfile || "2d",
+        videoLayout: source.videoLayout || source.playbackProfile?.videoLayout || "mono",
+        stereoProcessor: source.stereoProcessor || source.playbackProfile?.stereoProcessor || "",
+        resolutionScale: source.resolutionScale || source.playbackProfile?.resolutionScale || "1",
         hls: isHlsLive ? {
           duration: Number(source.hlsInfo?.duration || source.mediaInfo?.duration || 0),
           segmentDuration: Number(source.hlsInfo?.segmentDuration || 8),
           segmentCount: Number(source.hlsInfo?.segmentCount || 0),
+          resolutionScale: source.resolutionScale || source.playbackProfile?.resolutionScale || "1",
         } : null,
         progressiveTranscode: rangeProgressive,
         availableModes: {
@@ -3029,6 +3180,7 @@ document.addEventListener("alpine:init", () => {
             videoProfile: hlsSource.videoProfile || "2d",
             videoLayout: hlsSource.videoLayout || "mono",
             stereoProcessor: hlsSource.stereoProcessor || "",
+            resolutionScale: hlsSource.resolutionScale || hlsSource.playbackProfile?.resolutionScale || "1",
             localStereoProcessor: Boolean(hlsSource.localStereoProcessor),
             targetVideoProfile: hlsSource.targetVideoProfile || "",
             targetVideoLayout: hlsSource.targetVideoLayout || "",
@@ -3038,6 +3190,7 @@ document.addEventListener("alpine:init", () => {
               duration: Number(hlsSource.hlsInfo?.duration || hlsSource.mediaInfo?.duration || 0),
               segmentDuration: Number(hlsSource.hlsInfo?.segmentDuration || 8),
               segmentCount: Number(hlsSource.hlsInfo?.segmentCount || 0),
+              resolutionScale: hlsSource.resolutionScale || hlsSource.playbackProfile?.resolutionScale || "1",
             },
           } : null,
           hls3d: hls3dSource ? {
@@ -3049,6 +3202,7 @@ document.addEventListener("alpine:init", () => {
             videoProfile: hls3dSource.videoProfile || "3d-sbs",
             videoLayout: hls3dSource.videoLayout || "half-sbs",
             stereoProcessor: hls3dSource.stereoProcessor || "",
+            resolutionScale: hls3dSource.resolutionScale || hls3dSource.playbackProfile?.resolutionScale || "0.5",
             localStereoProcessor: Boolean(hls3dSource.localStereoProcessor),
             targetVideoProfile: hls3dSource.targetVideoProfile || "",
             targetVideoLayout: hls3dSource.targetVideoLayout || "",
@@ -3058,6 +3212,7 @@ document.addEventListener("alpine:init", () => {
               duration: Number(hls3dSource.hlsInfo?.duration || hls3dSource.mediaInfo?.duration || 0),
               segmentDuration: Number(hls3dSource.hlsInfo?.segmentDuration || 8),
               segmentCount: Number(hls3dSource.hlsInfo?.segmentCount || 0),
+              resolutionScale: hls3dSource.resolutionScale || hls3dSource.playbackProfile?.resolutionScale || "0.5",
             },
           } : null,
         },

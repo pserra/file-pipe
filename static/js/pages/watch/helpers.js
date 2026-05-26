@@ -550,7 +550,9 @@ function stereo3dModeDescription(mode = {}) {
     return "Experimental browser WebGPU depth for XR/headsets; the normal video remains 2D";
   }
   const layout = mode.targetVideoLayout || mode.videoLayout || mode.playbackProfile?.targetVideoLayout || mode.playbackProfile?.videoLayout;
-  return layout === "full-sbs" ? "Generated Full SBS stream for XR/headsets" : "Generated Half SBS stream for XR/headsets";
+  const scale = mode.resolutionScale || mode.hls?.resolutionScale || mode.playbackProfile?.resolutionScale || "";
+  const scaleLabel = scale && scale !== "1" ? ` at ${scale}x` : "";
+  return layout === "full-sbs" ? `Generated Full SBS stream${scaleLabel} for XR/headsets` : `Generated Half SBS stream${scaleLabel} for XR/headsets`;
 }
 
 function xrSourceLayoutFromProfile(profile = {}) {

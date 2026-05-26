@@ -84,12 +84,14 @@ def even(value):
     return max(2, int(value) - (int(value) % 2))
 
 
-def target_geometry(stream, max_width, fps):
+def target_geometry(stream, max_width, fps, resolution_scale):
     width = int(stream.get("width") or 0)
     height = int(stream.get("height") or 0)
     if width <= 0 or height <= 0:
         raise RuntimeError("ffprobe returned invalid video dimensions.")
-    scale = min(1.0, float(max_width) / float(width)) if max_width else 1.0
+    scale = min(1.0, max(0.1, float(resolution_scale or 0.0)))
+    if not resolution_scale and max_width:
+        scale = min(scale, float(max_width) / float(width))
     target_width = even(width * scale)
     target_height = even(height * scale)
     source_fps = parse_rate(stream.get("avg_frame_rate") or stream.get("r_frame_rate"), fps)
@@ -261,7 +263,7 @@ def warmup(args):
 
 def process_segment(args):
     stream = ffprobe_json(args.input)
-    width, height, fps = target_geometry(stream, args.max_width, args.fps)
+    width, height, fps = target_geometry(stream, args.max_width, args.fps, args.resolution_scale)
     out_width = width * 2 if args.layout == "full-sbs" else width
     frame_size = width * height * 3
     estimator = build_depth_estimator(args)
@@ -387,6 +389,7 @@ def parse_args():
     parser.add_argument("--layout", choices=["half-sbs", "full-sbs"], default="half-sbs")
     parser.add_argument("--video-profile", default="")
     parser.add_argument("--depth-percent", type=float, default=3.5)
+    parser.add_argument("--resolution-scale", type=float, default=float(os.environ.get("FILE_PIPE_DEPTH_RESOLUTION_SCALE", "0.5")))
     parser.add_argument("--max-width", type=int, default=int(os.environ.get("FILE_PIPE_DEPTH_MAX_WIDTH", "960")))
     parser.add_argument("--fps", type=float, default=float(os.environ.get("FILE_PIPE_DEPTH_FPS", "24")))
     parser.add_argument("--preset", default=os.environ.get("FILE_PIPE_DEPTH_X264_PRESET", "veryfast"))
