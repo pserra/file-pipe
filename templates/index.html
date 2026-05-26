@@ -15,7 +15,7 @@
     <script defer src="{{ url_for('static', filename='js/player/playback-progress.js', v='2') }}"></script>
     <script>window.FILE_PIPE_P2P_CONFIG = {{ p2p_config()|tojson }};</script>
     <script defer src="{{ url_for('static', filename='js/pages/app/helpers.js', v='1') }}"></script>
-    <script defer src="{{ url_for('static', filename='js/pages/app/index.js', v='78') }}"></script>
+    <script defer src="{{ url_for('static', filename='js/pages/app/index.js', v='79') }}"></script>
     <script defer src="{{ local_static_or_cdn('vendor/alpinejs/cdn.min.js', 'https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js') }}"></script>
     <script defer src="{{ local_static_or_cdn('vendor/bootstrap/bootstrap.bundle.min.js', 'https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js') }}"></script>
   </head>
@@ -856,6 +856,12 @@
                   </template>
                   <template x-if="playerAudioOutputStatus">
                     <div class="alert alert-secondary mt-3 mb-0" x-text="playerAudioOutputStatus"></div>
+                  </template>
+                  <template x-if="playerRoom3dStatus">
+                    <div class="alert alert-success mt-3 mb-0" x-text="playerRoom3dStatus"></div>
+                  </template>
+                  <template x-if="playerRoom3dError">
+                    <div class="alert alert-warning mt-3 mb-0" x-text="playerRoom3dError"></div>
                   </template>
                   <template x-if="playerStatus">
                     <div class="alert alert-info mt-3 mb-0" x-text="playerStatus"></div>

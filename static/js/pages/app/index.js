@@ -65,6 +65,8 @@ document.addEventListener("alpine:init", () => {
     playerRoomLink: "",
     playerAudioOutputLink: "",
     playerAudioOutputStatus: "",
+    playerRoom3dStatus: "",
+    playerRoom3dError: "",
     playerRoomQrDataUrl: "",
     playerRoomId: "",
     playerRoomRestored: false,
@@ -2891,6 +2893,8 @@ document.addEventListener("alpine:init", () => {
       if (!this.playerRoomId || !this.playerRoomKey || !source) {
         throw new Error("Create a watch room before publishing source metadata.");
       }
+      this.playerRoom3dStatus = "";
+      this.playerRoom3dError = "";
       const isHlsLive = Boolean(source.hlsLive && source.readHlsSegment);
       const rangeSource = source.readRange ? source : (this.playerSource?.readRange ? this.playerSource : null);
       let hlsSource = isHlsLive ? source : null;
@@ -2906,19 +2910,25 @@ document.addEventListener("alpine:init", () => {
       const stereo3dProcessor = normalizeStereo3dProcessor(this.stereo3dProcessor);
       if (isStereoVideoProfile(hlsSource?.videoProfile)) {
         hls3dSource = hlsSource;
+        this.playerRoom3dStatus = `${videoLayoutLabel(hls3dSource.videoLayout || this.stereo3dLayout)} 3D stream is active for this room.`;
       } else if (hlsSource && mediaInfoStereo3dCandidate(hlsSource.mediaInfo || source.mediaInfo) && this.canCreateLiveWatchRoom()) {
         if (stereo3dProcessor === "webgpu-depth-anything-v2-small") {
           hls3dSource = this.localWebGpuHls3dSource(hlsSource, stereo3dVideoProfile);
+          this.playerRoom3dStatus = `${videoLayoutLabel(this.stereo3dLayout)} 3D stream will be generated locally with WebGPU on supported viewers.`;
         } else {
           try {
             hls3dSource = await this.liveWatchSourceForCurrentPlayer({
               videoProfile: stereo3dVideoProfile,
               stereoProcessor: stereo3dProcessor,
             });
+            this.playerRoom3dStatus = `${videoLayoutLabel(hls3dSource.videoLayout || this.stereo3dLayout)} 3D stream is available via ${this.stereo3dProcessorLabel()}.`;
           } catch (error) {
             hls3dSource = null;
+            this.playerRoom3dError = `3D stream is not available: ${error.message}`;
           }
         }
+      } else if (hlsSource && this.canCreateLiveWatchRoom()) {
+        this.playerRoom3dError = "3D stream is not available for this source because the connector did not detect a video track.";
       }
       this.playerRoomRangeSource = rangeSource;
       this.playerRoomHlsSource = hlsSource;
