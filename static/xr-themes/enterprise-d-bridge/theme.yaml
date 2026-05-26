@@ -1,0 +1,87 @@
+id: enterprise-d-bridge
+name: Enterprise-D Bridge
+background: "#060504"
+settingsRevision: 1
+desktop:
+  fov: 72
+videoSampling: true
+floor:
+  grid: false
+settings:
+  - id: bridge_key_light
+    label: Bridge key light
+    type: number
+    min: 0
+    max: 2.5
+    step: 0.05
+    default: 1.1
+  - id: bridge_display_glow
+    label: Console glow
+    type: number
+    min: 0
+    max: 1.6
+    step: 0.05
+    default: 0.38
+lights:
+  - id: bridge-ambient
+    type: ambient
+    color: "#d8c6a8"
+    intensity: 0.48
+  - id: bridge-key
+    type: directional
+    color: "#fff4d5"
+    intensitySetting: bridge_key_light
+    position: [0.4, 2.4, -1.8]
+    target: [0, -0.2, -3.2]
+  - id: bridge-screen-wash
+    type: point
+    color: "#9ec9ff"
+    intensity: 0.95
+    videoSample: average
+    videoSampleMultiplier: 0.72
+    videoSampleMinIntensity: 0.15
+    videoSampleMaxIntensity: 1.45
+    distance: 5.5
+    decay: 2
+    position: [0, 0.45, -3.05]
+assets:
+  - type: glb
+    id: enterprise-d-bridge-model
+    file: assets/enterprise_d_bridge.glb
+    position: [0, -0.6, 0.64]
+    rotation: [90, 180, 0]
+    scale: [0.00655, 0.00655, 0.00655]
+    excludeNodes:
+      - Tomalok
+      - D'deridex
+      - "498006_4"
+      - "498006_4.001"
+      - directional
+      - directional.001
+    glassOpacity: 0.26
+    displayEmissiveIntensity: "$bridge_display_glow"
+    textureMap:
+      Acacia Koa Wood:
+        map: acacia_koa_wood_basecolor.jpg
+        normalMap: acacia_koa_wood_normal.jpg
+        roughnessMap: acacia_koa_wood_roughness.jpg
+        metalnessMap: acacia_koa_wood_metallic.jpg
+      "498006_4": 498006_4.png
+      D'deridex: d_deridex.png
+      d80ffec233c8104ae5ce8e4c9e747383: d80ffec233c8104ae5ce8e4c9e747383.png
+      directional: directional.png
+      entlcar: entlcar.png
+      lcars 441: lcars_4412.png
+      lcars-interface-main-screen-with-changed-background: lcars-interface-main-screen-with-changed-background.png
+      Lcars_wallpaper.svg: lcars_wallpaper_svg.png
+      lf: lf.png
+      longcars: longcars.png
+      ops: ops2.png
+      plaque: plaque.jpg
+      tac: tac.png
+      tac.001: tac2.png
+      Tomalok: tomalok.png
+      Untitled-2: untitled-2.png
+      Untitled-2.001: untitled-2.png
+      yelent: yelen3t.png
+      yelent.001: entdside2.png

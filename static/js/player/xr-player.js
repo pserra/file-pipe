@@ -146,6 +146,8 @@
       this.inTheater = false;
       this.theaterMode = "theater";
       this.liteToolsVisible = false;
+      this.liteControlsVisible = false;
+      this.liteControlsHideTimer = null;
       this.liteLeftCamera = null;
       this.liteRightCamera = null;
       this.controllers = [];
@@ -779,6 +781,8 @@
             }
           })
           .catch(() => {});
+      } else if (asset.type === "glb" || asset.type === "gltf") {
+        this.loadThemeGlbAsset(asset, revision);
       } else if (asset.type === "light") {
         this.addThemeLight(asset, revision);
       } else if (asset.type === "empty") {
@@ -811,6 +815,31 @@
           this.themeObjects.push(mesh);
         }
       }
+    }
+
+    loadThemeGlbAsset(asset, revision = this.themeRevision) {
+      if (!asset.url) return;
+      fetch(asset.url)
+        .then((response) => response.ok ? response.arrayBuffer() : null)
+        .then((buffer) => {
+          if (!buffer || !this.themeGroup || revision !== this.themeRevision) return;
+          const object = parseThemeGlb(buffer, {
+            createMaterial: (materialDef) => this.createThemeGlbMaterial(materialDef, asset),
+            excludeNodes: asset.excludeNodes,
+          });
+          if (!object) return;
+          this.configureThemeObject(object, asset, revision);
+          if (asset.renderOrder !== undefined) {
+            object.traverse((child) => {
+              child.renderOrder = Number(asset.renderOrder) || 0;
+            });
+          }
+          if (revision === this.themeRevision) {
+            this.themeGroup.add(object);
+            this.themeObjects.push(object);
+          }
+        })
+        .catch(() => {});
     }
 
     createThemeSurfaceMaterial(asset, fallbackColor) {
@@ -864,6 +893,67 @@
         transparent: opacity < 1,
         opacity,
       });
+    }
+
+    createThemeGlbMaterial(materialDef = {}, asset = {}) {
+      const pbr = isPlainObject(materialDef.pbrMetallicRoughness) ? materialDef.pbrMetallicRoughness : {};
+      const baseColor = Array.isArray(pbr.baseColorFactor) ? pbr.baseColorFactor : [0.8, 0.8, 0.8, 1];
+      const materialName = String(materialDef.name || "");
+      const textureConfig = glbMaterialTextureConfig(asset, materialName);
+      const map = textureConfig?.map ? this.loadThemeTexture(asset, textureConfig.map, true) : null;
+      const normalMap = textureConfig?.normalMap ? this.loadThemeTexture(asset, textureConfig.normalMap, false) : null;
+      const roughnessMap = textureConfig?.roughnessMap ? this.loadThemeTexture(asset, textureConfig.roughnessMap, false) : null;
+      const metalnessMap = textureConfig?.metalnessMap ? this.loadThemeTexture(asset, textureConfig.metalnessMap, false) : null;
+      const alpha = clampNumber(Number(baseColor[3] ?? 1), 0, 1, 1);
+      const glass = /glass/i.test(materialName);
+      const display = /498006|deridex|directional|entlcar|lcars|lf|longcars|ops|plaque|tac|tomalok|untitled|yel/i.test(materialName);
+      const color = new THREE.Color(
+        clampNumber(Number(baseColor[0] ?? 0.8), 0, 1, 0.8),
+        clampNumber(Number(baseColor[1] ?? 0.8), 0, 1, 0.8),
+        clampNumber(Number(baseColor[2] ?? 0.8), 0, 1, 0.8),
+      );
+      const opacity = glass ? clampNumber(this.resolveThemeNumber(asset.glassOpacity, 0.3), 0.04, 0.85, 0.3) : alpha;
+      const common = {
+        color,
+        map,
+        normalMap,
+        roughnessMap,
+        metalnessMap,
+        transparent: opacity < 1 || materialDef.alphaMode === "BLEND",
+        opacity,
+        side: THREE.DoubleSide,
+      };
+      if (glass && THREE.MeshPhysicalMaterial) {
+        return new THREE.MeshPhysicalMaterial({
+          ...common,
+          roughness: 0.08,
+          metalness: 0,
+          transmission: 0.48,
+          thickness: 0.08,
+          clearcoat: 0.8,
+          clearcoatRoughness: 0.1,
+        });
+      }
+      return new THREE.MeshStandardMaterial({
+        ...common,
+        roughness: clampNumber(Number(pbr.roughnessFactor ?? (display ? 0.42 : 0.78)), 0, 1, display ? 0.42 : 0.78),
+        metalness: clampNumber(Number(pbr.metallicFactor ?? 0), 0, 1, 0),
+        emissive: display ? color : new THREE.Color("#000000"),
+        emissiveMap: display ? map : null,
+        emissiveIntensity: display ? clampNumber(this.resolveThemeNumber(asset.displayEmissiveIntensity, 0.32), 0, 2.5, 0.32) : 0,
+      });
+    }
+
+    loadThemeTexture(asset, texturePath, srgb = true) {
+      const texture = new THREE.TextureLoader().load(resolveRelativeAssetUrl(asset.url, texturePath));
+      texture.flipY = false;
+      texture.wrapS = THREE.ClampToEdgeWrapping;
+      texture.wrapT = THREE.ClampToEdgeWrapping;
+      if (srgb) texture.colorSpace = THREE.SRGBColorSpace;
+      if (this.renderer?.capabilities?.getMaxAnisotropy) {
+        texture.anisotropy = Math.min(8, this.renderer.capabilities.getMaxAnisotropy());
+      }
+      return texture;
     }
 
     addThemeLight(light, revision = this.themeRevision) {
@@ -1029,8 +1119,11 @@
       }
       this.theaterMode = mode === "lite" ? "lite" : "theater";
       this.liteToolsVisible = this.theaterMode !== "lite";
+      this.liteControlsVisible = this.theaterMode === "lite";
+      this.clearLiteControlsHideTimer();
       this.inTheater = true;
       this.buildOverlay();
+      if (this.theaterMode === "lite") this.requestLiteFullscreen({ silent: true });
       this.initThree();
       if (this.theaterMode !== "lite") this.moveSidePanelIntoOverlay();
       if (this.settings.aspectLocked) this.applyAspectRatioFrom("width");
@@ -1044,7 +1137,7 @@
         this.setSpatialAudioEnabled(true).catch(() => {});
       }
       document.body.classList.add("fp-three-xr-active");
-      if (this.theaterMode === "lite") this.requestLiteFullscreen();
+      if (this.theaterMode === "lite") this.showLiteControlsTemporarily(2200);
     }
 
     closeTheater() {
@@ -1060,9 +1153,7 @@
       this.xrSessionEndHandler = null;
       if (this.renderer) this.renderer.setAnimationLoop(null);
       this.restoreSidePanel();
-      if (document.fullscreenElement === this.overlay && document.exitFullscreen) {
-        document.exitFullscreen().catch(() => {});
-      }
+      if (this.liteFullscreenElement() === this.overlay) this.exitLiteFullscreen();
       if (this.overlay) this.overlay.remove();
       this.overlay = null;
       if (this.videoTexture) this.videoTexture.dispose();
@@ -1152,6 +1243,8 @@
       this.xrControllerRayMatrix = null;
       this.theaterMode = "theater";
       this.liteToolsVisible = false;
+      this.liteControlsVisible = false;
+      this.clearLiteControlsHideTimer();
       document.body.classList.remove("fp-three-xr-active");
       if (this.settings.spatialAudio) {
         this.rebuildSpatialAudioGraph();
@@ -1178,7 +1271,12 @@
               <i class="bi bi-crosshair"></i>
             </button>
             <button class="btn btn-sm btn-light" type="button" data-action="fullscreen-lite" data-lite-only title="Fullscreen">
-              <i class="bi bi-arrows-fullscreen"></i>
+              <i class="bi bi-arrows-fullscreen" data-role="fullscreen-icon"></i>
+              <span data-role="fullscreen-label">Fullscreen</span>
+            </button>
+            <button class="btn btn-sm btn-light" type="button" data-action="toggle-lite-controls" data-lite-only title="Hide controls">
+              <i class="bi bi-eye-slash"></i>
+              <span>Hide controls</span>
             </button>
             <button class="btn btn-sm btn-light" type="button" data-action="toggle-lite-tools" data-lite-only title="Settings">
               <i class="bi bi-sliders"></i>
@@ -1326,6 +1424,9 @@
       this.muteIcon = this.muteButton.querySelector(".bi");
       this.webXrButton = this.overlay.querySelector("[data-action='enter-webxr']");
       this.webXrLabel = this.overlay.querySelector("[data-role='webxr-label']");
+      this.fullscreenButton = this.overlay.querySelector("[data-action='fullscreen-lite']");
+      this.fullscreenIcon = this.overlay.querySelector("[data-role='fullscreen-icon']");
+      this.fullscreenLabel = this.overlay.querySelector("[data-role='fullscreen-label']");
       this.liteToolsToggleButton = this.overlay.querySelector("[data-action='toggle-lite-tools']");
       this.liteToolsLabel = this.overlay.querySelector("[data-role='lite-tools-label']");
       this.sidePanelToggleButton = this.overlay.querySelector("[data-action='toggle-side-panel']");
@@ -1333,7 +1434,8 @@
       this.sideSlot = this.overlay.querySelector("[data-role='side-slot']");
       this.overlay.querySelector("[data-action='close']").addEventListener("click", () => this.closeTheater());
       this.overlay.querySelector("[data-action='recenter']").addEventListener("click", () => this.recenterScreen());
-      this.overlay.querySelector("[data-action='fullscreen-lite']").addEventListener("click", () => this.requestLiteFullscreen());
+      this.overlay.querySelector("[data-action='fullscreen-lite']").addEventListener("click", () => this.toggleLiteFullscreen());
+      this.overlay.querySelector("[data-action='toggle-lite-controls']").addEventListener("click", () => this.hideLiteControls());
       this.overlay.querySelector("[data-action='toggle-lite-tools']").addEventListener("click", () => this.toggleLiteTools());
       this.overlay.querySelector("[data-action='reset-room-view']").addEventListener("click", () => this.resetRoomView());
       this.overlay.querySelector("[data-action='zoom-out']").addEventListener("click", () => this.zoomScreen(0.2));
@@ -1490,7 +1592,10 @@
       const lite = this.theaterMode === "lite";
       this.overlay.classList.toggle("fp-three-xr-lite-mode", lite);
       this.overlay.classList.toggle("fp-three-xr-lite-tools-open", lite && this.liteToolsVisible);
+      this.overlay.classList.toggle("fp-three-xr-lite-controls-hidden", lite && !this.liteControlsVisible && !this.liteToolsVisible);
       if (this.theaterTitle) this.theaterTitle.textContent = lite ? "XR Lite" : "XR Theater";
+      if (this.fullscreenIcon) this.fullscreenIcon.className = this.isLiteFullscreen() ? "bi bi-fullscreen-exit" : "bi bi-arrows-fullscreen";
+      if (this.fullscreenLabel) this.fullscreenLabel.textContent = this.isLiteFullscreen() ? "Exit full screen" : "Fullscreen";
       if (this.liteToolsLabel) this.liteToolsLabel.textContent = this.liteToolsVisible ? "Hide settings" : "Settings";
       for (const element of this.overlay.querySelectorAll("[data-lite-hidden]")) {
         element.hidden = lite;
@@ -1503,7 +1608,13 @@
 
     toggleLiteTools() {
       this.liteToolsVisible = !this.liteToolsVisible;
+      this.liteControlsVisible = true;
       this.syncTheaterModeControls();
+      if (this.liteToolsVisible) {
+        this.clearLiteControlsHideTimer();
+      } else {
+        this.scheduleLiteControlsHide(2600);
+      }
     }
 
     updateTheaterModeScene() {
@@ -1514,10 +1625,98 @@
       this.updateSpatialAudio();
     }
 
-    requestLiteFullscreen() {
-      if (this.theaterMode !== "lite" || !this.overlay?.requestFullscreen) return;
-      if (document.fullscreenElement) return;
-      this.overlay.requestFullscreen({ navigationUI: "hide" }).catch(() => {});
+    showLiteControlsTemporarily(delayMs = 2600) {
+      if (this.theaterMode !== "lite") return;
+      this.liteControlsVisible = true;
+      this.syncTheaterModeControls();
+      this.scheduleLiteControlsHide(delayMs);
+    }
+
+    hideLiteControls() {
+      if (this.theaterMode !== "lite") return;
+      this.liteToolsVisible = false;
+      this.liteControlsVisible = false;
+      this.clearLiteControlsHideTimer();
+      this.syncTheaterModeControls();
+    }
+
+    scheduleLiteControlsHide(delayMs = 2600) {
+      this.clearLiteControlsHideTimer();
+      if (this.theaterMode !== "lite" || this.liteToolsVisible) return;
+      this.liteControlsHideTimer = window.setTimeout(() => {
+        this.liteControlsVisible = false;
+        this.liteControlsHideTimer = null;
+        this.syncTheaterModeControls();
+      }, Math.max(400, Number(delayMs) || 2600));
+    }
+
+    clearLiteControlsHideTimer() {
+      if (!this.liteControlsHideTimer) return;
+      window.clearTimeout(this.liteControlsHideTimer);
+      this.liteControlsHideTimer = null;
+    }
+
+    isCoarsePointer() {
+      return Boolean(window.matchMedia?.("(pointer: coarse)")?.matches);
+    }
+
+    liteFullscreenElement() {
+      return document.fullscreenElement || document.webkitFullscreenElement || null;
+    }
+
+    isLiteFullscreen() {
+      return this.liteFullscreenElement() === this.overlay;
+    }
+
+    toggleLiteFullscreen() {
+      if (this.isLiteFullscreen()) {
+        this.exitLiteFullscreen();
+      } else {
+        this.requestLiteFullscreen();
+      }
+      this.showLiteControlsTemporarily(2200);
+    }
+
+    requestLiteFullscreen(options = {}) {
+      if (this.theaterMode !== "lite" || !this.overlay) return;
+      if (this.isLiteFullscreen()) {
+        this.syncTheaterModeControls();
+        return;
+      }
+      try {
+        let request = null;
+        if (this.overlay.requestFullscreen) {
+          request = this.overlay.requestFullscreen({ navigationUI: "hide" });
+        } else if (this.overlay.webkitRequestFullscreen) {
+          request = this.overlay.webkitRequestFullscreen();
+        } else if (!options.silent) {
+          this.updateInlineStatus("Fullscreen is unavailable in this browser.");
+          return;
+        }
+        if (request?.catch) {
+          request.catch((error) => {
+            if (!options.silent) this.updateInlineStatus(error?.message || "Fullscreen was blocked by the browser.");
+          });
+        }
+      } catch (error) {
+        if (!options.silent) this.updateInlineStatus(error?.message || "Fullscreen was blocked by the browser.");
+      } finally {
+        this.syncTheaterModeControls();
+      }
+    }
+
+    exitLiteFullscreen() {
+      try {
+        if (document.exitFullscreen && document.fullscreenElement) {
+          document.exitFullscreen().catch(() => {});
+        } else if (document.webkitExitFullscreen && document.webkitFullscreenElement) {
+          document.webkitExitFullscreen();
+        }
+      } catch (error) {
+        // The browser already left fullscreen or denied the request.
+      } finally {
+        this.syncTheaterModeControls();
+      }
     }
 
     updateNumericSetting(key, value) {
@@ -1638,6 +1837,10 @@
       this.listenOverlay(this.canvas, "pointerup", (event) => this.endDesktopDrag(event));
       this.listenOverlay(this.canvas, "pointercancel", (event) => this.endDesktopDrag(event));
       this.listenOverlay(this.canvas, "lostpointercapture", (event) => this.endDesktopDrag(event));
+      this.listenOverlay(this.canvas, "click", (event) => this.handleLiteCanvasClick(event));
+      this.listenOverlay(this.overlay, "pointermove", (event) => this.handleLitePointerMove(event));
+      this.listenOverlay(document, "fullscreenchange", () => this.syncTheaterModeControls());
+      this.listenOverlay(document, "webkitfullscreenchange", () => this.syncTheaterModeControls());
       this.listenOverlay(window, "keydown", (event) => this.handleDesktopKeyDown(event));
       this.listenOverlay(window, "keyup", (event) => this.handleDesktopKeyUp(event));
     }
@@ -1645,6 +1848,22 @@
     listenOverlay(target, eventName, handler) {
       target.addEventListener(eventName, handler);
       this.overlayCleanups.push(() => target.removeEventListener(eventName, handler));
+    }
+
+    handleLiteCanvasClick(event) {
+      if (this.theaterMode !== "lite" || event.target !== this.canvas) return;
+      event.preventDefault();
+      if (this.isCoarsePointer() || this.liteControlsVisible || this.liteToolsVisible) {
+        this.hideLiteControls();
+      } else {
+        this.showLiteControlsTemporarily(3600);
+      }
+    }
+
+    handleLitePointerMove(event) {
+      if (this.theaterMode !== "lite" || this.isCoarsePointer()) return;
+      if (event.pointerType && event.pointerType !== "mouse") return;
+      this.showLiteControlsTemporarily();
     }
 
     startDesktopDrag(event) {
@@ -1829,6 +2048,33 @@
 
     handleDesktopKeyDown(event) {
       if (this.xrSession || isEditableTarget(event.target)) return;
+      if (this.theaterMode === "lite") {
+        const rawKey = String(event.key || "").toLowerCase();
+        if (rawKey === "f") {
+          event.preventDefault();
+          this.toggleLiteFullscreen();
+          return;
+        }
+        if (rawKey === "c" || rawKey === "h") {
+          event.preventDefault();
+          if (this.liteControlsVisible || this.liteToolsVisible) {
+            this.hideLiteControls();
+          } else {
+            this.showLiteControlsTemporarily(3600);
+          }
+          return;
+        }
+        if (rawKey === " " || rawKey === "spacebar") {
+          event.preventDefault();
+          this.showLiteControlsTemporarily(1800);
+          this.togglePlayback();
+          return;
+        }
+        if (rawKey === "escape") {
+          this.showLiteControlsTemporarily(2200);
+          return;
+        }
+      }
       const key = normalizedNavigationKey(event);
       if (!key) return;
       event.preventDefault();
@@ -3798,6 +4044,7 @@
       "fastdepth-mobilenet-onnx",
       "depth-anything-v2-tiny-onnx",
       "depth-anything-v2-small-onnx",
+      "depth-pro-onnx",
       "webgpu-depth-anything-v2-small",
     ].includes(processor);
   }
@@ -3965,6 +4212,250 @@
     }
     return 0;
   }
+
+  function glbMaterialTextureConfig(asset, materialName) {
+    const textureMap = isPlainObject(asset?.textureMap) ? asset.textureMap : {};
+    if (!materialName) return null;
+    if (textureMap[materialName]) return normalizeTextureConfig(textureMap[materialName]);
+    const normalized = normalizeGlbMaterialName(materialName);
+    if (textureMap[normalized]) return normalizeTextureConfig(textureMap[normalized]);
+    for (const [key, value] of Object.entries(textureMap)) {
+      if (normalizeGlbMaterialName(key) === normalized) return normalizeTextureConfig(value);
+    }
+    const withoutNumericSuffix = normalized.replace(/\.\d+$/, "");
+    if (withoutNumericSuffix !== normalized) {
+      for (const [key, value] of Object.entries(textureMap)) {
+        if (normalizeGlbMaterialName(key).replace(/\.\d+$/, "") === withoutNumericSuffix) {
+          return normalizeTextureConfig(value);
+        }
+      }
+    }
+    return null;
+  }
+
+  function normalizeTextureConfig(value) {
+    if (typeof value === "string") return { map: value };
+    return isPlainObject(value) ? value : null;
+  }
+
+  function normalizeGlbMaterialName(value) {
+    return String(value || "").trim().toLowerCase().replace(/[_\s-]+/g, " ");
+  }
+
+  function normalizeGlbNodeName(value) {
+    return String(value || "").trim().toLowerCase();
+  }
+
+  function resolveRelativeAssetUrl(baseUrl, path) {
+    try {
+      return new URL(String(path || ""), new URL(baseUrl || "", window.location.href)).href;
+    } catch (error) {
+      return String(path || "");
+    }
+  }
+
+  function parseThemeGlb(buffer, options = {}) {
+    if (!window.THREE || !(buffer instanceof ArrayBuffer)) return null;
+    const view = new DataView(buffer);
+    if (view.byteLength < 20 || view.getUint32(0, true) !== 0x46546c67) return null;
+    const length = view.getUint32(8, true);
+    let offset = 12;
+    let json = null;
+    let binaryChunk = null;
+    while (offset + 8 <= length) {
+      const chunkLength = view.getUint32(offset, true);
+      const chunkType = view.getUint32(offset + 4, true);
+      offset += 8;
+      if (offset + chunkLength > view.byteLength) break;
+      if (chunkType === 0x4e4f534a) {
+        json = JSON.parse(new TextDecoder("utf-8").decode(new Uint8Array(buffer, offset, chunkLength)));
+      } else if (chunkType === 0x004e4942) {
+        binaryChunk = buffer.slice(offset, offset + chunkLength);
+      }
+      offset += chunkLength;
+    }
+    if (!json || !binaryChunk) return null;
+    const buffers = [binaryChunk];
+    const excludeNodeNames = new Set(
+      (Array.isArray(options.excludeNodes) ? options.excludeNodes : [])
+        .map((name) => normalizeGlbNodeName(name))
+        .filter(Boolean),
+    );
+    const materialCache = new Map();
+    const materialForIndex = (index) => {
+      const materialIndex = Number(index || 0);
+      if (materialCache.has(materialIndex)) return materialCache.get(materialIndex);
+      const materialDef = json.materials?.[materialIndex] || {};
+      const material = options.createMaterial?.(materialDef)
+        || new THREE.MeshStandardMaterial({ color: "#94a3b8", side: THREE.DoubleSide });
+      materialCache.set(materialIndex, material);
+      return material;
+    };
+    const root = new THREE.Group();
+    root.name = json.scenes?.[json.scene || 0]?.name || "glb-theme";
+    const nodeOptions = { excludeNodeNames };
+    for (const nodeIndex of json.scenes?.[json.scene || 0]?.nodes || []) {
+      const node = buildThemeGlbNode(json, buffers, nodeIndex, materialForIndex, nodeOptions);
+      if (node) root.add(node);
+    }
+    return root;
+  }
+
+  function shouldExcludeThemeGlbNode(nodeDef, options = {}) {
+    const name = normalizeGlbNodeName(nodeDef?.name);
+    return Boolean(name && options.excludeNodeNames?.has(name));
+  }
+
+  function buildThemeGlbNode(gltf, buffers, nodeIndex, materialForIndex, options = {}) {
+    const nodeDef = gltf.nodes?.[nodeIndex];
+    if (!nodeDef) return null;
+    if (shouldExcludeThemeGlbNode(nodeDef, options)) return null;
+    const group = new THREE.Group();
+    group.name = nodeDef.name || `node-${nodeIndex}`;
+    applyGltfNodeTransform(group, nodeDef);
+    if (nodeDef.mesh !== undefined) {
+      const meshDef = gltf.meshes?.[nodeDef.mesh];
+      for (const primitive of meshDef?.primitives || []) {
+        const object = buildThemeGlbPrimitive(gltf, buffers, primitive, materialForIndex);
+        if (object) {
+          object.name = meshDef.name || group.name;
+          group.add(object);
+        }
+      }
+    }
+    for (const childIndex of nodeDef.children || []) {
+      const child = buildThemeGlbNode(gltf, buffers, childIndex, materialForIndex, options);
+      if (child) group.add(child);
+    }
+    return group;
+  }
+
+  function applyGltfNodeTransform(object, nodeDef) {
+    if (Array.isArray(nodeDef.matrix) && nodeDef.matrix.length === 16) {
+      const matrix = new THREE.Matrix4().fromArray(nodeDef.matrix);
+      matrix.decompose(object.position, object.quaternion, object.scale);
+      return;
+    }
+    if (Array.isArray(nodeDef.translation)) {
+      object.position.set(
+        Number(nodeDef.translation[0] || 0),
+        Number(nodeDef.translation[1] || 0),
+        Number(nodeDef.translation[2] || 0),
+      );
+    }
+    if (Array.isArray(nodeDef.rotation)) {
+      object.quaternion.set(
+        Number(nodeDef.rotation[0] || 0),
+        Number(nodeDef.rotation[1] || 0),
+        Number(nodeDef.rotation[2] || 0),
+        Number(nodeDef.rotation[3] ?? 1),
+      );
+    }
+    if (Array.isArray(nodeDef.scale)) {
+      object.scale.set(
+        Number(nodeDef.scale[0] ?? 1),
+        Number(nodeDef.scale[1] ?? 1),
+        Number(nodeDef.scale[2] ?? 1),
+      );
+    }
+  }
+
+  function buildThemeGlbPrimitive(gltf, buffers, primitive, materialForIndex) {
+    const attributes = primitive.attributes || {};
+    const position = readGltfAccessor(gltf, buffers, attributes.POSITION);
+    if (!position?.array) return null;
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.BufferAttribute(position.array, position.itemSize, position.normalized));
+    const normal = readGltfAccessor(gltf, buffers, attributes.NORMAL);
+    if (normal?.array) geometry.setAttribute("normal", new THREE.BufferAttribute(normal.array, normal.itemSize, normal.normalized));
+    const uv = readGltfAccessor(gltf, buffers, attributes.TEXCOORD_0);
+    if (uv?.array) geometry.setAttribute("uv", new THREE.BufferAttribute(uv.array, uv.itemSize, uv.normalized));
+    const color = readGltfAccessor(gltf, buffers, attributes.COLOR_0);
+    if (color?.array) geometry.setAttribute("color", new THREE.BufferAttribute(color.array, color.itemSize, color.normalized));
+    const indices = readGltfAccessor(gltf, buffers, primitive.indices);
+    if (indices?.array) geometry.setIndex(new THREE.BufferAttribute(indices.array, 1, false));
+    if (!normal?.array && primitive.mode !== 1) geometry.computeVertexNormals();
+    geometry.computeBoundingSphere();
+    if (primitive.mode === 1) {
+      const meshMaterial = materialForIndex(primitive.material);
+      const lineMaterial = new THREE.LineBasicMaterial({
+        color: meshMaterial.color?.clone?.() || new THREE.Color("#d8c08a"),
+        transparent: Boolean(meshMaterial.transparent),
+        opacity: Number(meshMaterial.opacity ?? 1),
+      });
+      return new THREE.LineSegments(geometry, lineMaterial);
+    }
+    return new THREE.Mesh(geometry, materialForIndex(primitive.material));
+  }
+
+  function readGltfAccessor(gltf, buffers, accessorIndex) {
+    if (accessorIndex === undefined || accessorIndex === null) return null;
+    const accessor = gltf.accessors?.[accessorIndex];
+    const bufferView = gltf.bufferViews?.[accessor?.bufferView];
+    const source = buffers[bufferView?.buffer || 0];
+    if (!accessor || !bufferView || !source) return null;
+    const itemSize = GLTF_ACCESSOR_TYPE_SIZE[accessor.type] || 1;
+    const ArrayType = GLTF_COMPONENT_ARRAYS[accessor.componentType];
+    const componentSize = GLTF_COMPONENT_BYTE_SIZE[accessor.componentType] || 1;
+    if (!ArrayType) return null;
+    const byteOffset = Number(bufferView.byteOffset || 0) + Number(accessor.byteOffset || 0);
+    const byteStride = Number(bufferView.byteStride || itemSize * componentSize);
+    const length = Number(accessor.count || 0) * itemSize;
+    if (!length) return null;
+    if (byteStride === itemSize * componentSize) {
+      return {
+        array: new ArrayType(source, byteOffset, length),
+        itemSize,
+        normalized: Boolean(accessor.normalized),
+      };
+    }
+    const output = new ArrayType(length);
+    const dataView = new DataView(source);
+    for (let index = 0; index < Number(accessor.count || 0); index += 1) {
+      for (let component = 0; component < itemSize; component += 1) {
+        const sourceOffset = byteOffset + index * byteStride + component * componentSize;
+        output[index * itemSize + component] = readGltfComponent(dataView, sourceOffset, accessor.componentType);
+      }
+    }
+    return { array: output, itemSize, normalized: Boolean(accessor.normalized) };
+  }
+
+  function readGltfComponent(view, offset, componentType) {
+    if (componentType === 5120) return view.getInt8(offset);
+    if (componentType === 5121) return view.getUint8(offset);
+    if (componentType === 5122) return view.getInt16(offset, true);
+    if (componentType === 5123) return view.getUint16(offset, true);
+    if (componentType === 5125) return view.getUint32(offset, true);
+    return view.getFloat32(offset, true);
+  }
+
+  const GLTF_ACCESSOR_TYPE_SIZE = {
+    SCALAR: 1,
+    VEC2: 2,
+    VEC3: 3,
+    VEC4: 4,
+    MAT2: 4,
+    MAT3: 9,
+    MAT4: 16,
+  };
+
+  const GLTF_COMPONENT_ARRAYS = {
+    5120: Int8Array,
+    5121: Uint8Array,
+    5122: Int16Array,
+    5123: Uint16Array,
+    5125: Uint32Array,
+    5126: Float32Array,
+  };
+
+  const GLTF_COMPONENT_BYTE_SIZE = {
+    5120: 1,
+    5121: 1,
+    5122: 2,
+    5123: 2,
+    5125: 4,
+    5126: 4,
+  };
 
   function coerceThemeSettingValue(value, definition = null) {
     const type = String(definition?.type || "number").toLowerCase();

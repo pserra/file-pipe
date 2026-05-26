@@ -273,6 +273,13 @@ def parse_yaml_scalar(value: str):
         return value
 
 
+def parse_yaml_key(value: str):
+    value = value.strip()
+    if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+        return value[1:-1]
+    return value
+
+
 def parse_simple_yaml(text: str):
     lines = []
     for raw_line in text.splitlines():
@@ -299,7 +306,7 @@ def parse_simple_yaml(text: str):
                 index += 1
                 continue
             key, value = line.split(":", 1)
-            key = key.strip()
+            key = parse_yaml_key(key)
             value = value.strip()
             index += 1
             if value:
@@ -323,7 +330,7 @@ def parse_simple_yaml(text: str):
                 continue
             if ":" in item_text:
                 key, value = item_text.split(":", 1)
-                item = {key.strip(): parse_yaml_scalar(value.strip()) if value.strip() else {}}
+                item = {parse_yaml_key(key): parse_yaml_scalar(value.strip()) if value.strip() else {}}
                 while index < len(lines) and lines[index][0] > line_indent:
                     child, index = parse_dict(index, lines[index][0])
                     if isinstance(child, dict):

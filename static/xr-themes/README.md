@@ -41,7 +41,7 @@ Supported setting types are `boolean`, `number`, and `select`.
 
 ## Assets
 
-Supported asset types are `image`, `obj`, `box`, `light`, and `empty`.
+Supported asset types are `image`, `obj`, `glb`, `gltf`, `box`, `light`, and `empty`.
 
 Common fields:
 
@@ -50,6 +50,11 @@ Common fields:
 - `color`, `opacity`, `visibleSetting`, `opacitySetting`.
 - `lit`, `roughness`, `metalness`, `emissive`, `emissiveIntensity` for lit box
   and OBJ materials.
+- `textureMap` on `glb` and `gltf` assets maps material names to texture files
+  beside the model file. Use either `Material Name: texture.png` or nested
+  `map`, `normalMap`, `roughnessMap`, and `metalnessMap` entries.
+- `excludeNodes` on `glb` and `gltf` assets removes named imported nodes from
+  the rendered theme, useful for reference planes or baked-in video screens.
 - `material: glass` for transparent physical glass on `box` and `obj` assets.
   Glass supports `opacity`, `roughness`, `transmission`, `thickness`, `ior`,
   `clearcoat`, `clearcoatRoughness`, `attenuationColor`, and
