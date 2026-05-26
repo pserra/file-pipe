@@ -1298,7 +1298,17 @@ document.addEventListener("alpine:init", () => {
         });
         const fileName = hlsStream ? "playlist.m3u8" : encodeURIComponent(playbackMetadata.name || "video");
         const sourceVersion = encodeURIComponent(String(playbackMetadata.sourceVersion || this.sourceVersion || 0));
-        this.videoUrl = `/watch-media/${this.roomId}/${fileName}?mode=${hlsStream ? "hls" : "range"}&v=${sourceVersion}`;
+        const videoParams = new URLSearchParams({
+          mode: hlsStream ? "hls" : "range",
+          v: sourceVersion,
+        });
+        if (hlsStream) {
+          const videoProfile = playbackMetadata.videoProfile || playbackMetadata.playbackProfile?.videoProfile || "2d";
+          const stereoProcessor = playbackMetadata.stereoProcessor || playbackMetadata.playbackProfile?.stereoProcessor || "";
+          if (videoProfile && videoProfile !== "2d") videoParams.set("video_profile", videoProfile);
+          if (stereoProcessor) videoParams.set("stereo_processor", stereoProcessor);
+        }
+        this.videoUrl = `/watch-media/${this.roomId}/${fileName}?${videoParams.toString()}`;
         this.streamingReady = true;
         const video = await this.waitForViewerVideoElement();
         if (!video) throw new Error("The video player did not initialize. Reload the watch page and try again.");
@@ -1382,7 +1392,7 @@ document.addEventListener("alpine:init", () => {
     },
 
     async registerServiceWorker() {
-      const registration = await navigator.serviceWorker.register("/bigscreen-sw.js?v=12", { scope: "/" });
+      const registration = await navigator.serviceWorker.register("/bigscreen-sw.js?v=13", { scope: "/" });
       await navigator.serviceWorker.ready;
       if (!navigator.serviceWorker.controller) {
         await new Promise((resolve) => {

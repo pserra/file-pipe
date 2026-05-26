@@ -174,8 +174,9 @@ async function handleBigscreenMedia(event, url) {
 }
 
 async function handleWatchHlsMedia(event, url, client, sessionId, metadata) {
+  const profile = hlsRequestProfile(metadata, url);
   if (url.pathname.endsWith(".m3u8")) {
-    return new Response(buildHlsPlaylist(metadata), {
+    return new Response(buildHlsPlaylist(metadata, profile), {
       status: 200,
       headers: {
         "Cache-Control": "no-store",
@@ -188,7 +189,7 @@ async function handleWatchHlsMedia(event, url, client, sessionId, metadata) {
   if (segmentIndex < 0) {
     return new Response("Unknown HLS stream path.", { status: 404 });
   }
-  const cachedSegment = await cachedHlsSegmentResponse(metadata, segmentIndex);
+  const cachedSegment = await cachedHlsSegmentResponse(metadata, segmentIndex, profile);
   if (cachedSegment) return cachedSegment;
 
   const requestId = createRequestId();
@@ -198,7 +199,7 @@ async function handleWatchHlsMedia(event, url, client, sessionId, metadata) {
         mode: "stream",
         controller,
         clientId: client.id,
-        cacheInfo: hlsCacheInfo(metadata, segmentIndex, "video/mp2t"),
+        cacheInfo: hlsCacheInfo(metadata, segmentIndex, "video/mp2t", profile),
         chunks: [],
         cachedBytes: 0,
       });
@@ -208,8 +209,8 @@ async function handleWatchHlsMedia(event, url, client, sessionId, metadata) {
         sessionId,
         mediaKind: "watch",
         segmentIndex,
-        videoProfile: hlsVideoProfile(metadata),
-        stereoProcessor: hlsStereoProcessor(metadata),
+        videoProfile: profile.videoProfile,
+        stereoProcessor: profile.stereoProcessor,
       });
     },
     cancel() {
@@ -358,10 +359,11 @@ function startHlsPrefetch(client, message) {
 
 async function runHlsPrefetch(task, client, options) {
   const { sessionId, metadata, startIndex, endIndex } = options;
+  const profile = hlsRequestProfile(metadata);
   const totalSegments = Math.max(1, endIndex - startIndex + 1);
   let cachedSegments = 0;
   for (let segmentIndex = startIndex; segmentIndex <= endIndex && !task.cancelled; segmentIndex += 1) {
-    const info = hlsCacheInfo(metadata, segmentIndex, "video/mp2t");
+    const info = hlsCacheInfo(metadata, segmentIndex, "video/mp2t", profile);
     if (await cacheHas(info)) {
       cachedSegments += 1;
       postPrefetchProgress(client, "watch", sessionId, "hls", cachedSegments, totalSegments);
@@ -375,8 +377,8 @@ async function runHlsPrefetch(task, client, options) {
         segmentIndex,
         prefetch: true,
         sourceVersion: metadata.sourceVersion || 0,
-        videoProfile: hlsVideoProfile(metadata),
-        stereoProcessor: hlsStereoProcessor(metadata),
+        videoProfile: profile.videoProfile,
+        stereoProcessor: profile.stereoProcessor,
       }, info);
       cachedSegments += 1;
       postPrefetchProgress(client, "watch", sessionId, "hls", cachedSegments, totalSegments);
@@ -426,13 +428,17 @@ function postPrefetchError(client, kind, sessionId, error) {
   });
 }
 
-function buildHlsPlaylist(metadata) {
+function buildHlsPlaylist(metadata, profile = hlsRequestProfile(metadata)) {
   const hls = metadata.hls || {};
   const duration = Math.max(0, Number(hls.duration || 0));
   const segmentDuration = Math.max(1, Number(hls.segmentDuration || 8));
   const segmentCount = Math.max(1, Number(hls.segmentCount || Math.ceil(duration / segmentDuration) || 1));
   const sourceVersion = metadata.sourceVersion ? encodeURIComponent(String(metadata.sourceVersion)) : "";
-  const segmentQuery = sourceVersion ? `?v=${sourceVersion}` : "";
+  const segmentParams = new URLSearchParams();
+  if (sourceVersion) segmentParams.set("v", sourceVersion);
+  if (profile.videoProfile && profile.videoProfile !== "2d") segmentParams.set("video_profile", profile.videoProfile);
+  if (profile.stereoProcessor) segmentParams.set("stereo_processor", profile.stereoProcessor);
+  const segmentQuery = segmentParams.toString() ? `?${segmentParams.toString()}` : "";
   const lines = [
     "#EXTM3U",
     "#EXT-X-VERSION:3",
@@ -466,13 +472,26 @@ function isHlsMetadata(metadata) {
 }
 
 function hlsVideoProfile(metadata = {}) {
-  const profile = String(metadata.videoProfile || metadata.playbackProfile?.videoProfile || "").toLowerCase();
-  if (["full-sbs", "fsbs", "3d-full", "full-3d", "3d-full-sbs", "stereo-full-sbs"].includes(profile)) return "3d-full-sbs";
-  return ["3d", "3d-sbs", "sbs", "half-sbs", "stereo-sbs"].includes(profile) ? "3d-sbs" : "2d";
+  return normalizeHlsVideoProfile(metadata.videoProfile || metadata.playbackProfile?.videoProfile || "");
 }
 
 function hlsStereoProcessor(metadata = {}) {
   return String(metadata.stereoProcessor || metadata.playbackProfile?.stereoProcessor || "");
+}
+
+function hlsRequestProfile(metadata = {}, url = null) {
+  const params = url?.searchParams;
+  const videoProfile = normalizeHlsVideoProfile(params?.get("video_profile") || params?.get("videoProfile") || hlsVideoProfile(metadata));
+  const stereoProcessor = videoProfile === "2d"
+    ? ""
+    : String(params?.get("stereo_processor") || params?.get("stereoProcessor") || hlsStereoProcessor(metadata) || "");
+  return { videoProfile, stereoProcessor };
+}
+
+function normalizeHlsVideoProfile(value = "") {
+  const profile = String(value || "").toLowerCase();
+  if (["full-sbs", "fsbs", "3d-full", "full-3d", "3d-full-sbs", "stereo-full-sbs"].includes(profile)) return "3d-full-sbs";
+  return ["3d", "3d-sbs", "sbs", "half-sbs", "stereo-sbs"].includes(profile) ? "3d-sbs" : "2d";
 }
 
 function isLinearProgressiveMetadata(metadata) {
@@ -524,8 +543,8 @@ function parseRange(rangeHeader, totalSize, metadata = {}) {
   return { start, end, partial: true };
 }
 
-async function cachedHlsSegmentResponse(metadata, segmentIndex) {
-  const info = hlsCacheInfo(metadata, segmentIndex, "video/mp2t");
+async function cachedHlsSegmentResponse(metadata, segmentIndex, profile = hlsRequestProfile(metadata)) {
+  const info = hlsCacheInfo(metadata, segmentIndex, "video/mp2t", profile);
   const cached = await cachedResponse(info);
   if (!cached) return null;
   return new Response(await cached.arrayBuffer(), {
@@ -655,10 +674,11 @@ function rangeCacheInfo(kind, metadata, start, end, contentType) {
   };
 }
 
-function hlsCacheInfo(metadata, segmentIndex, contentType) {
+function hlsCacheInfo(metadata, segmentIndex, contentType, profile = hlsRequestProfile(metadata)) {
+  const profileKey = `${profile.videoProfile || "2d"}:${profile.stereoProcessor || "none"}`;
   return {
     kind: "hls",
-    url: `https://file-pipe-cache.local/watch/${mediaIdentity(metadata)}/v${cacheVersion(metadata)}/hls/${segmentIndex}`,
+    url: `https://file-pipe-cache.local/watch/${mediaIdentity(metadata)}/v${cacheVersion(metadata)}/${encodeURIComponent(profileKey)}/hls/${segmentIndex}`,
     contentType,
   };
 }
