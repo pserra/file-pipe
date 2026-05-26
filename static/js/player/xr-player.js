@@ -3807,6 +3807,9 @@
       depthStrength: clampNumber(Number(settings.depthStrength), 0, 2, 0.72),
       temporalSmoothing: clampNumber(Number(settings.temporalSmoothing), 0, 0.92, 0.55),
       inferenceIntervalMs: clampNumber(Number(settings.inferenceIntervalMs), 80, 1000, 180),
+      inferenceScale: clampNumber(Number(settings.inferenceScale), 0.1, 1, 0.33),
+      minInferenceWidth: clampNumber(Number(settings.minInferenceWidth), 64, 2048, 384),
+      minInferenceHeight: clampNumber(Number(settings.minInferenceHeight), 64, 2048, 216),
       inputSize: clampNumber(Number(settings.inputSize), 128, 512, 256),
     };
   }

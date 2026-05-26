@@ -1,6 +1,9 @@
 (() => {
   const INSTANCE_BY_VIDEO = new WeakMap();
   const DEFAULT_INPUT_SIZE = 256;
+  const DEFAULT_INFERENCE_SCALE = 0.33;
+  const DEFAULT_MIN_INFERENCE_WIDTH = 384;
+  const DEFAULT_MIN_INFERENCE_HEIGHT = 216;
   const DEFAULT_INFERENCE_INTERVAL_MS = 180;
   const DEFAULT_DEPTH_STRENGTH = 0.72;
   const DEFAULT_TEMPORAL_SMOOTHING = 0.55;
@@ -47,6 +50,9 @@
       this.temporalSmoothing = DEFAULT_TEMPORAL_SMOOTHING;
       this.inferenceIntervalMs = DEFAULT_INFERENCE_INTERVAL_MS;
       this.inputSize = DEFAULT_INPUT_SIZE;
+      this.inferenceScale = DEFAULT_INFERENCE_SCALE;
+      this.minInferenceWidth = DEFAULT_MIN_INFERENCE_WIDTH;
+      this.minInferenceHeight = DEFAULT_MIN_INFERENCE_HEIGHT;
       this.convergence = DEFAULT_CONVERGENCE;
       this.invertDepth = false;
       this.standardOutputEnabled = false;
@@ -100,6 +106,9 @@
       this.temporalSmoothing = clampNumber(Number(options.temporalSmoothing ?? options.playbackProfile?.temporalSmoothing), 0, 0.92, this.temporalSmoothing);
       this.inferenceIntervalMs = clampNumber(Number(options.inferenceIntervalMs), 80, 1000, this.inferenceIntervalMs);
       this.inputSize = Math.round(clampNumber(Number(options.inputSize), 128, 512, this.inputSize));
+      this.inferenceScale = clampNumber(Number(options.inferenceScale ?? options.playbackProfile?.inferenceScale), 0.1, 1, this.inferenceScale);
+      this.minInferenceWidth = Math.round(clampNumber(Number(options.minInferenceWidth), 64, 2048, this.minInferenceWidth));
+      this.minInferenceHeight = Math.round(clampNumber(Number(options.minInferenceHeight), 64, 2048, this.minInferenceHeight));
       this.convergence = clampNumber(Number(options.convergence), 0, 1, this.convergence);
       this.invertDepth = Boolean(options.invertDepth ?? this.invertDepth);
       this.standardOutputEnabled = options.standardOutput !== false;
@@ -112,6 +121,8 @@
         this.depthReady = false;
         this.status = "Local depth initializing.";
         this.initializeDepthModel();
+      } else if (this.session) {
+        this.configureSessionMetadata();
       }
       if (this.standardOutputEnabled !== Boolean(this.standardContainer)) {
         this.setStandardOutputEnabled(this.standardOutputEnabled);
@@ -237,22 +248,32 @@
       this.sessionOutputName = outputName;
       const metadata = this.session?.inputMetadata?.[inputName] || {};
       const dimensions = Array.isArray(metadata.dimensions) ? metadata.dimensions : [];
-      const fallbackInputSize = FIXED_MODEL_INPUT_SIZES[this.processor] || this.inputSize;
+      const target = this.targetInferenceSize();
+      const fixedInputSize = FIXED_MODEL_INPUT_SIZES[this.processor] || 0;
       const dim = (index, fallback) => {
         const value = Number(dimensions[index]);
         return Number.isFinite(value) && value > 0 ? Math.round(value) : fallback;
       };
       if (dim(3, 0) === 3) {
         this.sessionInputLayout = "nhwc";
-        this.sessionInputHeight = dim(1, fallbackInputSize);
-        this.sessionInputWidth = dim(2, fallbackInputSize);
+        this.sessionInputHeight = fixedInputSize || dim(1, target.height);
+        this.sessionInputWidth = fixedInputSize || dim(2, target.width);
       } else {
         this.sessionInputLayout = "nchw";
-        this.sessionInputHeight = dim(2, fallbackInputSize);
-        this.sessionInputWidth = dim(3, fallbackInputSize);
+        this.sessionInputHeight = fixedInputSize || dim(2, target.height);
+        this.sessionInputWidth = fixedInputSize || dim(3, target.width);
       }
       this.inputCanvas.width = this.sessionInputWidth;
       this.inputCanvas.height = this.sessionInputHeight;
+    }
+
+    targetInferenceSize() {
+      const sourceWidth = Math.max(1, Number(this.video?.videoWidth || this.video?.clientWidth || 0));
+      const sourceHeight = Math.max(1, Number(this.video?.videoHeight || this.video?.clientHeight || Math.round(sourceWidth * 9 / 16) || 0));
+      return {
+        width: Math.max(this.minInferenceWidth, Math.round(sourceWidth * this.inferenceScale)),
+        height: Math.max(this.minInferenceHeight, Math.round(sourceHeight * this.inferenceScale)),
+      };
     }
 
     scheduleInference(now = performance.now()) {
@@ -501,7 +522,7 @@
       if (!this.standardStatus) return;
       const layout = this.targetLayout === "half-sbs" ? "Half SBS" : "Full SBS";
       const inference = this.depthReady
-        ? `${this.processorLabel()} ${this.lastInferenceTimeMs || 0}ms`
+        ? `${this.processorLabel()} ${this.sessionInputWidth}x${this.sessionInputHeight} ${this.lastInferenceTimeMs || 0}ms`
         : (this.modelStatus === "fallback" ? "shader fallback" : "loading depth model");
       this.standardStatus.textContent = `${layout} local 3D · depth ${Math.round(this.depthStrength * 100)}% · ${inference}`;
     }

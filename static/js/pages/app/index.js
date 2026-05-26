@@ -40,6 +40,7 @@ document.addEventListener("alpine:init", () => {
     stereo3dInferenceCropPercent: normalizeStereo3dInferenceCropPercent(localStorage.getItem("filePipeStereo3dInferenceCropPercent") || "0"),
     stereo3dDepthStrength: normalizeStereo3dDepthStrength(localStorage.getItem("filePipeStereo3dDepthStrength") || "72"),
     stereo3dTemporalSmoothing: normalizeStereo3dTemporalSmoothing(localStorage.getItem("filePipeStereo3dTemporalSmoothing") || "55"),
+    stereo3dLocalInferenceScale: normalizeStereo3dInferenceScale(localStorage.getItem("filePipeStereo3dLocalInferenceScale") || "0.33"),
     stereo3dPrebuildProcessor: isLocalStereo3dProcessor(localStorage.getItem("filePipeStereo3dPrebuildProcessor")) ? "depth-anything-v2-base" : normalizeStereo3dProcessor(localStorage.getItem("filePipeStereo3dPrebuildProcessor") || "depth-anything-v2-base"),
     stereo3dPrebuildInferenceScale: normalizeStereo3dInferenceScale(localStorage.getItem("filePipeStereo3dPrebuildInferenceScale") || "0.75"),
     stereo3dPrebuildInferenceCropPercent: normalizeStereo3dInferenceCropPercent(localStorage.getItem("filePipeStereo3dPrebuildInferenceCropPercent") || "7.5"),
@@ -838,6 +839,17 @@ document.addEventListener("alpine:init", () => {
       return `${normalizeStereo3dTemporalSmoothing(this.stereo3dTemporalSmoothing)}%`;
     },
 
+    stereo3dLocalInferenceScaleLabel(scale = this.stereo3dLocalInferenceScale) {
+      const normalized = normalizeStereo3dInferenceScale(scale);
+      const option = this.stereo3dInferenceScaleOptions.find((candidate) => candidate.id === normalized);
+      return option?.label?.replace(" internal", "") || `${Math.round(Number(normalized) * 100)}%`;
+    },
+
+    stereo3dLocalInferenceScaleDescription(scale = this.stereo3dLocalInferenceScale) {
+      const normalized = normalizeStereo3dInferenceScale(scale);
+      return `${this.stereo3dLocalInferenceScaleLabel(normalized)} of video dimensions, with a 384x216 minimum for dynamic local depth models.`;
+    },
+
     stereo3dInferenceScaleLabel(scale = this.stereo3dInferenceScale) {
       const normalized = normalizeStereo3dInferenceScale(scale);
       const option = this.stereo3dInferenceScaleOptions.find((candidate) => candidate.id === normalized);
@@ -1474,10 +1486,22 @@ document.addEventListener("alpine:init", () => {
       if (changed) await this.refreshCurrentWatchRoom3dMetadata();
     },
 
+    async setStereo3dLocalInferenceScale(value) {
+      const nextValue = normalizeStereo3dInferenceScale(value);
+      const changed = this.stereo3dLocalInferenceScale !== nextValue;
+      this.stereo3dLocalInferenceScale = nextValue;
+      localStorage.setItem("filePipeStereo3dLocalInferenceScale", this.stereo3dLocalInferenceScale);
+      this.updateAttachedLocalDepthSettings();
+      if (changed) await this.refreshCurrentWatchRoom3dMetadata();
+    },
+
     localDepthSettings() {
       return {
         depthStrength: Number(normalizeStereo3dDepthStrength(this.stereo3dDepthStrength)) / 100,
         temporalSmoothing: Number(normalizeStereo3dTemporalSmoothing(this.stereo3dTemporalSmoothing)) / 100,
+        inferenceScale: Number(normalizeStereo3dInferenceScale(this.stereo3dLocalInferenceScale)),
+        minInferenceWidth: 384,
+        minInferenceHeight: 216,
       };
     },
 
@@ -2155,13 +2179,13 @@ document.addEventListener("alpine:init", () => {
       return {
         ...hlsSource,
         sourceLabel: `${hlsSource.sourceLabel || "Live stream"} with local browser 3D`,
-        variantContentKey: `${hlsSource.variantContentKey || hlsSource.contentKey || "hls"}:local:${stereoProcessor}:${targetVideoProfile}`,
+        variantContentKey: `${hlsSource.variantContentKey || hlsSource.contentKey || "hls"}:local:${stereoProcessor}:${targetVideoProfile}:${localDepthSettings.inferenceScale}`,
         videoProfile: "2d",
         videoLayout: "mono",
         stereoscopic: false,
         stereoProcessor,
         resolutionScale: "1",
-        inferenceScale: "1",
+        inferenceScale: String(localDepthSettings.inferenceScale),
         inferenceCropPercent: "0",
         localStereoProcessor: true,
         stereoPipeline: "local",
@@ -2169,6 +2193,8 @@ document.addEventListener("alpine:init", () => {
         targetVideoLayout,
         depthStrength: localDepthSettings.depthStrength,
         temporalSmoothing: localDepthSettings.temporalSmoothing,
+        minInferenceWidth: localDepthSettings.minInferenceWidth,
+        minInferenceHeight: localDepthSettings.minInferenceHeight,
         playbackProfile: {
           ...(hlsSource.playbackProfile || {}),
           videoProfile: "2d",
@@ -2176,7 +2202,7 @@ document.addEventListener("alpine:init", () => {
           stereoscopic: false,
           stereoProcessor,
           resolutionScale: "1",
-          inferenceScale: "1",
+          inferenceScale: String(localDepthSettings.inferenceScale),
           inferenceCropPercent: "0",
           localStereoProcessor: true,
           stereoPipeline: "local",
@@ -2184,6 +2210,8 @@ document.addEventListener("alpine:init", () => {
           targetVideoLayout,
           depthStrength: localDepthSettings.depthStrength,
           temporalSmoothing: localDepthSettings.temporalSmoothing,
+          minInferenceWidth: localDepthSettings.minInferenceWidth,
+          minInferenceHeight: localDepthSettings.minInferenceHeight,
         },
       };
     },
@@ -3090,6 +3118,7 @@ document.addEventListener("alpine:init", () => {
     attachHostXrPlayer(video) {
       if (!window.FilePipeXrPlayer || !video) return;
       const profile = this.playerSource?.playbackProfile || this.playerRoomMetadata?.playbackProfile || {};
+      const localDepthSettings = this.localDepthSettings();
       this.hostXrPlayer = window.FilePipeXrPlayer.attach(video, {
         panelSelector: ".xr-side-panel",
         storageKey: "filePipeHostXrPlayer",
@@ -3100,9 +3129,10 @@ document.addEventListener("alpine:init", () => {
         localDepthProcessor: profile.localStereoProcessor ? profile.stereoProcessor : "",
         localDepthTargetLayout: profile.targetVideoLayout || "",
         localDepthSettings: profile.localStereoProcessor ? {
-          ...this.localDepthSettings(),
-          depthStrength: profile.depthStrength ?? this.localDepthSettings().depthStrength,
-          temporalSmoothing: profile.temporalSmoothing ?? this.localDepthSettings().temporalSmoothing,
+          ...localDepthSettings,
+          depthStrength: profile.depthStrength ?? localDepthSettings.depthStrength,
+          temporalSmoothing: profile.temporalSmoothing ?? localDepthSettings.temporalSmoothing,
+          inferenceScale: profile.inferenceScale ?? localDepthSettings.inferenceScale,
         } : {},
       });
     },

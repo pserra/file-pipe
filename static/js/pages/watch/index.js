@@ -1202,6 +1202,9 @@ document.addEventListener("alpine:init", () => {
         localDepthSettings: profile.localStereoProcessor ? {
           depthStrength: profile.depthStrength,
           temporalSmoothing: profile.temporalSmoothing,
+          inferenceScale: profile.inferenceScale,
+          minInferenceWidth: profile.minInferenceWidth,
+          minInferenceHeight: profile.minInferenceHeight,
         } : {},
       });
     },
