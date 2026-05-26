@@ -315,9 +315,10 @@ document.addEventListener("alpine:init", () => {
         result.push({ id: "hls", label: "Stream", description: "More compatible playback" });
       }
       if (modes.hls3d) {
+        const localStereo = Boolean(modes.hls3d.localStereoProcessor || modes.hls3d.playbackProfile?.localStereoProcessor);
         result.push({
           id: "hls3d",
-          label: "3D Stream",
+          label: localStereo ? "WebGPU XR 3D" : "3D Stream",
           description: stereo3dModeDescription(modes.hls3d),
         });
       }
@@ -333,7 +334,10 @@ document.addEventListener("alpine:init", () => {
     },
 
     playbackModeLabel() {
-      if (this.selectedPlaybackMode === "hls3d") return "3D Stream";
+      if (this.selectedPlaybackMode === "hls3d") {
+        const mode = this.availablePlaybackModes().find((item) => item.id === "hls3d");
+        return mode?.label || "3D Stream";
+      }
       return this.selectedPlaybackMode === "hls" ? "Stream" : "Watch";
     },
 

@@ -2933,7 +2933,7 @@ document.addEventListener("alpine:init", () => {
       } else if (hlsSource && mediaInfoStereo3dCandidate(hlsSource.mediaInfo || source.mediaInfo) && this.canCreateLiveWatchRoom()) {
         if (stereo3dProcessor === "webgpu-depth-anything-v2-small") {
           hls3dSource = this.localWebGpuHls3dSource(hlsSource, stereo3dVideoProfile);
-          this.playerRoom3dStatus = `${videoLayoutLabel(this.stereo3dLayout)} 3D stream will be generated locally with WebGPU on supported viewers.`;
+          this.playerRoom3dStatus = `${videoLayoutLabel(this.stereo3dLayout)} WebGPU 3D is XR-only and viewer-local; it does not build connector cache or change the normal video element.`;
         } else {
           try {
             hls3dSource = await this.liveWatchSourceForCurrentPlayer({

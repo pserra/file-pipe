@@ -142,10 +142,21 @@ def cache_entry_details(path: Path) -> Dict[str, object]:
     lower_name = name.lower()
     if path.is_dir():
         segment_count = 0
+        last_error = ""
+        last_error_at = ""
         try:
             segment_count = sum(1 for child in path.iterdir() if child.is_file() and child.suffix == ".ts")
         except OSError:
             segment_count = 0
+        try:
+            error_payload = json.loads((path / ".last-error.json").read_text(encoding="utf-8"))
+            last_error = str(error_payload.get("error") or "")
+            updated_at = error_payload.get("updatedAt")
+            if updated_at:
+                last_error_at = format_timestamp(float(updated_at))
+        except (FileNotFoundError, OSError, ValueError, TypeError, json.JSONDecodeError):
+            last_error = ""
+            last_error_at = ""
         layout = "2d"
         category = "hls-2d"
         profile_label = "HLS 2D"
@@ -178,6 +189,9 @@ def cache_entry_details(path: Path) -> Dict[str, object]:
             "processor": processor,
             "processorLabel": processor_label(processor) if processor else "",
             "segmentCount": segment_count,
+            "lastError": last_error,
+            "lastErrorAt": last_error_at,
+            "errorCount": 1 if last_error else 0,
         }
     if ".part" in lower_name:
         return {
@@ -285,11 +299,13 @@ def cache_payload() -> Dict[str, object]:
                 "count": 0,
                 "size": 0,
                 "segmentCount": 0,
+                "errorCount": 0,
             },
         )
         group["count"] = int(group["count"]) + 1
         group["size"] = int(group["size"]) + int(entry.get("size") or 0)
         group["segmentCount"] = int(group["segmentCount"]) + int(entry.get("segmentCount") or 0)
+        group["errorCount"] = int(group.get("errorCount") or 0) + int(entry.get("errorCount") or 0)
     return {
         "cacheDir": str(cache_dir()),
         "files": entries,
@@ -1081,11 +1097,22 @@ ADMIN_HTML = r"""<!doctype html>
         text-transform: uppercase;
       }
 
+      .badge.warn {
+        background: #fff7ed;
+        border-color: #fed7aa;
+        color: #9a3412;
+      }
+
       .profile-line {
         color: var(--muted);
         display: block;
         font-size: 0.78rem;
         margin-top: 0.2rem;
+      }
+
+      .profile-line.danger-text {
+        color: #b42318;
+        max-width: 54rem;
       }
 
       .info-list {
@@ -1719,6 +1746,7 @@ ADMIN_HTML = r"""<!doctype html>
           count: Number(group.count || 0),
           size: Number(group.size || 0),
           segmentCount: Number(group.segmentCount || 0),
+          errorCount: Number(group.errorCount || 0),
         }));
       }
 
@@ -1730,6 +1758,7 @@ ADMIN_HTML = r"""<!doctype html>
             <strong>${group.count}</strong>
             <span class="muted">${formatBytes(group.size)}</span>
             <span class="muted">${group.segmentCount ? `${group.segmentCount} segments` : "No segments"}</span>
+            ${group.errorCount ? `<span class="badge warn">${group.errorCount} failed</span>` : ""}
           </button>
         `).join("");
       }
@@ -1754,12 +1783,13 @@ ADMIN_HTML = r"""<!doctype html>
         for (const file of files) {
           const key = file.videoKey || file.name;
           if (!videos.has(key)) {
-            videos.set(key, { label: file.videoLabel || key, files: [], size: 0, segmentCount: 0 });
+            videos.set(key, { label: file.videoLabel || key, files: [], size: 0, segmentCount: 0, errorCount: 0 });
           }
           const video = videos.get(key);
           video.files.push(file);
           video.size += Number(file.size || 0);
           video.segmentCount += Number(file.segmentCount || 0);
+          video.errorCount += Number(file.errorCount || 0);
         }
         body.innerHTML = [...videos.values()].map((video) => `
           <details class="cache-video" open>
@@ -1770,6 +1800,7 @@ ADMIN_HTML = r"""<!doctype html>
               </span>
               <span class="muted">${formatBytes(video.size)}</span>
               <span class="muted">${video.segmentCount ? `${video.segmentCount} segments` : ""}</span>
+              ${video.errorCount ? `<span class="badge warn">${video.errorCount} failed</span>` : ""}
             </summary>
             <div class="cache-video-body scroll-table">
               <table>
@@ -1789,6 +1820,7 @@ ADMIN_HTML = r"""<!doctype html>
                       <td>
                         <span class="cache-file">${escapeHtml(file.name)}</span>
                         <span class="profile-line">${escapeHtml([file.profileLabel, file.processorLabel].filter(Boolean).join(" · "))}</span>
+                        ${file.lastError ? `<span class="profile-line danger-text">${escapeHtml(file.lastError)}</span>` : ""}
                       </td>
                       <td>${escapeHtml(file.categoryLabel || file.kind || "Transcode")}</td>
                       <td>${file.segmentCount ? escapeHtml(String(file.segmentCount)) : ""}</td>

@@ -28,10 +28,30 @@ def run(command, **kwargs):
     return subprocess.run(command, check=True, text=True, capture_output=True, **kwargs)
 
 
+def media_tool(name):
+    env_name = f"FILE_PIPE_{name.upper()}_PATH"
+    configured = os.environ.get(env_name, "").strip()
+    if configured:
+        return configured
+    found = shutil.which(name)
+    if found:
+        return found
+    for directory in (
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+    ):
+        candidate = Path(directory) / name
+        if candidate.exists():
+            return str(candidate)
+    return name
+
+
 def ffprobe_json(input_url):
     completed = run(
         [
-            "ffprobe",
+            media_tool("ffprobe"),
             "-v",
             "error",
             "-select_streams",
@@ -248,7 +268,7 @@ def process_segment(args):
 
     decoder = subprocess.Popen(
         [
-            "ffmpeg",
+            media_tool("ffmpeg"),
             "-nostdin",
             "-hide_banner",
             "-loglevel",
@@ -273,7 +293,7 @@ def process_segment(args):
     )
     encoder = subprocess.Popen(
         [
-            "ffmpeg",
+            media_tool("ffmpeg"),
             "-hide_banner",
             "-loglevel",
             "error",

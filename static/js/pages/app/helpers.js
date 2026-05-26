@@ -461,9 +461,9 @@ function stereo3dProcessorOptions() {
     },
     {
       id: "webgpu-depth-anything-v2-small",
-      label: "Experimental local WebGPU",
-      bestUse: "Viewer-side depth where supported",
-      m3Practicality: "Experimental",
+      label: "Experimental WebGPU XR only",
+      bestUse: "Viewer-side XR depth; no connector cache",
+      m3Practicality: "Needs browser adapter",
     },
   ];
 }

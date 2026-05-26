@@ -538,7 +538,7 @@ function serviceWorkerSetupMessage(error) {
 
 function stereo3dModeDescription(mode = {}) {
   if (mode.localStereoProcessor || mode.playbackProfile?.localStereoProcessor) {
-    return "Experimental local WebGPU depth for XR/headsets";
+    return "Experimental browser WebGPU depth for XR/headsets; the normal video remains 2D";
   }
   const layout = mode.targetVideoLayout || mode.videoLayout || mode.playbackProfile?.targetVideoLayout || mode.playbackProfile?.videoLayout;
   return layout === "full-sbs" ? "Generated Full SBS stream for XR/headsets" : "Generated Half SBS stream for XR/headsets";

@@ -1721,6 +1721,27 @@ def build_external_stereo_segment_command(
     return shlex.split(template.format(**quoted))
 
 
+def external_stereo_processor_env(ffmpeg_path: str = "") -> Dict[str, str]:
+    env = os.environ.copy()
+    ffprobe_path = find_media_tool("ffprobe") or ""
+    if ffmpeg_path:
+        env["FILE_PIPE_FFMPEG_PATH"] = ffmpeg_path
+    if ffprobe_path:
+        env["FILE_PIPE_FFPROBE_PATH"] = ffprobe_path
+    tool_dirs = [
+        str(Path(path).parent)
+        for path in (ffmpeg_path, ffprobe_path)
+        if path
+    ]
+    existing_path = env.get("PATH", "")
+    path_parts = [part for part in tool_dirs if part]
+    if existing_path:
+        path_parts.append(existing_path)
+    if path_parts:
+        env["PATH"] = os.pathsep.join(dict.fromkeys(path_parts))
+    return env
+
+
 def transcode_profile_cache_suffix(
     audio_profile: str = TRANSCODE_AUDIO_PROFILE_STEREO,
     video_profile: str = TRANSCODE_VIDEO_PROFILE_2D,
@@ -1888,6 +1909,45 @@ def hls_segment_path(
     stereo_processor: str = TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT,
 ) -> Path:
     return hls_cache_dir(resource_id, url, audio_profile, video_profile, stereo_processor) / f"segment-{segment_index:06d}.ts"
+
+
+def hls_segment_error_path(path: Path) -> Path:
+    return path.parent / ".last-error.json"
+
+
+def clear_hls_segment_error(path: Path) -> None:
+    try:
+        hls_segment_error_path(path).unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
+
+
+def write_hls_segment_error(
+    path: Path,
+    segment_index: int,
+    audio_profile: str,
+    video_profile: str,
+    stereo_processor: str,
+    error: str,
+) -> None:
+    try:
+        write_json_atomic(
+            hls_segment_error_path(path),
+            {
+                "version": 1,
+                "segmentIndex": segment_index,
+                "audioProfile": normalize_transcode_audio_profile(audio_profile),
+                "videoProfile": normalize_transcode_video_profile(video_profile),
+                "videoLayout": transcode_video_layout(video_profile),
+                "stereoProcessor": normalize_stereo_processor(stereo_processor),
+                "error": error,
+                "updatedAt": int(time.time()),
+            },
+        )
+    except OSError:
+        pass
 
 
 def transcode_job_path(path: Path) -> Path:
@@ -2126,9 +2186,11 @@ def create_hls_segment(
     with lock:
         if not path.exists() or path.stat().st_size == 0:
             path.parent.mkdir(parents=True, exist_ok=True)
-            temp_path = path.with_suffix(f".{os.getpid()}.part")
+            temp_path = path.with_name(f"{path.stem}.{os.getpid()}.part{path.suffix}")
             if temp_path.exists():
                 temp_path.unlink()
+            clear_hls_segment_error(path)
+            command_env = None
             if normalized_stereo_processor == TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT:
                 command = build_hls_segment_command(
                     url,
@@ -2141,6 +2203,7 @@ def create_hls_segment(
                     normalized_video_profile,
                 )
             else:
+                command_env = external_stereo_processor_env(ffmpeg_path)
                 command = build_external_stereo_segment_command(
                     url,
                     str(temp_path),
@@ -2150,17 +2213,21 @@ def create_hls_segment(
                     normalized_stereo_processor,
                 )
             try:
-                subprocess.run(command, capture_output=True, text=True, check=True)
+                subprocess.run(command, capture_output=True, text=True, check=True, env=command_env)
                 temp_path.replace(path)
+                clear_hls_segment_error(path)
             except subprocess.CalledProcessError as exc:
                 if temp_path.exists():
                     temp_path.unlink()
                 detail = (exc.stderr or exc.stdout or str(exc)).strip()
                 tool_name = "ffmpeg" if normalized_stereo_processor == TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT else normalized_stereo_processor
-                raise RuntimeError(f"{tool_name} could not create HLS segment {segment_index}: {detail}") from exc
-            except Exception:
+                message = f"{tool_name} could not create HLS segment {segment_index}: {detail}"
+                write_hls_segment_error(path, segment_index, audio_profile, normalized_video_profile, normalized_stereo_processor, message)
+                raise RuntimeError(message) from exc
+            except Exception as exc:
                 if temp_path.exists():
                     temp_path.unlink()
+                write_hls_segment_error(path, segment_index, audio_profile, normalized_video_profile, normalized_stereo_processor, str(exc))
                 raise
     stat = path.stat()
     return {
@@ -2579,14 +2646,42 @@ def recover_transcode_job(job_path: Path) -> bool:
 def cleanup_stale_hls_temp_files() -> int:
     deleted = 0
     try:
-        candidates = list(TRANSCODE_CACHE_DIR.glob("**/*.part"))
+        candidates = list(TRANSCODE_CACHE_DIR.glob("**/*.part")) + list(TRANSCODE_CACHE_DIR.glob("**/*.part.*"))
     except OSError:
         return 0
     for path in candidates:
-        if path.suffix != ".part":
+        if ".part" not in path.name:
             continue
         try:
             path.unlink()
+            deleted += 1
+        except OSError:
+            continue
+    return deleted
+
+
+def cleanup_empty_hls_cache_dirs() -> int:
+    deleted = 0
+    try:
+        candidates = sorted(TRANSCODE_CACHE_DIR.glob("*-hls"), key=lambda item: len(str(item)), reverse=True)
+    except OSError:
+        return 0
+    for path in candidates:
+        if not path.is_dir():
+            continue
+        try:
+            has_artifacts = any(
+                child.is_file()
+                and (
+                    child.suffix == ".ts"
+                    or ".part" in child.name
+                    or child.name == ".last-error.json"
+                )
+                for child in path.iterdir()
+            )
+            if has_artifacts:
+                continue
+            path.rmdir()
             deleted += 1
         except OSError:
             continue
@@ -2601,6 +2696,7 @@ def recover_interrupted_work() -> Dict[str, object]:
         RECOVERY_STARTED = True
     TRANSCODE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     deleted_temp_files = cleanup_stale_hls_temp_files()
+    deleted_empty_hls_dirs = cleanup_empty_hls_cache_dirs()
     recovered_jobs = 0
     failed_jobs = 0
     for job_path in TRANSCODE_CACHE_DIR.glob("*.job.json"):
@@ -2614,6 +2710,7 @@ def recover_interrupted_work() -> Dict[str, object]:
         "recoveredJobs": recovered_jobs,
         "failedJobs": failed_jobs,
         "deletedTempFiles": deleted_temp_files,
+        "deletedEmptyHlsDirs": deleted_empty_hls_dirs,
     }
 
 
