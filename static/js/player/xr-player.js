@@ -139,6 +139,10 @@
       this.xrSession = null;
       this.xrSessionEndHandler = null;
       this.inTheater = false;
+      this.theaterMode = "theater";
+      this.liteToolsVisible = false;
+      this.liteLeftCamera = null;
+      this.liteRightCamera = null;
       this.controllers = [];
       this.controllerLines = [];
       this.xrThumbstickSeekDirection = 0;
@@ -152,6 +156,7 @@
       this.xrControllerRayMatrix = null;
       this.updateOptions = this.updateOptions.bind(this);
       this.openTheater = this.openTheater.bind(this);
+      this.openLiteTheater = this.openLiteTheater.bind(this);
       this.closeTheater = this.closeTheater.bind(this);
       this.dispose = this.dispose.bind(this);
       this.setSpatialAudioEnabled = this.setSpatialAudioEnabled.bind(this);
@@ -332,6 +337,10 @@
             <i class="bi bi-badge-vr"></i>
             <span data-role="vr-label">Open XR Theater</span>
           </button>
+          <button class="btn btn-sm btn-outline-primary" type="button" data-action="enter-lite">
+            <i class="bi bi-badge-3d"></i>
+            <span>Open XR Lite</span>
+          </button>
         </div>
         <div class="fp-xr-status" data-role="status"></div>
       `;
@@ -347,6 +356,7 @@
       this.spatialAudioInput = this.panel.querySelector("[data-role='spatial-audio']");
       this.eyeField = this.panel.querySelector("[data-role='eye-field']");
       this.vrButton = this.panel.querySelector("[data-action='enter-vr']");
+      this.liteButton = this.panel.querySelector("[data-action='enter-lite']");
       this.vrLabel = this.panel.querySelector("[data-role='vr-label']");
       this.statusElement = this.panel.querySelector("[data-role='status']");
       this.layoutSelect.value = this.settings.layout;
@@ -383,6 +393,7 @@
         this.setSpatialAudioEnabled(this.spatialAudioInput.checked);
       });
       this.listen(this.vrButton, "click", () => this.openTheater());
+      this.listen(this.liteButton, "click", () => this.openLiteTheater());
       this.listen(this.video, "loadedmetadata", () => {
         if (this.settings.aspectLocked) this.applyAspectRatioFrom("width");
         this.saveSettings();
@@ -437,7 +448,7 @@
       const baseStatus = this.xrSupported
         ? `${layout}. ${headset}. Open the theater, then enter the headset from the top bar.`
         : `${layout}. Desktop theater is available; no WebXR headset is visible to this browser.`;
-      this.statusElement.textContent = `${baseStatus}${spatial}${localDepth}`;
+      this.statusElement.textContent = `${baseStatus} XR Lite opens a Full SBS browser view for stereo glasses.${spatial}${localDepth}`;
     }
 
     async loadThemes() {
@@ -633,6 +644,11 @@
 
     applyTheme() {
       if (!this.scene || !this.themeGroup || !window.THREE) return;
+      if (this.theaterMode === "lite") {
+        this.clearThemeObjects();
+        this.updateSceneLighting();
+        return;
+      }
       const revision = this.themeRevision + 1;
       this.themeRevision = revision;
       this.clearThemeObjects();
@@ -959,6 +975,14 @@
     }
 
     openTheater() {
+      this.openTheaterMode("theater");
+    }
+
+    openLiteTheater() {
+      this.openTheaterMode("lite");
+    }
+
+    openTheaterMode(mode = "theater") {
       if (this.inTheater) return;
       if (!window.THREE) {
         this.updateInlineStatus("Three.js did not load. Reload the page and try again.");
@@ -967,13 +991,16 @@
       if (isKnownLayout(this.options.sourceLayout) && this.options.sourceLayout !== "mono") {
         this.setLayout(this.options.sourceLayout, { persist: false });
       }
+      this.theaterMode = mode === "lite" ? "lite" : "theater";
+      this.liteToolsVisible = this.theaterMode !== "lite";
       this.inTheater = true;
       this.buildOverlay();
       this.initThree();
-      this.moveSidePanelIntoOverlay();
+      if (this.theaterMode !== "lite") this.moveSidePanelIntoOverlay();
       if (this.settings.aspectLocked) this.applyAspectRatioFrom("width");
       this.updateVideoGeometry();
       this.updateVideoMaterialUv();
+      this.updateTheaterModeScene();
       this.resizeRenderer();
       this.renderer.setAnimationLoop(() => this.renderFrame());
       this.updatePlaybackControls();
@@ -981,6 +1008,7 @@
         this.setSpatialAudioEnabled(true).catch(() => {});
       }
       document.body.classList.add("fp-three-xr-active");
+      if (this.theaterMode === "lite") this.requestLiteFullscreen();
     }
 
     closeTheater() {
@@ -996,6 +1024,9 @@
       this.xrSessionEndHandler = null;
       if (this.renderer) this.renderer.setAnimationLoop(null);
       this.restoreSidePanel();
+      if (document.fullscreenElement === this.overlay && document.exitFullscreen) {
+        document.exitFullscreen().catch(() => {});
+      }
       if (this.overlay) this.overlay.remove();
       this.overlay = null;
       if (this.videoTexture) this.videoTexture.dispose();
@@ -1025,6 +1056,8 @@
       this.renderer = null;
       this.scene = null;
       this.camera = null;
+      this.liteLeftCamera = null;
+      this.liteRightCamera = null;
       this.videoMesh = null;
       this.screenBackingMesh = null;
       this.videoGeometryKey = "";
@@ -1081,6 +1114,8 @@
       this.lastRenderAt = 0;
       this.xrRaycaster = null;
       this.xrControllerRayMatrix = null;
+      this.theaterMode = "theater";
+      this.liteToolsVisible = false;
       document.body.classList.remove("fp-three-xr-active");
       if (this.settings.spatialAudio) {
         this.rebuildSpatialAudioGraph();
@@ -1095,18 +1130,25 @@
       this.overlay.innerHTML = `
         <div class="fp-three-xr-topbar">
           <div>
-            <strong>XR Theater</strong>
+            <strong data-role="theater-title">XR Theater</strong>
             <span data-role="theater-status"></span>
           </div>
           <div class="fp-three-xr-top-actions">
-            <button class="btn btn-sm btn-info" type="button" data-action="enter-webxr">
+            <button class="btn btn-sm btn-info" type="button" data-action="enter-webxr" data-lite-hidden>
               <i class="bi bi-badge-vr"></i>
               <span data-role="webxr-label">Enter headset</span>
             </button>
             <button class="btn btn-sm btn-light" type="button" data-action="recenter">
               <i class="bi bi-crosshair"></i>
             </button>
-            <button class="btn btn-sm btn-light" type="button" data-action="reset-room-view" title="Reset desktop room view">
+            <button class="btn btn-sm btn-light" type="button" data-action="fullscreen-lite" data-lite-only title="Fullscreen">
+              <i class="bi bi-arrows-fullscreen"></i>
+            </button>
+            <button class="btn btn-sm btn-light" type="button" data-action="toggle-lite-tools" data-lite-only title="Settings">
+              <i class="bi bi-sliders"></i>
+              <span data-role="lite-tools-label">Settings</span>
+            </button>
+            <button class="btn btn-sm btn-light" type="button" data-action="reset-room-view" title="Reset desktop room view" data-lite-hidden>
               <i class="bi bi-house"></i>
             </button>
             <button class="btn btn-sm btn-light" type="button" data-action="zoom-out" title="Zoom out">
@@ -1115,7 +1157,7 @@
             <button class="btn btn-sm btn-light" type="button" data-action="zoom-in" title="Zoom in">
               <i class="bi bi-plus-lg"></i>
             </button>
-            <button class="btn btn-sm btn-light" type="button" data-action="toggle-side-panel">
+            <button class="btn btn-sm btn-light" type="button" data-action="toggle-side-panel" data-lite-hidden>
               <i class="bi bi-layout-sidebar-inset-reverse"></i>
               <span data-role="side-panel-label">Voice</span>
             </button>
@@ -1137,20 +1179,20 @@
           <aside class="fp-three-xr-tools">
             <div class="fp-three-xr-tool-card">
               <div class="fp-three-xr-tool-title">Video Panel</div>
-              <label class="fp-xr-field">
+              <label class="fp-xr-field" data-lite-hidden>
                 <span>Headset</span>
                 <select class="form-select form-select-sm" data-role="overlay-headset-mode">
                   <option value="vr">VR room</option>
                   <option value="mr">MR passthrough</option>
                 </select>
               </label>
-              <label class="fp-xr-field">
+              <label class="fp-xr-field" data-lite-hidden>
                 <span>Room</span>
                 <select class="form-select form-select-sm" data-role="theme">
                   <option value="default">Default room</option>
                 </select>
               </label>
-              <div class="fp-three-xr-theme-settings" data-role="theme-settings" hidden></div>
+              <div class="fp-three-xr-theme-settings" data-role="theme-settings" data-lite-hidden hidden></div>
               <label class="fp-xr-field">
                 <span>Backlight</span>
                 <select class="form-select form-select-sm" data-role="backlight">
@@ -1162,11 +1204,11 @@
               </label>
               <label class="fp-xr-range"><span>Backlight intensity <output data-role="backlight-intensity-label"></output></span><input class="form-range" type="range" min="0" max="150" step="5" data-role="backlight-intensity"></label>
               <div class="fp-xr-debug" data-role="backlight-debug" hidden></div>
-              <label class="fp-xr-check">
+              <label class="fp-xr-check" data-lite-hidden>
                 <input class="form-check-input" type="checkbox" data-role="overlay-spatial-audio">
                 <span>Spatial audio</span>
               </label>
-              <div class="fp-xr-debug" data-role="spatial-audio-status"></div>
+              <div class="fp-xr-debug" data-role="spatial-audio-status" data-lite-hidden></div>
               <label class="fp-xr-field">
                 <span>View</span>
                 <select class="form-select form-select-sm" data-role="overlay-layout">
@@ -1188,13 +1230,13 @@
               </label>
               <label class="fp-xr-range"><span>Width <output data-role="width-label"></output></span><input class="form-range" type="range" min="1.4" max="6" step="0.1" data-role="panel-width"></label>
               <label class="fp-xr-range"><span>Height <output data-role="height-label"></output></span><input class="form-range" type="range" min="0.8" max="3.6" step="0.1" data-role="panel-height"></label>
-              <label class="fp-xr-range"><span>X <output data-role="x-label"></output></span><input class="form-range" type="range" min="-3" max="3" step="0.05" data-role="panel-x"></label>
-              <label class="fp-xr-range"><span>Height pos <output data-role="y-label"></output></span><input class="form-range" type="range" min="-1.4" max="1.4" step="0.05" data-role="panel-y"></label>
-              <label class="fp-xr-range"><span>Yaw <output data-role="yaw-label"></output></span><input class="form-range" type="range" min="-35" max="35" step="1" data-role="panel-yaw"></label>
-              <label class="fp-xr-range"><span>Tilt <output data-role="pitch-label"></output></span><input class="form-range" type="range" min="-20" max="20" step="1" data-role="panel-pitch"></label>
+              <label class="fp-xr-range" data-lite-hidden><span>X <output data-role="x-label"></output></span><input class="form-range" type="range" min="-3" max="3" step="0.05" data-role="panel-x"></label>
+              <label class="fp-xr-range" data-lite-hidden><span>Height pos <output data-role="y-label"></output></span><input class="form-range" type="range" min="-1.4" max="1.4" step="0.05" data-role="panel-y"></label>
+              <label class="fp-xr-range" data-lite-hidden><span>Yaw <output data-role="yaw-label"></output></span><input class="form-range" type="range" min="-35" max="35" step="1" data-role="panel-yaw"></label>
+              <label class="fp-xr-range" data-lite-hidden><span>Tilt <output data-role="pitch-label"></output></span><input class="form-range" type="range" min="-20" max="20" step="1" data-role="panel-pitch"></label>
               <label class="fp-xr-range"><span>Screen curve <output data-role="curve-label"></output></span><input class="form-range" type="range" min="0" max="100" step="5" data-role="screen-curve"></label>
               <label class="fp-xr-range"><span>Distance <output data-role="distance-label"></output></span><input class="form-range" type="range" min="1.4" max="6" step="0.1" data-role="panel-distance"></label>
-              <label class="fp-xr-range"><span>Room dim <output data-role="dim-label"></output></span><input class="form-range" type="range" min="0" max="100" step="5" data-role="room-dim"></label>
+              <label class="fp-xr-range" data-lite-hidden><span>Room dim <output data-role="dim-label"></output></span><input class="form-range" type="range" min="0" max="100" step="5" data-role="room-dim"></label>
               <button class="btn btn-sm btn-outline-light w-100" type="button" data-action="reset-screen">
                 <i class="bi bi-crosshair"></i> Recenter screen
               </button>
@@ -1207,6 +1249,7 @@
       this.canvas = this.overlay.querySelector(".fp-three-xr-canvas");
       this.fallbackCanvas = null;
       this.fallbackContext = null;
+      this.theaterTitle = this.overlay.querySelector("[data-role='theater-title']");
       this.theaterStatus = this.overlay.querySelector("[data-role='theater-status']");
       this.overlayHeadsetModeSelect = this.overlay.querySelector("[data-role='overlay-headset-mode']");
       this.themeSelect = this.overlay.querySelector("[data-role='theme']");
@@ -1247,11 +1290,15 @@
       this.muteIcon = this.muteButton.querySelector(".bi");
       this.webXrButton = this.overlay.querySelector("[data-action='enter-webxr']");
       this.webXrLabel = this.overlay.querySelector("[data-role='webxr-label']");
+      this.liteToolsToggleButton = this.overlay.querySelector("[data-action='toggle-lite-tools']");
+      this.liteToolsLabel = this.overlay.querySelector("[data-role='lite-tools-label']");
       this.sidePanelToggleButton = this.overlay.querySelector("[data-action='toggle-side-panel']");
       this.sidePanelLabel = this.overlay.querySelector("[data-role='side-panel-label']");
       this.sideSlot = this.overlay.querySelector("[data-role='side-slot']");
       this.overlay.querySelector("[data-action='close']").addEventListener("click", () => this.closeTheater());
       this.overlay.querySelector("[data-action='recenter']").addEventListener("click", () => this.recenterScreen());
+      this.overlay.querySelector("[data-action='fullscreen-lite']").addEventListener("click", () => this.requestLiteFullscreen());
+      this.overlay.querySelector("[data-action='toggle-lite-tools']").addEventListener("click", () => this.toggleLiteTools());
       this.overlay.querySelector("[data-action='reset-room-view']").addEventListener("click", () => this.resetRoomView());
       this.overlay.querySelector("[data-action='zoom-out']").addEventListener("click", () => this.zoomScreen(0.2));
       this.overlay.querySelector("[data-action='zoom-in']").addEventListener("click", () => this.zoomScreen(-0.2));
@@ -1338,6 +1385,7 @@
       }
       if (this.spatialAudioInput) this.spatialAudioInput.checked = Boolean(this.settings.spatialAudio);
       if (!this.overlay) return;
+      this.syncTheaterModeControls();
       this.overlayHeadsetModeSelect.value = this.settings.headsetMode;
       this.overlayHeadsetModeSelect.querySelector("option[value='mr']").disabled = !this.xrArSupported;
       this.syncThemeOptions();
@@ -1390,11 +1438,50 @@
       }
       this.syncSidePanelVisibility();
       if (this.theaterStatus) {
-        const mode = this.xrSession
-          ? (this.xrSessionMode === "immersive-ar" ? "MR active" : "VR active")
-          : "Desktop theater";
-        this.theaterStatus.textContent = `${mode} · ${LAYOUT_LABELS[this.settings.layout] || "Video"} · ${this.settings.panelWidth.toFixed(1)} x ${this.settings.panelHeight.toFixed(1)}m`;
+        if (this.theaterMode === "lite") {
+          this.theaterStatus.textContent = `Full SBS browser output · ${LAYOUT_LABELS[this.settings.layout] || "Video"} source · ${this.settings.distance.toFixed(1)}m`;
+        } else {
+          const mode = this.xrSession
+            ? (this.xrSessionMode === "immersive-ar" ? "MR active" : "VR active")
+            : "Desktop theater";
+          this.theaterStatus.textContent = `${mode} · ${LAYOUT_LABELS[this.settings.layout] || "Video"} · ${this.settings.panelWidth.toFixed(1)} x ${this.settings.panelHeight.toFixed(1)}m`;
+        }
       }
+    }
+
+    syncTheaterModeControls() {
+      if (!this.overlay) return;
+      const lite = this.theaterMode === "lite";
+      this.overlay.classList.toggle("fp-three-xr-lite-mode", lite);
+      this.overlay.classList.toggle("fp-three-xr-lite-tools-open", lite && this.liteToolsVisible);
+      if (this.theaterTitle) this.theaterTitle.textContent = lite ? "XR Lite" : "XR Theater";
+      if (this.liteToolsLabel) this.liteToolsLabel.textContent = this.liteToolsVisible ? "Hide settings" : "Settings";
+      for (const element of this.overlay.querySelectorAll("[data-lite-hidden]")) {
+        element.hidden = lite;
+      }
+      for (const element of this.overlay.querySelectorAll("[data-lite-only]")) {
+        element.hidden = !lite;
+      }
+      if (this.sideSlot && lite) this.sideSlot.hidden = true;
+    }
+
+    toggleLiteTools() {
+      this.liteToolsVisible = !this.liteToolsVisible;
+      this.syncTheaterModeControls();
+    }
+
+    updateTheaterModeScene() {
+      this.syncTheaterModeControls();
+      this.updateDesktopCamera();
+      this.updateSceneLighting();
+      this.updateVideoGeometry();
+      this.updateSpatialAudio();
+    }
+
+    requestLiteFullscreen() {
+      if (this.theaterMode !== "lite" || !this.overlay?.requestFullscreen) return;
+      if (document.fullscreenElement) return;
+      this.overlay.requestFullscreen({ navigationUI: "hide" }).catch(() => {});
     }
 
     updateNumericSetting(key, value) {
@@ -1526,6 +1613,7 @@
 
     startDesktopDrag(event) {
       if (!this.canvas || this.xrSession || (event.button !== 0 && event.button !== 2)) return;
+      if (this.theaterMode === "lite") return;
       event.preventDefault();
       this.canvas.focus?.({ preventScroll: true });
       const hit = event.button === 0 && !event.shiftKey ? this.themeHitFromPointer(event) : null;
@@ -1719,6 +1807,7 @@
     }
 
     updateDesktopKeyboardNavigation(deltaSeconds) {
+      if (this.theaterMode === "lite") return;
       if (this.xrSession || !this.desktopKeys.size) return;
       const speed = this.desktopKeys.has("shift") ? 3.0 : 1.45;
       const amount = speed * deltaSeconds;
@@ -1764,6 +1853,13 @@
 
     updateDesktopCamera() {
       if (!this.camera || this.xrSession) return;
+      if (this.theaterMode === "lite") {
+        this.camera.fov = 60;
+        this.camera.position.set(0, 0, 0);
+        this.camera.rotation.set(0, 0, 0);
+        this.camera.updateProjectionMatrix();
+        return;
+      }
       const desktopConfig = isPlainObject(this.currentTheme().desktop) ? this.currentTheme().desktop : {};
       const fov = clampNumber(Number(desktopConfig.fov), 45, 90, 60);
       if (this.camera.fov !== fov) {
@@ -2216,9 +2312,11 @@
       this.videoMesh.onBeforeRender = (_renderer, _scene, camera) => this.applyVideoTextureUvForCamera(camera);
       this.screenSurfaceGroup.add(this.videoMesh);
       this.initBacklight();
-      this.initXrSidePanel();
-      this.initXrControllers();
-      this.applyTheme();
+      if (this.theaterMode !== "lite") {
+        this.initXrSidePanel();
+        this.initXrControllers();
+        this.applyTheme();
+      }
       this.updateSceneLighting();
       this.updateDesktopCamera();
     }
@@ -2243,6 +2341,13 @@
 
     updateSceneLighting() {
       if (!this.scene) return;
+      if (this.theaterMode === "lite") {
+        this.scene.background = new THREE.Color(0x000000);
+        if (this.gridMesh) this.gridMesh.visible = false;
+        if (this.themeGroup) this.themeGroup.visible = false;
+        if (this.mrDimMesh) this.mrDimMesh.visible = false;
+        return;
+      }
       const dim = clampNumber(Number(this.settings.roomDim), 0, 100, DEFAULT_SETTINGS.roomDim) / 100;
       const mrActive = this.xrSessionMode === "immersive-ar";
       const theme = this.currentTheme();
@@ -2292,14 +2397,15 @@
       }
       this.videoMesh.scale.set(this.settings.panelWidth, this.settings.panelHeight, 1);
       this.videoMesh.position.set(0, 0, 0);
+      const lite = this.theaterMode === "lite";
       if (this.screenGroup) {
-        this.screenGroup.position.set(this.settings.panelX, this.settings.panelY, -this.settings.distance);
+        this.screenGroup.position.set(lite ? 0 : this.settings.panelX, lite ? 0 : this.settings.panelY, -this.settings.distance);
         this.screenGroup.rotation.set(0, 0, 0);
       }
       if (this.screenSurfaceGroup) {
         this.screenSurfaceGroup.rotation.set(
-          THREE.MathUtils.degToRad(this.settings.panelPitch),
-          THREE.MathUtils.degToRad(this.settings.panelYaw),
+          THREE.MathUtils.degToRad(lite ? 0 : this.settings.panelPitch),
+          THREE.MathUtils.degToRad(lite ? 0 : this.settings.panelYaw),
           0,
         );
       }
@@ -2327,10 +2433,12 @@
     }
 
     videoEyeForCamera(camera) {
-      if (!this.xrSession || !camera) return this.settings.eye;
+      if (!camera) return this.settings.eye;
       const viewport = camera.viewport;
       if (viewport && Number(viewport.x || 0) > 0) return "right";
       if (typeof camera.name === "string" && camera.name.toLowerCase().includes("right")) return "right";
+      if (typeof camera.name === "string" && camera.name.toLowerCase().includes("left")) return "left";
+      if (!this.xrSession && this.theaterMode !== "lite") return this.settings.eye;
       return "left";
     }
 
@@ -3196,10 +3304,14 @@
       const width = Math.max(1, Math.floor(rect.width));
       const height = Math.max(1, Math.floor(rect.height));
       this.renderer.setSize(width, height, false);
-      this.camera.aspect = width / height;
+      this.camera.aspect = this.theaterMode === "lite" ? Math.max(1, width / 2) / height : width / height;
       if (!this.xrSession) {
-        const desktopConfig = isPlainObject(this.currentTheme().desktop) ? this.currentTheme().desktop : {};
-        this.camera.fov = clampNumber(Number(desktopConfig.fov), 45, 90, 60);
+        if (this.theaterMode === "lite") {
+          this.camera.fov = 60;
+        } else {
+          const desktopConfig = isPlainObject(this.currentTheme().desktop) ? this.currentTheme().desktop : {};
+          this.camera.fov = clampNumber(Number(desktopConfig.fov), 45, 90, 60);
+        }
       }
       this.camera.updateProjectionMatrix();
     }
@@ -3225,8 +3337,69 @@
       } catch (error) {
         this.lastRenderError = error;
       }
-      this.renderer.render(this.scene, this.camera);
+      if (this.theaterMode === "lite" && !this.xrSession) {
+        this.renderLiteStereoFrame();
+      } else {
+        this.renderer.render(this.scene, this.camera);
+      }
       this.updateRenderFallback(now);
+    }
+
+    renderLiteStereoFrame() {
+      if (!this.renderer || !this.scene || !this.camera) return;
+      this.ensureLiteStereoCameras();
+      const size = this.renderer.getSize(new THREE.Vector2());
+      const width = Math.max(2, Math.floor(size.x));
+      const height = Math.max(1, Math.floor(size.y));
+      const halfWidth = Math.max(1, Math.floor(width / 2));
+      const rightWidth = Math.max(1, width - halfWidth);
+      const previousViewport = this.renderer.getViewport(new THREE.Vector4());
+      const previousScissor = this.renderer.getScissor(new THREE.Vector4());
+      const previousScissorTest = this.renderer.getScissorTest();
+      const previousXrEnabled = this.renderer.xr.enabled;
+      try {
+        this.renderer.xr.enabled = false;
+        this.renderer.setScissorTest(true);
+        this.configureLiteEyeCamera(this.liteLeftCamera, -0.032, halfWidth / height);
+        this.renderer.setViewport(0, 0, halfWidth, height);
+        this.renderer.setScissor(0, 0, halfWidth, height);
+        this.renderer.render(this.scene, this.liteLeftCamera);
+
+        this.configureLiteEyeCamera(this.liteRightCamera, 0.032, rightWidth / height);
+        this.renderer.setViewport(halfWidth, 0, rightWidth, height);
+        this.renderer.setScissor(halfWidth, 0, rightWidth, height);
+        this.renderer.render(this.scene, this.liteRightCamera);
+      } finally {
+        this.renderer.setViewport(previousViewport);
+        this.renderer.setScissor(previousScissor);
+        this.renderer.setScissorTest(previousScissorTest);
+        this.renderer.xr.enabled = previousXrEnabled;
+      }
+    }
+
+    ensureLiteStereoCameras() {
+      if (!this.liteLeftCamera) {
+        this.liteLeftCamera = new THREE.PerspectiveCamera(60, 1, 0.1, 100);
+        this.liteLeftCamera.name = "xr-lite-left-eye";
+        this.liteLeftCamera.rotation.order = "YXZ";
+      }
+      if (!this.liteRightCamera) {
+        this.liteRightCamera = new THREE.PerspectiveCamera(60, 1, 0.1, 100);
+        this.liteRightCamera.name = "xr-lite-right-eye";
+        this.liteRightCamera.rotation.order = "YXZ";
+      }
+    }
+
+    configureLiteEyeCamera(camera, eyeOffset, aspect) {
+      if (!camera) return;
+      camera.fov = this.camera?.fov || 60;
+      camera.aspect = Math.max(0.1, aspect || 1);
+      camera.near = this.camera?.near || 0.1;
+      camera.far = this.camera?.far || 100;
+      camera.position.set(eyeOffset, 0, 0);
+      camera.rotation.set(0, 0, 0);
+      camera.updateProjectionMatrix();
+      camera.updateMatrixWorld(true);
     }
 
     async enterWebXr() {

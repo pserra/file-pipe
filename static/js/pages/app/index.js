@@ -3019,6 +3019,20 @@ document.addEventListener("alpine:init", () => {
       this.hostXrPlayer.openTheater();
     },
 
+    openHostXrLite() {
+      const video = document.getElementById("host-video-player");
+      if (!video || !this.playerUrl) {
+        this.error = "Load a video before opening XR Lite.";
+        return;
+      }
+      this.attachHostXrPlayer(video);
+      if (!this.hostXrPlayer?.openLiteTheater) {
+        this.error = "XR Lite is unavailable in this browser.";
+        return;
+      }
+      this.hostXrPlayer.openLiteTheater();
+    },
+
     async toggleHostSpatialAudio(enabled) {
       const nextEnabled = Boolean(enabled);
       const video = document.getElementById("host-video-player");

@@ -1103,6 +1103,10 @@ progress {
   white-space: nowrap;
 }
 
+[data-lite-only] {
+  display: none !important;
+}
+
 .fp-three-xr-overlay {
   background: #05070a;
   color: #f8fafc;
@@ -1162,6 +1166,59 @@ progress {
   min-height: 0;
   overflow: hidden;
   position: relative;
+}
+
+.fp-three-xr-lite-mode {
+  background: #000000;
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.fp-three-xr-lite-mode [data-lite-only] {
+  display: inline-flex !important;
+}
+
+.fp-three-xr-lite-mode [data-lite-hidden] {
+  display: none !important;
+}
+
+.fp-three-xr-lite-mode .fp-three-xr-topbar {
+  left: 0;
+  position: absolute;
+  right: 0;
+  top: 0;
+  z-index: 5;
+}
+
+.fp-three-xr-lite-mode .fp-three-xr-main {
+  grid-template-columns: minmax(0, 1fr);
+  padding: 0;
+}
+
+.fp-three-xr-lite-mode .fp-three-xr-stage-panel {
+  border: 0;
+  border-radius: 0;
+  border-color: rgba(255, 255, 255, 0.2);
+  min-height: 100vh;
+}
+
+.fp-three-xr-lite-mode .fp-three-xr-canvas {
+  height: 100vh;
+  min-height: 100vh;
+}
+
+.fp-three-xr-lite-mode .fp-three-xr-tools {
+  display: none;
+}
+
+.fp-three-xr-lite-mode.fp-three-xr-lite-tools-open .fp-three-xr-tools {
+  display: grid;
+  max-height: calc(100vh - 8rem);
+  overflow: auto;
+  position: absolute;
+  right: 1rem;
+  top: 4.25rem;
+  width: min(24rem, calc(100vw - 2rem));
+  z-index: 4;
 }
 
 .fp-three-xr-canvas {
