@@ -15,7 +15,7 @@
   const DEFAULT_MODEL_URLS = {
     "midas-small-onnx": [
       "/static/models/depth/midas-small.onnx",
-      "https://huggingface.co/unity/inference-engine-midas/resolve/main/model-small_opset19.onnx",
+      "https://huggingface.co/unity/inference-engine-midas/resolve/16c4ad4a24c789e82afa983e549cf07846327b1b/model-small_opset19.onnx",
     ],
     "fastdepth-mobilenet-onnx": [
       "/static/models/depth/fastdepth-mobilenet.onnx",
@@ -604,7 +604,8 @@
           float depthValue = depthReady > 0.5
             ? texture2D(depthMap, eyeUv).r
             : luminanceDepth(eyeUv);
-          float parallax = (depthValue - convergence) * depthStrength * 0.075;
+          float fallbackScale = mix(0.18, 1.0, depthReady);
+          float parallax = (depthValue - convergence) * depthStrength * 0.075 * fallbackScale;
           vec2 sourceUv = clamp(vec2(eyeUv.x + signValue * parallax, eyeUv.y), vec2(0.001), vec2(0.999));
           vec3 center = texture2D(videoMap, sourceUv).rgb;
           vec3 edgeA = texture2D(videoMap, clamp(sourceUv + vec2(signValue * 0.0025, 0.0), vec2(0.001), vec2(0.999))).rgb;
