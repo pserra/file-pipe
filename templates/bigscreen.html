@@ -9,8 +9,8 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='styles.css', v='31') }}">
     <script defer src="{{ local_static_or_cdn('vendor/three/three.min.js', 'https://cdn.jsdelivr.net/npm/three@0.160.1/build/three.min.js') }}"></script>
     <script defer src="{{ local_static_or_cdn('vendor/onnxruntime-web/ort.webgpu.min.js', 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.26.0/dist/ort.webgpu.min.js') }}"></script>
-    <script defer src="{{ url_for('static', filename='js/player/local-depth3d.js', v='1') }}"></script>
-    <script defer src="{{ url_for('static', filename='js/player/xr-player.js', v='46') }}"></script>
+    <script defer src="{{ url_for('static', filename='js/player/local-depth3d.js', v='2') }}"></script>
+    <script defer src="{{ url_for('static', filename='js/player/xr-player.js', v='48') }}"></script>
     <script defer src="{{ url_for('static', filename='js/player/playback-progress.js', v='2') }}"></script>
     <script>window.FILE_PIPE_P2P_CONFIG = {{ p2p_config()|tojson }};</script>
     <script defer src="{{ url_for('static', filename='js/pages/bigscreen/helpers.js', v='2') }}"></script>

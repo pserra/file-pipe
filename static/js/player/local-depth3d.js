@@ -632,7 +632,7 @@
         }
       `,
       side: THREE.DoubleSide,
-      transparent: false,
+      transparent: true,
       depthWrite: false,
       depthTest: true,
     });

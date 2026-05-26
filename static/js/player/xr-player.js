@@ -50,6 +50,9 @@
   const XR_THUMBSTICK_SEEK_DEADZONE = 0.72;
   const XR_THUMBSTICK_SEEK_RESET_ZONE = 0.32;
   const XR_THUMBSTICK_SEEK_REPEAT_MS = 650;
+  const MR_DIM_RENDER_ORDER = -10000;
+  const BACKLIGHT_MASK_RENDER_ORDER = -30;
+  const BACKLIGHT_RENDER_ORDER = -20;
 
   class FilePipeThreeXrPlayer {
     constructor(video, options = {}) {
@@ -2382,11 +2385,11 @@
         depthWrite: false,
         side: THREE.DoubleSide,
       });
-      this.mrDimMesh = new THREE.Mesh(new THREE.PlaneGeometry(12, 8), material);
+      this.mrDimMesh = new THREE.Mesh(new THREE.PlaneGeometry(240, 160), material);
       this.mrDimMesh.name = "mr-room-dim-overlay";
       this.mrDimMesh.visible = false;
-      this.mrDimMesh.renderOrder = -100;
-      this.mrDimMesh.position.set(0, 0, -2);
+      this.mrDimMesh.renderOrder = MR_DIM_RENDER_ORDER;
+      this.mrDimMesh.position.set(0, 0, -80);
       this.camera.add(this.mrDimMesh);
     }
 
@@ -2758,10 +2761,11 @@
       this.backlightSegments = segments.map((segment) => {
         const material = createBacklightStaticMaterial(this.backlightTexture);
         const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1, 3, 3), material);
-        mesh.renderOrder = -3;
+        mesh.renderOrder = BACKLIGHT_RENDER_ORDER;
         mesh.userData.backlightSegment = segment;
         mesh.userData.staticMaterial = material;
         mesh.userData.videoMaterial = null;
+        mesh.onBeforeRender = (_renderer, _scene, camera) => this.updateBacklightSegmentRenderState(mesh, camera);
         this.backlightGroup.add(mesh);
         return mesh;
       });
@@ -2775,7 +2779,7 @@
           side: THREE.DoubleSide,
         }),
       );
-      this.backlightMaskMesh.renderOrder = -4;
+      this.backlightMaskMesh.renderOrder = BACKLIGHT_MASK_RENDER_ORDER;
       this.backlightMaskMesh.position.set(0, 0, 0.02);
       this.backlightGroup.add(this.backlightMaskMesh);
       this.backlightSampleCanvas = document.createElement("canvas");
@@ -2880,7 +2884,7 @@
           const x = -width / 2 + (segment.index + 0.5) * (width / segment.count);
           const y = segment.side === "top" ? height / 2 + rearOffset : -height / 2 - rearOffset;
           segmentMesh.position.set(x, y, 0);
-          segmentMesh.scale.set(segmentWidth, 2.2, 1);
+          segmentMesh.scale.set(segmentWidth, 2.64, 1);
         } else {
           const segmentHeight = (height / segment.count) * 3.35;
           const x = segment.side === "left" ? -width / 2 - rearOffset : width / 2 + rearOffset;
@@ -2948,6 +2952,13 @@
       material.uniforms.sampleRegion.value.set(region.x0, region.y0, region.x1, region.y1);
     }
 
+    updateBacklightSegmentRenderState(segmentMesh, camera) {
+      const material = segmentMesh?.material;
+      if (!material?.uniforms?.sampleRegion) return;
+      const region = this.videoSampleRegionForSegment(segmentMesh.userData.backlightSegment || {}, camera);
+      material.uniforms.sampleRegion.value.set(region.x0, region.y0, region.x1, region.y1);
+    }
+
     useBacklightStaticMaterial(segmentMesh) {
       let material = segmentMesh.userData.staticMaterial;
       if (!material) {
@@ -2968,8 +2979,8 @@
       return material;
     }
 
-    videoSampleRegionForSegment(segment) {
-      const window = this.displayedVideoSampleWindow();
+    videoSampleRegionForSegment(segment, camera = null) {
+      const window = this.displayedVideoSampleWindow(camera);
       const start = Number(segment.index || 0) / Math.max(1, Number(segment.count || 1));
       const end = (Number(segment.index || 0) + 1) / Math.max(1, Number(segment.count || 1));
       const edgeDepth = 0.34;
@@ -3345,9 +3356,9 @@
       context.fillText("2D preview fallback", panelX + 12, panelY + panelHeight + 24);
     }
 
-    displayedVideoSampleWindow() {
+    displayedVideoSampleWindow(camera = null) {
       if (this.settings.layout === "half-sbs" || this.settings.layout === "full-sbs") {
-        return this.settings.eye === "right"
+        return this.videoEyeForCamera(camera) === "right"
           ? { x0: 0.5, x1: 1, y0: 0, y1: 1 }
           : { x0: 0, x1: 0.5, y0: 0, y1: 1 };
       }
@@ -4063,7 +4074,7 @@
       transparent: true,
       opacity: 0.24,
       depthWrite: false,
-      depthTest: false,
+      depthTest: true,
       blending: THREE.AdditiveBlending,
       side: THREE.DoubleSide,
     });
@@ -4122,7 +4133,7 @@
       `,
       transparent: true,
       depthWrite: false,
-      depthTest: false,
+      depthTest: true,
       blending: THREE.AdditiveBlending,
       side: THREE.DoubleSide,
     });
