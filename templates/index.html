@@ -15,7 +15,7 @@
     <script defer src="{{ url_for('static', filename='js/player/playback-progress.js', v='2') }}"></script>
     <script>window.FILE_PIPE_P2P_CONFIG = {{ p2p_config()|tojson }};</script>
     <script defer src="{{ url_for('static', filename='js/pages/app/helpers.js', v='1') }}"></script>
-    <script defer src="{{ url_for('static', filename='js/pages/app/index.js', v='79') }}"></script>
+    <script defer src="{{ url_for('static', filename='js/pages/app/index.js', v='80') }}"></script>
     <script defer src="{{ local_static_or_cdn('vendor/alpinejs/cdn.min.js', 'https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js') }}"></script>
     <script defer src="{{ local_static_or_cdn('vendor/bootstrap/bootstrap.bundle.min.js', 'https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js') }}"></script>
   </head>
@@ -641,6 +641,10 @@
                       <span x-text="playerSettingsSummary()"></span>
                       <i class="bi bi-pencil-square"></i>
                     </button>
+                    <button class="btn btn-sm" type="button" @click="setHostVideoMode(hostDisplayingStereo3dStream() ? 'normal' : 'hls3d')" :class="hostDisplayingStereo3dStream() ? 'btn-success' : 'btn-outline-primary'" :disabled="!canPlayHostStereo3dStream() || playerLoading" x-show="canPlayHostStereo3dStream()">
+                      <i class="bi bi-badge-3d"></i>
+                      <span x-text="hostStereo3dActionLabel()"></span>
+                    </button>
                     <button class="btn btn-outline-secondary btn-sm" type="button" @click="openSourceInfoModal()" :disabled="!playerSource && !playerRoomMetadata" title="More information">
                       <i class="bi bi-info-circle"></i>
                     </button>
@@ -695,6 +699,20 @@
                   <template x-if="playerUrl">
                     <div class="xr-video-window">
                       <video id="host-video-player" class="w-100 rounded border bg-black" :src="playerType === 'application/vnd.apple.mpegurl' ? '' : playerUrl" crossorigin="anonymous" :controls="!hostProgressivePlaybackLocked()" preload="auto" playsinline @loadedmetadata="prepareHostPlayerMedia()" @playing="setTimeout(() => { inspectHostPlayerAudio(); updateHostLinearPlaybackTime(); }, 1000)" @play="handleHostPlayerPlay()" @pause="handleHostPlayerPause()" @seeking="handleHostPlayerSeeking()" @seeked="handleHostPlayerSeeked()" @ended="watchListAutoAdvance && playNextWatchListItem()" @timeupdate.throttle.500ms="updateHostLinearPlaybackTime()" @timeupdate.throttle.1000ms="broadcastPlayerState('time')"></video>
+                      <template x-if="canPlayHostStereo3dStream()">
+                        <div class="d-flex flex-wrap align-items-center gap-2 mt-3">
+                          <span class="badge" :class="hostDisplayingStereo3dStream() ? 'text-bg-success' : 'text-bg-secondary'">
+                            <span x-text="`Host display: ${hostDisplayLabel()}`"></span>
+                          </span>
+                          <button class="btn btn-outline-primary btn-sm" type="button" @click="setHostVideoMode('hls3d')" :disabled="playerLoading || hostDisplayingStereo3dStream()">
+                            <i class="bi bi-badge-3d"></i>
+                            <span x-text="`Show ${stereo3dLayoutLabel()} 3D in player`"></span>
+                          </button>
+                          <button class="btn btn-outline-secondary btn-sm" type="button" @click="setHostVideoMode('normal')" :disabled="playerLoading || !hostDisplayingStereo3dStream()">
+                            <i class="bi bi-aspect-ratio"></i> Show normal
+                          </button>
+                        </div>
+                      </template>
                       <template x-if="hostProgressivePlaybackLocked()">
                         <div class="d-flex flex-wrap align-items-center gap-2 mt-3">
                           <button class="btn btn-primary" type="button" @click="toggleHostLinearPlayback()">
@@ -858,7 +876,15 @@
                     <div class="alert alert-secondary mt-3 mb-0" x-text="playerAudioOutputStatus"></div>
                   </template>
                   <template x-if="playerRoom3dStatus">
-                    <div class="alert alert-success mt-3 mb-0" x-text="playerRoom3dStatus"></div>
+                    <div class="alert alert-success mt-3 mb-0">
+                      <div class="d-flex flex-wrap align-items-center justify-content-between gap-2">
+                        <span x-text="playerRoom3dStatus"></span>
+                        <button class="btn btn-sm" type="button" @click="setHostVideoMode(hostDisplayingStereo3dStream() ? 'normal' : 'hls3d')" :class="hostDisplayingStereo3dStream() ? 'btn-outline-light' : 'btn-light'" :disabled="!canPlayHostStereo3dStream() || playerLoading">
+                          <i class="bi bi-badge-3d"></i>
+                          <span x-text="hostStereo3dActionLabel()"></span>
+                        </button>
+                      </div>
+                    </div>
                   </template>
                   <template x-if="playerRoom3dError">
                     <div class="alert alert-warning mt-3 mb-0" x-text="playerRoom3dError"></div>

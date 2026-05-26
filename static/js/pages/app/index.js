@@ -1883,12 +1883,31 @@ document.addEventListener("alpine:init", () => {
       return Boolean(this.canCreateLiveWatchRoom() && mediaInfoStereo3dCandidate(mediaInfo));
     },
 
+    hostDisplayingStereo3dStream() {
+      return Boolean(this.playerSource && isStereoVideoProfile(this.playerSource.videoProfile));
+    },
+
+    hostDisplayLabel() {
+      if (this.hostDisplayingStereo3dStream()) {
+        return `${videoLayoutLabel(this.playerSource.videoLayout || this.stereo3dLayout)} 3D`;
+      }
+      return "Normal";
+    },
+
+    hostStereo3dActionLabel() {
+      return this.hostDisplayingStereo3dStream()
+        ? "Show normal stream"
+        : `Show ${this.stereo3dLayoutLabel()} 3D`;
+    },
+
     async setHostVideoMode(mode) {
       const nextMode = mode === "hls3d" ? "hls3d" : "normal";
       const changed = this.hostVideoMode !== nextMode;
       this.hostVideoMode = nextMode;
       localStorage.setItem("filePipeHostVideoMode", this.hostVideoMode);
-      if (!changed || !this.playerSource || this.playerLoading) return;
+      if (!this.playerSource || this.playerLoading) return;
+      if (!changed && nextMode === "hls3d" && this.hostDisplayingStereo3dStream()) return;
+      if (!changed && nextMode === "normal" && !this.hostDisplayingStereo3dStream()) return;
       if (nextMode === "hls3d") {
         await this.launchHostStereo3dStream();
       } else {
