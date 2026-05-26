@@ -1,5 +1,6 @@
 import datetime as dt
 import json
+import re
 import socket
 import shutil
 import subprocess
@@ -137,6 +138,18 @@ def processor_label(processor_id: str) -> str:
     return processor_id
 
 
+def cache_token_decimal(name: str, prefix: str) -> str:
+    match = re.search(rf"(?:^|-){re.escape(prefix)}-([0-9]+)(?:-|$)", name)
+    if not match:
+        return ""
+    token = match.group(1)
+    if token == "1":
+        return "1"
+    if len(token) == 1:
+        return f"0.{token}"
+    return f"{int(token) / (10 ** (len(token) - 1)):g}"
+
+
 def cache_entry_details(path: Path) -> Dict[str, object]:
     name = path.name
     lower_name = name.lower()
@@ -180,6 +193,21 @@ def cache_entry_details(path: Path) -> Dict[str, object]:
                 if candidate and candidate in lower_name:
                     processor = candidate
                     break
+            output_scale = cache_token_decimal(lower_name, "scale")
+            inference_scale = cache_token_decimal(lower_name, "infer")
+            crop_percent = cache_token_decimal(lower_name, "crop")
+            if output_scale:
+                profile_label = f"{profile_label} / {output_scale}x output"
+            processor_suffix = []
+            if processor != local_connector.TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT and inference_scale:
+                processor_suffix.append(f"{inference_scale}x depth")
+            if crop_percent:
+                processor_suffix.append(f"{crop_percent}% crop")
+            processor_display = processor_label(processor)
+            if processor_suffix:
+                processor_display = f"{processor_display} ({', '.join(processor_suffix)})"
+        else:
+            processor_display = ""
         return {
             "kind": "HLS segments",
             "category": category,
@@ -187,7 +215,7 @@ def cache_entry_details(path: Path) -> Dict[str, object]:
             "profileLabel": profile_label,
             "layout": layout,
             "processor": processor,
-            "processorLabel": processor_label(processor) if processor else "",
+            "processorLabel": processor_display,
             "segmentCount": segment_count,
             "lastError": last_error,
             "lastErrorAt": last_error_at,
@@ -487,8 +515,15 @@ def create_admin_blueprint(security, runtime):
                         local_connector.TRANSCODE_VIDEO_PROFILE_STEREO_FULL_SBS: "full-sbs",
                     },
                     "defaultProcessor": local_connector.normalize_stereo_processor(local_connector.HLS_STEREO3D_PROCESSOR),
+                    "defaultRealtimeProcessor": local_connector.normalize_stereo_processor(local_connector.HLS_STEREO3D_REALTIME_PROCESSOR),
+                    "defaultPrebuildProcessor": local_connector.normalize_stereo_processor(local_connector.HLS_STEREO3D_PREBUILD_PROCESSOR),
                     "processors": local_connector.stereo_processor_options(),
                     "depthPercent": local_connector.hls_stereo3d_depth_fraction() * 100,
+                    "inferenceScales": ["1", "0.75", "0.5", "0.33", "0.25"],
+                    "defaultInferenceScale": local_connector.normalize_stereo3d_inference_scale(local_connector.HLS_STEREO3D_INFERENCE_SCALE),
+                    "defaultInferenceCropPercent": local_connector.normalize_stereo3d_inference_crop_percent(local_connector.HLS_STEREO3D_INFERENCE_CROP_PERCENT),
+                    "defaultPrebuildInferenceScale": local_connector.normalize_stereo3d_inference_scale(local_connector.HLS_STEREO3D_PREBUILD_INFERENCE_SCALE),
+                    "defaultPrebuildInferenceCropPercent": local_connector.normalize_stereo3d_inference_crop_percent(local_connector.HLS_STEREO3D_PREBUILD_INFERENCE_CROP_PERCENT),
                 },
                 "cache": cache_payload(),
                 "connections": {
@@ -636,6 +671,13 @@ def create_admin_blueprint(security, runtime):
         if cache_changed:
             local_connector.TRANSCODE_CACHE_DIR = Path(updated["cacheDir"]).expanduser()
         local_connector.TRANSCODE_CACHE_MAX_BYTES = int(updated.get("maxCacheBytes") or 0)
+        local_connector.HLS_STEREO3D_REALTIME_PROCESSOR = str(updated.get("realtimeStereo3dProcessor") or local_connector.HLS_STEREO3D_REALTIME_PROCESSOR)
+        local_connector.HLS_STEREO3D_PROCESSOR = local_connector.HLS_STEREO3D_REALTIME_PROCESSOR
+        local_connector.HLS_STEREO3D_PREBUILD_PROCESSOR = str(updated.get("prebuildStereo3dProcessor") or local_connector.HLS_STEREO3D_PREBUILD_PROCESSOR)
+        local_connector.HLS_STEREO3D_INFERENCE_SCALE = str(updated.get("realtimeStereo3dInferenceScale") or local_connector.HLS_STEREO3D_INFERENCE_SCALE)
+        local_connector.HLS_STEREO3D_INFERENCE_CROP_PERCENT = str(updated.get("realtimeStereo3dInferenceCropPercent") or 0)
+        local_connector.HLS_STEREO3D_PREBUILD_INFERENCE_SCALE = str(updated.get("prebuildStereo3dInferenceScale") or local_connector.HLS_STEREO3D_PREBUILD_INFERENCE_SCALE)
+        local_connector.HLS_STEREO3D_PREBUILD_INFERENCE_CROP_PERCENT = str(updated.get("prebuildStereo3dInferenceCropPercent") or 0)
         prune_result = local_connector.enforce_transcode_cache_limit()
         if network_changed:
             runtime.mark_restart_required()
@@ -1594,6 +1636,60 @@ ADMIN_HTML = r"""<!doctype html>
             </div>
           </details>
 
+          <details class="collapsible" open>
+            <summary>
+              <span>
+                <span class="summary-title">3D generation defaults</span>
+                <span class="summary-copy">Depth processor and internal inference size for real-time and prepared 3D streams.</span>
+              </span>
+            </summary>
+            <div class="collapsible-body form-stack">
+              <div class="form-grid">
+                <label>Real-time processor
+                  <select id="realtime-stereo-processor"></select>
+                  <span class="field-hint">Used for generated 3D streams requested during playback.</span>
+                </label>
+                <label>Real-time inference
+                  <select id="realtime-inference-scale">
+                    <option value="1">1x internal</option>
+                    <option value="0.75">0.75x internal</option>
+                    <option value="0.5">0.5x internal</option>
+                    <option value="0.33">0.33x internal</option>
+                    <option value="0.25">0.25x internal</option>
+                  </select>
+                  <span class="field-hint">Default is Small at 0.5x while output stays full resolution unless changed in Player.</span>
+                </label>
+                <label>Prepared-cache processor
+                  <select id="prebuild-stereo-processor"></select>
+                  <span class="field-hint">Used by Convert to 3D for later when no explicit processor is requested.</span>
+                </label>
+                <label>Prepared-cache inference
+                  <select id="prebuild-inference-scale">
+                    <option value="1">1x internal</option>
+                    <option value="0.75">0.75x internal</option>
+                    <option value="0.5">0.5x internal</option>
+                    <option value="0.33">0.33x internal</option>
+                    <option value="0.25">0.25x internal</option>
+                  </select>
+                  <span class="field-hint">Default is Base at 0.75x for better prebuilt depth.</span>
+                </label>
+                <label>Real-time side crop
+                  <div class="path-picker">
+                    <input id="realtime-inference-crop" type="number" min="0" max="25" step="0.5">
+                    <span class="input-suffix">%</span>
+                  </div>
+                </label>
+                <label>Prepared-cache side crop
+                  <div class="path-picker">
+                    <input id="prebuild-inference-crop" type="number" min="0" max="25" step="0.5">
+                    <span class="input-suffix">%</span>
+                  </div>
+                  <span class="field-hint">Default trims 7.5% from each side for depth inference, then outputs the full frame.</span>
+                </label>
+              </div>
+            </div>
+          </details>
+
           <details class="collapsible">
             <summary>
               <span>
@@ -1772,6 +1868,16 @@ ADMIN_HTML = r"""<!doctype html>
         document.getElementById(id).checked = Boolean(value);
       }
 
+      function setSelectOptions(id, options, selectedValue) {
+        const select = document.getElementById(id);
+        if (!select) return;
+        const current = selectedValue || select.value;
+        select.innerHTML = options.map((option) => `
+          <option value="${escapeHtml(option.id)}">${escapeHtml(option.label || option.id)}</option>
+        `).join("");
+        if (current) select.value = current;
+      }
+
       function useLanHost() {
         if (!detectedLanIp) {
           log("No LAN IP was detected.");
@@ -1798,6 +1904,12 @@ ADMIN_HTML = r"""<!doctype html>
         setValue("cache-dir", config.cacheDir);
         setValue("max-cache-gb", config.maxCacheBytes ? (Number(config.maxCacheBytes) / (1024 ** 3)).toFixed(1).replace(/\.0$/, "") : "0");
         setValue("host-name", config.hostName);
+        setValue("realtime-stereo-processor", config.realtimeStereo3dProcessor);
+        setValue("realtime-inference-scale", config.realtimeStereo3dInferenceScale);
+        setValue("realtime-inference-crop", config.realtimeStereo3dInferenceCropPercent);
+        setValue("prebuild-stereo-processor", config.prebuildStereo3dProcessor);
+        setValue("prebuild-inference-scale", config.prebuildStereo3dInferenceScale);
+        setValue("prebuild-inference-crop", config.prebuildStereo3dInferenceCropPercent);
         setChecked("use-tls", config.useTls);
         setChecked("service-enabled", config.serviceEnabled);
         setChecked("open-browser", config.openBrowser);
@@ -1932,12 +2044,16 @@ ADMIN_HTML = r"""<!doctype html>
 
       function renderStereo3d(stereo3d) {
         const processors = stereo3d?.processors || [];
-        const defaultProcessor = stereo3d?.defaultProcessor || "";
+        const defaultProcessor = stereo3d?.defaultRealtimeProcessor || stereo3d?.defaultProcessor || "";
+        const prebuildProcessor = stereo3d?.defaultPrebuildProcessor || "";
         const selected = processors.find((processor) => processor.id === defaultProcessor);
+        const prepared = processors.find((processor) => processor.id === prebuildProcessor);
+        setSelectOptions("realtime-stereo-processor", processors, defaultProcessor);
+        setSelectOptions("prebuild-stereo-processor", processors.filter((processor) => !processor.browserOnly), prebuildProcessor);
         document.getElementById("stereo-state").textContent = "Half + Full SBS";
         document.getElementById("stereo-processor-state").textContent = selected?.label || defaultProcessor || "Fast ffmpeg shift";
         document.getElementById("stereo-default-processor").textContent = selected?.label || defaultProcessor || "Fast ffmpeg shift";
-        document.getElementById("stereo-depth").textContent = `${Number(stereo3d?.depthPercent || 0).toFixed(1)}% stereo depth`;
+        document.getElementById("stereo-depth").textContent = `Real-time ${stereo3d?.defaultInferenceScale || "0.5"}x, prepared ${stereo3d?.defaultPrebuildInferenceScale || "0.75"}x${prepared?.label ? ` via ${prepared.label}` : ""}`;
         const list = document.getElementById("stereo-processor-list");
         if (!processors.length) {
           list.innerHTML = '<div class="muted">No processor metadata available.</div>';
@@ -2008,6 +2124,12 @@ ADMIN_HTML = r"""<!doctype html>
           serviceEnabled: document.getElementById("service-enabled").checked,
           openBrowser: document.getElementById("open-browser").checked,
           pinnedWatchRoom: document.getElementById("pinned-watch-room").checked,
+          realtimeStereo3dProcessor: document.getElementById("realtime-stereo-processor").value,
+          realtimeStereo3dInferenceScale: document.getElementById("realtime-inference-scale").value,
+          realtimeStereo3dInferenceCropPercent: Number(document.getElementById("realtime-inference-crop").value || 0),
+          prebuildStereo3dProcessor: document.getElementById("prebuild-stereo-processor").value,
+          prebuildStereo3dInferenceScale: document.getElementById("prebuild-inference-scale").value,
+          prebuildStereo3dInferenceCropPercent: Number(document.getElementById("prebuild-inference-crop").value || 0),
           allowInsecurePassword: document.getElementById("allow-insecure-password").checked,
           clearPassword: document.getElementById("clear-password").checked,
         };

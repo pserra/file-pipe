@@ -84,12 +84,22 @@ def even(value):
     return max(2, int(value) - (int(value) % 2))
 
 
+def bounded_float(value, default, minimum=0.1, maximum=1.0):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(number):
+        return default
+    return max(minimum, min(maximum, number))
+
+
 def target_geometry(stream, max_width, fps, resolution_scale):
     width = int(stream.get("width") or 0)
     height = int(stream.get("height") or 0)
     if width <= 0 or height <= 0:
         raise RuntimeError("ffprobe returned invalid video dimensions.")
-    scale = min(1.0, max(0.1, float(resolution_scale or 0.0)))
+    scale = bounded_float(resolution_scale, 1.0)
     if not resolution_scale and max_width:
         scale = min(scale, float(max_width) / float(width))
     target_width = even(width * scale)
@@ -213,6 +223,50 @@ def normalize_depth(depth):
         return np.zeros(depth.shape, dtype=np.float32)
     normalized = (depth - low) / (high - low)
     return np.clip(normalized, 0.0, 1.0).astype(np.float32)
+
+
+def resize_rgb(frame, width, height):
+    if frame.shape[1] == width and frame.shape[0] == height:
+        return frame
+    image = Image.fromarray(frame)
+    return np.asarray(image.resize((width, height), Image.Resampling.BICUBIC), dtype=np.uint8)
+
+
+def resize_depth(depth, width, height):
+    depth_image = Image.fromarray(normalize_depth(depth) * 255.0).convert("L")
+    depth_image = depth_image.resize((width, height), Image.Resampling.BICUBIC)
+    return np.asarray(depth_image, dtype=np.float32) / 255.0
+
+
+def inference_frame_geometry(width, height, inference_scale):
+    scale = bounded_float(inference_scale, 0.5)
+    return even(width * scale), even(height * scale)
+
+
+def inference_crop(width, crop_percent):
+    percent = max(0.0, min(25.0, float(crop_percent or 0.0))) / 100.0
+    crop = int(width * percent)
+    if crop <= 0 or crop * 2 >= width - 4:
+        return 0, width
+    return crop, width - crop
+
+
+def predict_depth(estimator, frame, inference_scale=0.5, inference_crop_percent=0.0):
+    height, width = frame.shape[:2]
+    crop_left, crop_right = inference_crop(width, inference_crop_percent)
+    reference = frame[:, crop_left:crop_right]
+    ref_height, ref_width = reference.shape[:2]
+    infer_width, infer_height = inference_frame_geometry(ref_width, ref_height, inference_scale)
+    inference_frame = resize_rgb(reference, infer_width, infer_height)
+    depth = estimator.predict(inference_frame)
+    depth = resize_depth(depth, ref_width, ref_height)
+    if crop_left == 0 and crop_right == width:
+        return depth
+    full_depth = np.empty((height, width), dtype=np.float32)
+    full_depth[:, crop_left:crop_right] = depth
+    full_depth[:, :crop_left] = depth[:, :1]
+    full_depth[:, crop_right:] = depth[:, -1:]
+    return full_depth
 
 
 def make_stereo(frame, depth, layout, depth_percent, invert_depth=False):
@@ -359,7 +413,7 @@ def process_segment(args):
             if not raw:
                 break
             frame = np.frombuffer(raw, dtype=np.uint8).reshape((height, width, 3))
-            depth = estimator.predict(frame)
+            depth = predict_depth(estimator, frame, args.inference_scale, args.inference_crop_percent)
             stereo = make_stereo(frame, depth, args.layout, args.depth_percent, args.invert_depth)
             encoder.stdin.write(stereo.astype(np.uint8).tobytes())
             frames += 1
@@ -389,7 +443,9 @@ def parse_args():
     parser.add_argument("--layout", choices=["half-sbs", "full-sbs"], default="half-sbs")
     parser.add_argument("--video-profile", default="")
     parser.add_argument("--depth-percent", type=float, default=3.5)
-    parser.add_argument("--resolution-scale", type=float, default=float(os.environ.get("FILE_PIPE_DEPTH_RESOLUTION_SCALE", "0.5")))
+    parser.add_argument("--resolution-scale", type=float, default=float(os.environ.get("FILE_PIPE_DEPTH_RESOLUTION_SCALE", "1")))
+    parser.add_argument("--inference-scale", type=float, default=float(os.environ.get("FILE_PIPE_DEPTH_INFERENCE_SCALE", "0.5")))
+    parser.add_argument("--inference-crop-percent", type=float, default=float(os.environ.get("FILE_PIPE_DEPTH_INFERENCE_CROP_PERCENT", "0")))
     parser.add_argument("--max-width", type=int, default=int(os.environ.get("FILE_PIPE_DEPTH_MAX_WIDTH", "960")))
     parser.add_argument("--fps", type=float, default=float(os.environ.get("FILE_PIPE_DEPTH_FPS", "24")))
     parser.add_argument("--preset", default=os.environ.get("FILE_PIPE_DEPTH_X264_PRESET", "veryfast"))

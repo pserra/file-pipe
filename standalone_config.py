@@ -48,6 +48,12 @@ def default_config() -> Dict[str, Any]:
         "allowInsecurePassword": False,
         "cacheDir": str(default_cache_dir()),
         "maxCacheBytes": 0,
+        "realtimeStereo3dProcessor": "depth-anything-v2-small",
+        "realtimeStereo3dInferenceScale": "0.5",
+        "realtimeStereo3dInferenceCropPercent": 0,
+        "prebuildStereo3dProcessor": "depth-anything-v2-base",
+        "prebuildStereo3dInferenceScale": "0.75",
+        "prebuildStereo3dInferenceCropPercent": 7.5,
         "passwordHash": None,
         "hostName": "",
         "pinnedWatchRoom": False,
@@ -110,6 +116,57 @@ def normalize_byte_size(value: Any, default: int = 0) -> int:
     return max(0, int(number * multipliers.get(suffix, 1)))
 
 
+def normalize_stereo3d_processor(value: Any, default: str = "depth-anything-v2-small") -> str:
+    processor = str(value or "").strip().lower().replace("_", "-")
+    aliases = {
+        "": default,
+        "shift": "ffmpeg-shift",
+        "ffmpeg": "ffmpeg-shift",
+        "ffmpeg-shift": "ffmpeg-shift",
+        "depth-anything-small": "depth-anything-v2-small",
+        "da-v2-small": "depth-anything-v2-small",
+        "depth-anything-v2-small": "depth-anything-v2-small",
+        "depth-anything-base": "depth-anything-v2-base",
+        "da-v2-base": "depth-anything-v2-base",
+        "depth-anything-v2-base": "depth-anything-v2-base",
+        "coreml": "coreml-depth-anything-v2-small",
+        "coreml-small": "coreml-depth-anything-v2-small",
+        "apple-coreml": "coreml-depth-anything-v2-small",
+        "coreml-depth-anything-v2-small": "coreml-depth-anything-v2-small",
+        "webgpu": "webgpu-depth-anything-v2-small",
+        "webgpu-small": "webgpu-depth-anything-v2-small",
+        "webgpu-depth-anything-v2-small": "webgpu-depth-anything-v2-small",
+    }
+    return aliases.get(processor, default)
+
+
+def normalize_scale(value: Any, default: str = "0.5") -> str:
+    text = str(value or "").strip().lower().replace("x", "").replace("%", "")
+    if not text:
+        text = default
+    try:
+        number = float(text)
+    except ValueError:
+        number = float(default)
+    if number > 1:
+        number /= 100.0
+    number = max(0.1, min(1.0, number))
+    if abs(number - 1.0) < 0.001:
+        return "1"
+    return f"{round(number, 2):.2f}".rstrip("0").rstrip(".")
+
+
+def normalize_percent(value: Any, default: float = 0.0) -> float:
+    if value is None or value == "":
+        number = default
+    else:
+        try:
+            number = float(str(value).strip().replace("%", ""))
+        except ValueError:
+            number = default
+    return round(max(0.0, min(25.0, number)), 2)
+
+
 def normalize_config(raw: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     raw = raw or {}
     defaults = default_config()
@@ -126,6 +183,30 @@ def normalize_config(raw: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     )
     config["cacheDir"] = normalize_path(raw.get("cacheDir"), default_cache_dir())
     config["maxCacheBytes"] = normalize_byte_size(raw.get("maxCacheBytes", raw.get("maxCacheSize")), defaults["maxCacheBytes"])
+    config["realtimeStereo3dProcessor"] = normalize_stereo3d_processor(
+        raw.get("realtimeStereo3dProcessor", raw.get("stereo3dProcessor")),
+        defaults["realtimeStereo3dProcessor"],
+    )
+    config["realtimeStereo3dInferenceScale"] = normalize_scale(
+        raw.get("realtimeStereo3dInferenceScale", raw.get("stereo3dInferenceScale")),
+        defaults["realtimeStereo3dInferenceScale"],
+    )
+    config["realtimeStereo3dInferenceCropPercent"] = normalize_percent(
+        raw.get("realtimeStereo3dInferenceCropPercent", raw.get("stereo3dInferenceCropPercent")),
+        defaults["realtimeStereo3dInferenceCropPercent"],
+    )
+    config["prebuildStereo3dProcessor"] = normalize_stereo3d_processor(
+        raw.get("prebuildStereo3dProcessor"),
+        defaults["prebuildStereo3dProcessor"],
+    )
+    config["prebuildStereo3dInferenceScale"] = normalize_scale(
+        raw.get("prebuildStereo3dInferenceScale"),
+        defaults["prebuildStereo3dInferenceScale"],
+    )
+    config["prebuildStereo3dInferenceCropPercent"] = normalize_percent(
+        raw.get("prebuildStereo3dInferenceCropPercent"),
+        defaults["prebuildStereo3dInferenceCropPercent"],
+    )
     config["hostName"] = str(raw.get("hostName") or "").strip()[:80]
     config["pinnedWatchRoom"] = normalize_bool(raw.get("pinnedWatchRoom"), defaults["pinnedWatchRoom"])
     password_hash = raw.get("passwordHash")

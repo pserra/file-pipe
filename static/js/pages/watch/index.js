@@ -1317,10 +1317,18 @@ document.addEventListener("alpine:init", () => {
         if (hlsStream) {
           const videoProfile = playbackMetadata.videoProfile || playbackMetadata.playbackProfile?.videoProfile || "2d";
           const stereoProcessor = playbackMetadata.stereoProcessor || playbackMetadata.playbackProfile?.stereoProcessor || "";
-          const resolutionScale = playbackMetadata.resolutionScale || playbackMetadata.hls?.resolutionScale || playbackMetadata.playbackProfile?.resolutionScale || "0.5";
+          const resolutionScale = playbackMetadata.resolutionScale || playbackMetadata.hls?.resolutionScale || playbackMetadata.playbackProfile?.resolutionScale || "1";
+          const inferenceScale = playbackMetadata.inferenceScale || playbackMetadata.hls?.inferenceScale || playbackMetadata.playbackProfile?.inferenceScale || "1";
+          const inferenceCropPercent = playbackMetadata.inferenceCropPercent ?? playbackMetadata.hls?.inferenceCropPercent ?? playbackMetadata.playbackProfile?.inferenceCropPercent ?? "0";
           if (videoProfile && videoProfile !== "2d") videoParams.set("video_profile", videoProfile);
           if (stereoProcessor) videoParams.set("stereo_processor", stereoProcessor);
-          if (videoProfile && videoProfile !== "2d") videoParams.set("stereo_scale", resolutionScale);
+          if (videoProfile && videoProfile !== "2d") {
+            videoParams.set("stereo_scale", resolutionScale);
+            if (stereoProcessor && stereoProcessor !== "ffmpeg-shift") {
+              videoParams.set("inference_scale", inferenceScale);
+              if (String(inferenceCropPercent) !== "0") videoParams.set("inference_crop", inferenceCropPercent);
+            }
+          }
         }
         this.videoUrl = `/watch-media/${this.roomId}/${fileName}?${videoParams.toString()}`;
         this.streamingReady = true;
@@ -1501,7 +1509,9 @@ document.addEventListener("alpine:init", () => {
         sourceVersion: this.sourceVersion,
         videoProfile: message.videoProfile || metadata?.videoProfile || metadata?.playbackProfile?.videoProfile || "2d",
         stereoProcessor: message.stereoProcessor || metadata?.stereoProcessor || metadata?.playbackProfile?.stereoProcessor || "",
-        resolutionScale: message.resolutionScale || metadata?.resolutionScale || metadata?.hls?.resolutionScale || metadata?.playbackProfile?.resolutionScale || "0.5",
+        resolutionScale: message.resolutionScale || metadata?.resolutionScale || metadata?.hls?.resolutionScale || metadata?.playbackProfile?.resolutionScale || "1",
+        inferenceScale: message.inferenceScale || metadata?.inferenceScale || metadata?.hls?.inferenceScale || metadata?.playbackProfile?.inferenceScale || "1",
+        inferenceCropPercent: message.inferenceCropPercent ?? metadata?.inferenceCropPercent ?? metadata?.hls?.inferenceCropPercent ?? metadata?.playbackProfile?.inferenceCropPercent ?? "0",
         prefetch: Boolean(message.prefetch),
       })) {
         this.postWorkerMessage({

@@ -551,8 +551,10 @@ function stereo3dModeDescription(mode = {}) {
   }
   const layout = mode.targetVideoLayout || mode.videoLayout || mode.playbackProfile?.targetVideoLayout || mode.playbackProfile?.videoLayout;
   const scale = mode.resolutionScale || mode.hls?.resolutionScale || mode.playbackProfile?.resolutionScale || "";
+  const inference = mode.inferenceScale || mode.hls?.inferenceScale || mode.playbackProfile?.inferenceScale || "";
   const scaleLabel = scale && scale !== "1" ? ` at ${scale}x` : "";
-  return layout === "full-sbs" ? `Generated Full SBS stream${scaleLabel} for XR/headsets` : `Generated Half SBS stream${scaleLabel} for XR/headsets`;
+  const inferenceLabel = inference && inference !== "1" ? `, ${inference}x depth` : "";
+  return layout === "full-sbs" ? `Generated Full SBS stream${scaleLabel}${inferenceLabel} for XR/headsets` : `Generated Half SBS stream${scaleLabel}${inferenceLabel} for XR/headsets`;
 }
 
 function xrSourceLayoutFromProfile(profile = {}) {

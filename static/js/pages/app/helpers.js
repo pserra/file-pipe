@@ -411,7 +411,25 @@ function normalizeStereo3dResolutionScale(value) {
   const scale = String(value || "").trim().toLowerCase().replace(/x$/, "");
   if (["1", "1.0", "100", "100%"].includes(scale)) return "1";
   if (["0.75", ".75", "075", "75", "75%"].includes(scale)) return "0.75";
-  return "0.5";
+  if (["0.5", ".5", "05", "50", "50%"].includes(scale)) return "0.5";
+  return "1";
+}
+
+function normalizeStereo3dInferenceScale(value) {
+  const text = String(value || "").trim().toLowerCase().replace(/x$/, "").replace(/%$/, "");
+  let number = Number(text || 0.5);
+  if (!Number.isFinite(number)) number = 0.5;
+  if (number > 1) number /= 100;
+  number = Math.max(0.1, Math.min(1, number));
+  if (Math.abs(number - 1) < 0.001) return "1";
+  return String(Math.round(number * 100) / 100).replace(/^0(?=\.)/, "0");
+}
+
+function normalizeStereo3dInferenceCropPercent(value) {
+  let number = Number(String(value ?? "").replace("%", ""));
+  if (!Number.isFinite(number)) number = 0;
+  number = Math.max(0, Math.min(25, number));
+  return String(Math.round(number * 100) / 100);
 }
 
 function normalizeStereo3dProcessor(value) {

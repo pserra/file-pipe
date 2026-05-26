@@ -33,12 +33,24 @@ document.addEventListener("alpine:init", () => {
     transcodePlaybackMode: localStorage.getItem("filePipeTranscodePlaybackMode") || "segmented",
     hostVideoMode: localStorage.getItem("filePipeHostVideoMode") || "normal",
     stereo3dLayout: localStorage.getItem("filePipeStereo3dLayout") || "half-sbs",
-    stereo3dProcessor: localStorage.getItem("filePipeStereo3dProcessor") || "ffmpeg-shift",
-    stereo3dResolutionScale: normalizeStereo3dResolutionScale(localStorage.getItem("filePipeStereo3dResolutionScale") || "0.5"),
+    stereo3dProcessor: localStorage.getItem("filePipeStereo3dProcessor") || "depth-anything-v2-small",
+    stereo3dResolutionScale: normalizeStereo3dResolutionScale(localStorage.getItem("filePipeStereo3dResolutionScale") || "1"),
+    stereo3dInferenceScale: normalizeStereo3dInferenceScale(localStorage.getItem("filePipeStereo3dInferenceScale") || "0.5"),
+    stereo3dInferenceCropPercent: normalizeStereo3dInferenceCropPercent(localStorage.getItem("filePipeStereo3dInferenceCropPercent") || "0"),
+    stereo3dPrebuildProcessor: localStorage.getItem("filePipeStereo3dPrebuildProcessor") || "depth-anything-v2-base",
+    stereo3dPrebuildInferenceScale: normalizeStereo3dInferenceScale(localStorage.getItem("filePipeStereo3dPrebuildInferenceScale") || "0.75"),
+    stereo3dPrebuildInferenceCropPercent: normalizeStereo3dInferenceCropPercent(localStorage.getItem("filePipeStereo3dPrebuildInferenceCropPercent") || "7.5"),
     stereo3dResolutionScaleOptions: [
       { id: "1", label: "1x", description: "No downscaling; Full SBS doubles source width" },
       { id: "0.75", label: "0.75x", description: "Balanced quality and generation speed" },
       { id: "0.5", label: "0.5x", description: "Fastest browser-friendly cache" },
+    ],
+    stereo3dInferenceScaleOptions: [
+      { id: "1", label: "1x internal", description: "Full-frame depth inference" },
+      { id: "0.75", label: "0.75x internal", description: "Higher quality prepared depth" },
+      { id: "0.5", label: "0.5x internal", description: "Real-time default for Depth Anything Small" },
+      { id: "0.33", label: "0.33x internal", description: "Lower-latency experimental depth" },
+      { id: "0.25", label: "0.25x internal", description: "Fastest depth pass with rougher edges" },
     ],
     stereo3dProcessorOptions: stereo3dProcessorOptions(),
     shareProgress: 0,
@@ -343,6 +355,12 @@ document.addEventListener("alpine:init", () => {
       const resolutionScale = stereoscopic
         ? normalizeStereo3dResolutionScale(options.resolutionScale || this.stereo3dResolutionScale)
         : "1";
+      const inferenceScale = stereoscopic
+        ? normalizeStereo3dInferenceScale(options.inferenceScale || this.stereo3dInferenceScale)
+        : "1";
+      const inferenceCropPercent = stereoscopic
+        ? normalizeStereo3dInferenceCropPercent(options.inferenceCropPercent ?? this.stereo3dInferenceCropPercent)
+        : "0";
       if (audioProfile !== "spatial" && !stereoscopic) return path;
       const url = new URL(path, "https://file-pipe.local");
       if (audioProfile === "spatial") url.searchParams.set("audio_profile", "spatial");
@@ -351,6 +369,10 @@ document.addEventListener("alpine:init", () => {
         if (videoProfile === "3d-full-sbs") url.searchParams.set("sbs_layout", "full");
         if (stereoProcessor !== "ffmpeg-shift") url.searchParams.set("stereo_processor", stereoProcessor);
         url.searchParams.set("stereo_scale", resolutionScale);
+        if (stereoProcessor !== "ffmpeg-shift") {
+          url.searchParams.set("inference_scale", inferenceScale);
+          if (inferenceCropPercent !== "0") url.searchParams.set("inference_crop", inferenceCropPercent);
+        }
       }
       return `${url.pathname}${url.search}`;
     },
@@ -786,13 +808,31 @@ document.addEventListener("alpine:init", () => {
     stereo3dResolutionScaleLabel(scale = this.stereo3dResolutionScale) {
       const normalized = normalizeStereo3dResolutionScale(scale);
       const option = this.stereo3dResolutionScaleOptions.find((candidate) => candidate.id === normalized);
-      return option?.label || "0.5x";
+      return option?.label || "1x";
     },
 
     stereo3dResolutionScaleDescription(scale = this.stereo3dResolutionScale) {
       const normalized = normalizeStereo3dResolutionScale(scale);
       const option = this.stereo3dResolutionScaleOptions.find((candidate) => candidate.id === normalized);
       return option?.description || "";
+    },
+
+    stereo3dInferenceScaleLabel(scale = this.stereo3dInferenceScale) {
+      const normalized = normalizeStereo3dInferenceScale(scale);
+      const option = this.stereo3dInferenceScaleOptions.find((candidate) => candidate.id === normalized);
+      return option?.label || `${normalized}x internal`;
+    },
+
+    stereo3dInferenceScaleDescription(scale = this.stereo3dInferenceScale) {
+      const normalized = normalizeStereo3dInferenceScale(scale);
+      const option = this.stereo3dInferenceScaleOptions.find((candidate) => candidate.id === normalized);
+      return option?.description || "";
+    },
+
+    stereo3dPrebuildProcessorLabel() {
+      const processor = normalizeStereo3dProcessor(this.stereo3dPrebuildProcessor);
+      const option = this.stereo3dProcessorOptions.find((candidate) => candidate.id === processor);
+      return option?.label || processor;
     },
 
     hostSpatialAudioEnabled() {
@@ -808,7 +848,7 @@ document.addEventListener("alpine:init", () => {
       return [
         this.transcodePlaybackModeLabel(),
         this.stereo3dLayoutLabel(),
-        `3D ${this.stereo3dResolutionScaleLabel()}`,
+        `3D ${this.stereo3dResolutionScaleLabel()} / ${this.stereo3dInferenceScaleLabel()}`,
         this.hostSpatialAudioEnabled() ? "Spatial audio" : "Stereo audio",
       ].join(" / ");
     },
@@ -1134,7 +1174,7 @@ document.addEventListener("alpine:init", () => {
         return;
       }
       const videoProfile = videoProfileForStereo3dLayout(this.stereo3dLayout);
-      const stereoProcessor = normalizeStereo3dProcessor(this.stereo3dProcessor);
+      const stereoProcessor = normalizeStereo3dProcessor(this.stereo3dPrebuildProcessor);
       if (stereoProcessor === "webgpu-depth-anything-v2-small") {
         this.error = "WebGPU 3D is generated inside the viewer and does not create connector cache. Choose ffmpeg, Depth Anything, or Core ML to prebuild.";
         return;
@@ -1143,16 +1183,19 @@ document.addEventListener("alpine:init", () => {
         videoProfile,
         stereoProcessor,
         resolutionScale: this.stereo3dResolutionScale,
+        inferenceScale: this.stereo3dPrebuildInferenceScale,
+        inferenceCropPercent: this.stereo3dPrebuildInferenceCropPercent,
       };
       const statusPath = this.connectorPathWithProfiles(`${resource.proxyPath}/hls-prebuild-status`, profileOptions);
       const startPath = this.connectorPathWithProfiles(`${resource.proxyPath}/hls-prebuild`, profileOptions);
       const layoutLabel = this.stereo3dLayoutLabel();
       const scaleLabel = this.stereo3dResolutionScaleLabel();
+      const inferenceLabel = this.stereo3dInferenceScaleLabel(this.stereo3dPrebuildInferenceScale);
       this.hls3dPrebuildItemId = item.id;
       this.hls3dPrebuildProgress = 0;
       this.hls3dPrebuildStatus = "";
       this.transcodeProgress = 0;
-      this.transcodeStatus = `Preparing ${layoutLabel} ${scaleLabel} 3D cache for ${item.title}...`;
+      this.transcodeStatus = `Preparing ${layoutLabel} ${scaleLabel} 3D cache with ${inferenceLabel} for ${item.title}...`;
       this.error = "";
       try {
         let progress = await this.request(startPath, { method: "POST" });
@@ -1163,7 +1206,7 @@ document.addEventListener("alpine:init", () => {
           this.hls3dPrebuildProgress = percent;
           this.transcodeProgress = percent;
           this.hls3dPrebuildStatus = `${cachedSegments}/${segmentCount} segments cached`;
-          this.transcodeStatus = `${progress.status === "queued" ? "Queued" : "Building"} ${layoutLabel} ${scaleLabel} 3D cache for ${item.title}... ${percent}%`;
+          this.transcodeStatus = `${progress.status === "queued" ? "Queued" : "Building"} ${layoutLabel} ${scaleLabel} 3D cache with ${inferenceLabel} for ${item.title}... ${percent}%`;
           if (progress.error) throw new Error(progress.error);
           if (progress.complete || progress.status === "complete" || progress.status === "cached" || percent >= 100) break;
           await sleep(1500);
@@ -1174,7 +1217,7 @@ document.addEventListener("alpine:init", () => {
           ...this.fileMediaStatus,
           [this.mediaStatusKey(item)]: this.mediaStatusFromInfo(mediaInfo),
         };
-        this.transcodeStatus = `${item.title} has a ${layoutLabel} ${scaleLabel} 3D cache (${this.formatBytes(progress.size || 0)}).`;
+        this.transcodeStatus = `${item.title} has a ${layoutLabel} ${scaleLabel} 3D cache with ${inferenceLabel} (${this.formatBytes(progress.size || 0)}).`;
         this.transcodeProgress = 100;
       } catch (error) {
         this.error = error.message;
@@ -1373,6 +1416,44 @@ document.addEventListener("alpine:init", () => {
         await this.launchHostStereo3dStream();
       }
       if (changed) await this.refreshCurrentWatchRoom3dMetadata();
+    },
+
+    async setStereo3dInferenceScale(scale) {
+      const nextScale = normalizeStereo3dInferenceScale(scale);
+      const changed = this.stereo3dInferenceScale !== nextScale;
+      this.stereo3dInferenceScale = nextScale;
+      localStorage.setItem("filePipeStereo3dInferenceScale", this.stereo3dInferenceScale);
+      if (changed && this.hostVideoMode === "hls3d" && this.playerSource && !this.playerLoading) {
+        await this.launchHostStereo3dStream();
+      }
+      if (changed) await this.refreshCurrentWatchRoom3dMetadata();
+    },
+
+    async setStereo3dInferenceCropPercent(percent) {
+      const nextPercent = normalizeStereo3dInferenceCropPercent(percent);
+      const changed = this.stereo3dInferenceCropPercent !== nextPercent;
+      this.stereo3dInferenceCropPercent = nextPercent;
+      localStorage.setItem("filePipeStereo3dInferenceCropPercent", this.stereo3dInferenceCropPercent);
+      if (changed && this.hostVideoMode === "hls3d" && this.playerSource && !this.playerLoading) {
+        await this.launchHostStereo3dStream();
+      }
+      if (changed) await this.refreshCurrentWatchRoom3dMetadata();
+    },
+
+    setStereo3dPrebuildProcessor(processor) {
+      const nextProcessor = normalizeStereo3dProcessor(processor);
+      this.stereo3dPrebuildProcessor = nextProcessor;
+      localStorage.setItem("filePipeStereo3dPrebuildProcessor", this.stereo3dPrebuildProcessor);
+    },
+
+    setStereo3dPrebuildInferenceScale(scale) {
+      this.stereo3dPrebuildInferenceScale = normalizeStereo3dInferenceScale(scale);
+      localStorage.setItem("filePipeStereo3dPrebuildInferenceScale", this.stereo3dPrebuildInferenceScale);
+    },
+
+    setStereo3dPrebuildInferenceCropPercent(percent) {
+      this.stereo3dPrebuildInferenceCropPercent = normalizeStereo3dInferenceCropPercent(percent);
+      localStorage.setItem("filePipeStereo3dPrebuildInferenceCropPercent", this.stereo3dPrebuildInferenceCropPercent);
     },
 
     async refreshCurrentWatchRoom3dMetadata() {
@@ -1862,16 +1943,22 @@ document.addEventListener("alpine:init", () => {
       const resolutionScale = generated3d
         ? normalizeStereo3dResolutionScale(options.resolutionScale || hlsInfo?.resolutionScale || this.stereo3dResolutionScale)
         : "1";
-      const profileOptions = { audioProfile, videoProfile, stereoProcessor, resolutionScale };
+      const inferenceScale = generated3d
+        ? normalizeStereo3dInferenceScale(options.inferenceScale || hlsInfo?.inferenceScale || this.stereo3dInferenceScale)
+        : "1";
+      const inferenceCropPercent = generated3d
+        ? normalizeStereo3dInferenceCropPercent(options.inferenceCropPercent ?? hlsInfo?.inferenceCropPercent ?? this.stereo3dInferenceCropPercent)
+        : "0";
+      const profileOptions = { audioProfile, videoProfile, stereoProcessor, resolutionScale, inferenceScale, inferenceCropPercent };
       const playlistPath = this.connectorPathWithProfiles(hlsInfo.playlistPath || `${resource.proxyPath}/hls/playlist.m3u8`, profileOptions);
       const segmentPath = (index) => this.connectorPathWithProfiles(`${resource.proxyPath}/hls/segments/${Number(index || 0)}.ts`, profileOptions);
-      const sourceLabel = `${this.sourceLabel(this.selectedServer)} ${generated3d ? `${videoLayoutLabel(videoLayout)} ${this.stereo3dResolutionScaleLabel(resolutionScale)} generated 3D ` : ""}live segmented transcode`;
+      const sourceLabel = `${this.sourceLabel(this.selectedServer)} ${generated3d ? `${videoLayoutLabel(videoLayout)} ${this.stereo3dResolutionScaleLabel(resolutionScale)} ${this.stereo3dInferenceScaleLabel(inferenceScale)} generated 3D ` : ""}live segmented transcode`;
       return {
         title: item.title,
         type: "application/vnd.apple.mpegurl",
         size: Number(mediaInfo?.size || hlsInfo?.mediaInfo?.size || resource.size || 0),
         contentKey: `connector:${resource.proxyPath}`,
-        variantContentKey: `connector:${resource.proxyPath}:hls:${audioProfile}:${videoProfile}:${stereoProcessor || "none"}:${resolutionScale}`,
+        variantContentKey: `connector:${resource.proxyPath}:hls:${audioProfile}:${videoProfile}:${stereoProcessor || "none"}:${resolutionScale}:${inferenceScale}:${inferenceCropPercent}`,
         sourceLabel,
         mediaInfo: hlsInfo.mediaInfo || mediaInfo,
         playbackProfile: {
@@ -1883,6 +1970,8 @@ document.addEventListener("alpine:init", () => {
           stereoscopic: generated3d,
           stereoProcessor,
           resolutionScale,
+          inferenceScale,
+          inferenceCropPercent,
           audioCodec: "aac",
           audioChannels: audioProfile === "spatial" ? Number(mediaInfo?.audioChannels || mediaInfo?.defaultAudio?.channels || 0) : Math.min(2, Number(mediaInfo?.audioChannels || 2)),
           audioChannelLayout: audioProfile === "spatial" ? (mediaInfo?.audioChannelLayout || "") : "stereo",
@@ -1896,6 +1985,8 @@ document.addEventListener("alpine:init", () => {
           segmentDuration: Number(hlsInfo.segmentDuration || 8),
           segmentCount: Number(hlsInfo.segmentCount || 0),
           resolutionScale,
+          inferenceScale,
+          inferenceCropPercent,
         },
         readHlsSegment: async (segmentIndex) => {
           const response = await fetch(`${this.connectorUrl}${segmentPath(segmentIndex)}`, {
@@ -1915,6 +2006,8 @@ document.addEventListener("alpine:init", () => {
         stereoscopic: generated3d,
         stereoProcessor,
         resolutionScale,
+        inferenceScale,
+        inferenceCropPercent,
         spatialAudioProfile: audioProfile,
         spatialAudioReady: audioProfile === "spatial",
       };
@@ -1928,11 +2021,19 @@ document.addEventListener("alpine:init", () => {
       const requestedResolutionScale = isStereoVideoProfile(requestedVideoProfile)
         ? normalizeStereo3dResolutionScale(options.resolutionScale || this.stereo3dResolutionScale)
         : "1";
+      const requestedInferenceScale = isStereoVideoProfile(requestedVideoProfile)
+        ? normalizeStereo3dInferenceScale(options.inferenceScale || this.stereo3dInferenceScale)
+        : "1";
+      const requestedInferenceCropPercent = isStereoVideoProfile(requestedVideoProfile)
+        ? normalizeStereo3dInferenceCropPercent(options.inferenceCropPercent ?? this.stereo3dInferenceCropPercent)
+        : "0";
       if (
         this.playerSource?.readHlsSegment
         && normalizeTranscodeVideoProfile(this.playerSource.videoProfile || "2d") === requestedVideoProfile
         && normalizeStereo3dProcessor(this.playerSource.stereoProcessor || "") === normalizeStereo3dProcessor(requestedStereoProcessor)
         && (!isStereoVideoProfile(requestedVideoProfile) || normalizeStereo3dResolutionScale(this.playerSource.resolutionScale || this.playerSource.playbackProfile?.resolutionScale) === requestedResolutionScale)
+        && (!isStereoVideoProfile(requestedVideoProfile) || normalizeStereo3dInferenceScale(this.playerSource.inferenceScale || this.playerSource.playbackProfile?.inferenceScale) === requestedInferenceScale)
+        && (!isStereoVideoProfile(requestedVideoProfile) || normalizeStereo3dInferenceCropPercent(this.playerSource.inferenceCropPercent ?? this.playerSource.playbackProfile?.inferenceCropPercent) === requestedInferenceCropPercent)
       ) return this.playerSource;
       const launch = this.playerConnectorLaunch;
       if (!launch?.resource?.proxyPath || !launch?.item) {
@@ -1947,6 +2048,8 @@ document.addEventListener("alpine:init", () => {
         videoProfile: requestedVideoProfile,
         stereoProcessor: requestedStereoProcessor,
         resolutionScale: requestedResolutionScale,
+        inferenceScale: requestedInferenceScale,
+        inferenceCropPercent: requestedInferenceCropPercent,
       }));
       const transcodeParts = launch.transcodeParts?.length ? launch.transcodeParts : ["video to H.264/AAC"];
       return this.hlsWatchSourceFromConnector(
@@ -1955,7 +2058,7 @@ document.addEventListener("alpine:init", () => {
         hlsInfo.mediaInfo || launch.mediaInfo,
         transcodeParts,
         hlsInfo,
-        { audioProfile, videoProfile: requestedVideoProfile, stereoProcessor: requestedStereoProcessor, resolutionScale: requestedResolutionScale },
+        { audioProfile, videoProfile: requestedVideoProfile, stereoProcessor: requestedStereoProcessor, resolutionScale: requestedResolutionScale, inferenceScale: requestedInferenceScale, inferenceCropPercent: requestedInferenceCropPercent },
       );
     },
 
@@ -2060,6 +2163,8 @@ document.addEventListener("alpine:init", () => {
           videoProfile,
           stereoProcessor,
           resolutionScale: this.stereo3dResolutionScale,
+          inferenceScale: this.stereo3dInferenceScale,
+          inferenceCropPercent: this.stereo3dInferenceCropPercent,
         });
         if (!source?.playlistUrl) throw new Error("Could not prepare the 3D stream for host playback.");
         this.teardownHostHlsPlayer();
@@ -3084,7 +3189,7 @@ document.addEventListener("alpine:init", () => {
       const stereo3dProcessor = normalizeStereo3dProcessor(this.stereo3dProcessor);
       if (isStereoVideoProfile(hlsSource?.videoProfile)) {
         hls3dSource = hlsSource;
-        this.playerRoom3dStatus = `${videoLayoutLabel(hls3dSource.videoLayout || this.stereo3dLayout)} ${this.stereo3dResolutionScaleLabel(hls3dSource.resolutionScale)} 3D stream is active for this room.`;
+        this.playerRoom3dStatus = `${videoLayoutLabel(hls3dSource.videoLayout || this.stereo3dLayout)} ${this.stereo3dResolutionScaleLabel(hls3dSource.resolutionScale)} ${this.stereo3dInferenceScaleLabel(hls3dSource.inferenceScale)} 3D stream is active for this room.`;
       } else if (hlsSource && mediaInfoStereo3dCandidate(hlsSource.mediaInfo || source.mediaInfo) && this.canCreateLiveWatchRoom()) {
         if (stereo3dProcessor === "webgpu-depth-anything-v2-small") {
           hls3dSource = this.localWebGpuHls3dSource(hlsSource, stereo3dVideoProfile);
@@ -3095,8 +3200,10 @@ document.addEventListener("alpine:init", () => {
               videoProfile: stereo3dVideoProfile,
               stereoProcessor: stereo3dProcessor,
               resolutionScale: this.stereo3dResolutionScale,
+              inferenceScale: this.stereo3dInferenceScale,
+              inferenceCropPercent: this.stereo3dInferenceCropPercent,
             });
-            this.playerRoom3dStatus = `${videoLayoutLabel(hls3dSource.videoLayout || this.stereo3dLayout)} ${this.stereo3dResolutionScaleLabel(hls3dSource.resolutionScale)} 3D stream is available via ${this.stereo3dProcessorLabel()}.`;
+            this.playerRoom3dStatus = `${videoLayoutLabel(hls3dSource.videoLayout || this.stereo3dLayout)} ${this.stereo3dResolutionScaleLabel(hls3dSource.resolutionScale)} ${this.stereo3dInferenceScaleLabel(hls3dSource.inferenceScale)} 3D stream is available via ${this.stereo3dProcessorLabel()}.`;
           } catch (error) {
             hls3dSource = null;
             this.playerRoom3dError = `3D stream is not available: ${error.message}`;
@@ -3154,11 +3261,15 @@ document.addEventListener("alpine:init", () => {
         videoLayout: source.videoLayout || source.playbackProfile?.videoLayout || "mono",
         stereoProcessor: source.stereoProcessor || source.playbackProfile?.stereoProcessor || "",
         resolutionScale: source.resolutionScale || source.playbackProfile?.resolutionScale || "1",
+        inferenceScale: source.inferenceScale || source.playbackProfile?.inferenceScale || "1",
+        inferenceCropPercent: source.inferenceCropPercent ?? source.playbackProfile?.inferenceCropPercent ?? "0",
         hls: isHlsLive ? {
           duration: Number(source.hlsInfo?.duration || source.mediaInfo?.duration || 0),
           segmentDuration: Number(source.hlsInfo?.segmentDuration || 8),
           segmentCount: Number(source.hlsInfo?.segmentCount || 0),
           resolutionScale: source.resolutionScale || source.playbackProfile?.resolutionScale || "1",
+          inferenceScale: source.inferenceScale || source.playbackProfile?.inferenceScale || "1",
+          inferenceCropPercent: source.inferenceCropPercent ?? source.playbackProfile?.inferenceCropPercent ?? "0",
         } : null,
         progressiveTranscode: rangeProgressive,
         availableModes: {
@@ -3181,6 +3292,8 @@ document.addEventListener("alpine:init", () => {
             videoLayout: hlsSource.videoLayout || "mono",
             stereoProcessor: hlsSource.stereoProcessor || "",
             resolutionScale: hlsSource.resolutionScale || hlsSource.playbackProfile?.resolutionScale || "1",
+            inferenceScale: hlsSource.inferenceScale || hlsSource.playbackProfile?.inferenceScale || "1",
+            inferenceCropPercent: hlsSource.inferenceCropPercent ?? hlsSource.playbackProfile?.inferenceCropPercent ?? "0",
             localStereoProcessor: Boolean(hlsSource.localStereoProcessor),
             targetVideoProfile: hlsSource.targetVideoProfile || "",
             targetVideoLayout: hlsSource.targetVideoLayout || "",
@@ -3191,6 +3304,8 @@ document.addEventListener("alpine:init", () => {
               segmentDuration: Number(hlsSource.hlsInfo?.segmentDuration || 8),
               segmentCount: Number(hlsSource.hlsInfo?.segmentCount || 0),
               resolutionScale: hlsSource.resolutionScale || hlsSource.playbackProfile?.resolutionScale || "1",
+              inferenceScale: hlsSource.inferenceScale || hlsSource.playbackProfile?.inferenceScale || "1",
+              inferenceCropPercent: hlsSource.inferenceCropPercent ?? hlsSource.playbackProfile?.inferenceCropPercent ?? "0",
             },
           } : null,
           hls3d: hls3dSource ? {
@@ -3202,7 +3317,9 @@ document.addEventListener("alpine:init", () => {
             videoProfile: hls3dSource.videoProfile || "3d-sbs",
             videoLayout: hls3dSource.videoLayout || "half-sbs",
             stereoProcessor: hls3dSource.stereoProcessor || "",
-            resolutionScale: hls3dSource.resolutionScale || hls3dSource.playbackProfile?.resolutionScale || "0.5",
+            resolutionScale: hls3dSource.resolutionScale || hls3dSource.playbackProfile?.resolutionScale || "1",
+            inferenceScale: hls3dSource.inferenceScale || hls3dSource.playbackProfile?.inferenceScale || "0.5",
+            inferenceCropPercent: hls3dSource.inferenceCropPercent ?? hls3dSource.playbackProfile?.inferenceCropPercent ?? "0",
             localStereoProcessor: Boolean(hls3dSource.localStereoProcessor),
             targetVideoProfile: hls3dSource.targetVideoProfile || "",
             targetVideoLayout: hls3dSource.targetVideoLayout || "",
@@ -3212,7 +3329,9 @@ document.addEventListener("alpine:init", () => {
               duration: Number(hls3dSource.hlsInfo?.duration || hls3dSource.mediaInfo?.duration || 0),
               segmentDuration: Number(hls3dSource.hlsInfo?.segmentDuration || 8),
               segmentCount: Number(hls3dSource.hlsInfo?.segmentCount || 0),
-              resolutionScale: hls3dSource.resolutionScale || hls3dSource.playbackProfile?.resolutionScale || "0.5",
+              resolutionScale: hls3dSource.resolutionScale || hls3dSource.playbackProfile?.resolutionScale || "1",
+              inferenceScale: hls3dSource.inferenceScale || hls3dSource.playbackProfile?.inferenceScale || "0.5",
+              inferenceCropPercent: hls3dSource.inferenceCropPercent ?? hls3dSource.playbackProfile?.inferenceCropPercent ?? "0",
             },
           } : null,
         },

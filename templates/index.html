@@ -1296,14 +1296,49 @@
 	              </select>
 	              <small class="text-secondary" x-text="stereo3dResolutionScaleDescription()"></small>
 	            </label>
-	            <label class="form-label settings-grid-wide">
-	              <span>3D processor</span>
-              <select class="form-select" x-model="stereo3dProcessor" @change="setStereo3dProcessor(stereo3dProcessor)" :disabled="!canCreateLiveWatchRoom()">
-                <template x-for="option in stereo3dProcessorOptions" :key="option.id">
-                  <option :value="option.id" x-text="option.label"></option>
-                </template>
-              </select>
-            </label>
+		            <label class="form-label settings-grid-wide">
+		              <span>3D processor</span>
+	              <select class="form-select" x-model="stereo3dProcessor" @change="setStereo3dProcessor(stereo3dProcessor)" :disabled="!canCreateLiveWatchRoom()">
+	                <template x-for="option in stereo3dProcessorOptions" :key="option.id">
+	                  <option :value="option.id" x-text="option.label"></option>
+	                </template>
+	              </select>
+                <small class="text-secondary" x-text="stereo3dProcessor === 'webgpu-depth-anything-v2-small' ? 'WebGPU is viewer-side/XR only and does not build connector cache.' : 'Connector-generated 3D streams use this depth processor.'"></small>
+	            </label>
+	            <label class="form-label">
+	              <span>Depth inference</span>
+	              <select class="form-select" x-model="stereo3dInferenceScale" @change="setStereo3dInferenceScale(stereo3dInferenceScale)" :disabled="!canCreateLiveWatchRoom() || stereo3dProcessor === 'ffmpeg-shift' || stereo3dProcessor === 'webgpu-depth-anything-v2-small'">
+	                <template x-for="option in stereo3dInferenceScaleOptions" :key="option.id">
+	                  <option :value="option.id" x-text="option.label"></option>
+	                </template>
+	              </select>
+	              <small class="text-secondary" x-text="stereo3dInferenceScaleDescription()"></small>
+	            </label>
+	            <label class="form-label">
+	              <span>Depth side crop</span>
+	              <input class="form-control" type="number" min="0" max="25" step="0.5" x-model="stereo3dInferenceCropPercent" @change="setStereo3dInferenceCropPercent(stereo3dInferenceCropPercent)" :disabled="!canCreateLiveWatchRoom() || stereo3dProcessor === 'ffmpeg-shift' || stereo3dProcessor === 'webgpu-depth-anything-v2-small'">
+	              <small class="text-secondary">Used only for depth inference; output keeps the full frame.</small>
+	            </label>
+	            <label class="form-label">
+	              <span>Prebuild processor</span>
+	              <select class="form-select" x-model="stereo3dPrebuildProcessor" @change="setStereo3dPrebuildProcessor(stereo3dPrebuildProcessor)" :disabled="!canCreateLiveWatchRoom()">
+	                <template x-for="option in stereo3dProcessorOptions.filter((candidate) => !candidate.browserOnly)" :key="option.id">
+	                  <option :value="option.id" x-text="option.label"></option>
+	                </template>
+	              </select>
+	            </label>
+	            <label class="form-label">
+	              <span>Prebuild inference</span>
+	              <select class="form-select" x-model="stereo3dPrebuildInferenceScale" @change="setStereo3dPrebuildInferenceScale(stereo3dPrebuildInferenceScale)" :disabled="!canCreateLiveWatchRoom() || stereo3dPrebuildProcessor === 'ffmpeg-shift'">
+	                <template x-for="option in stereo3dInferenceScaleOptions" :key="option.id">
+	                  <option :value="option.id" x-text="option.label"></option>
+	                </template>
+	              </select>
+	            </label>
+	            <label class="form-label">
+	              <span>Prebuild side crop</span>
+	              <input class="form-control" type="number" min="0" max="25" step="0.5" x-model="stereo3dPrebuildInferenceCropPercent" @change="setStereo3dPrebuildInferenceCropPercent(stereo3dPrebuildInferenceCropPercent)" :disabled="!canCreateLiveWatchRoom() || stereo3dPrebuildProcessor === 'ffmpeg-shift'">
+	            </label>
             <label class="form-check form-switch settings-grid-wide playback-switch">
               <input class="form-check-input" type="checkbox" :checked="hostSpatialAudioEnabled()" @change="toggleHostSpatialAudio($event.target.checked)" :disabled="!playerSource || playerLoading || !hostSpatialAudioAvailable()">
               <span class="form-check-label">

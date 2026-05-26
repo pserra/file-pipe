@@ -212,6 +212,8 @@ async function handleWatchHlsMedia(event, url, client, sessionId, metadata) {
         videoProfile: profile.videoProfile,
         stereoProcessor: profile.stereoProcessor,
         resolutionScale: profile.resolutionScale,
+        inferenceScale: profile.inferenceScale,
+        inferenceCropPercent: profile.inferenceCropPercent,
       });
     },
     cancel() {
@@ -343,7 +345,7 @@ function startHlsPrefetch(client, message) {
   const startIndex = Math.max(0, Number(message.startIndex || 0));
   const endIndex = Math.min(segmentCount - 1, Number(message.endIndex ?? segmentCount - 1));
   const profile = hlsRequestProfile(metadata);
-  const key = `${prefetchKey("watch", message.sessionId, metadata)}:${profile.videoProfile}:${profile.stereoProcessor || "none"}:${profile.resolutionScale || "1"}`;
+  const key = `${prefetchKey("watch", message.sessionId, metadata)}:${profile.videoProfile}:${profile.stereoProcessor || "none"}:${profile.resolutionScale || "1"}:${profile.inferenceScale || "1"}:${profile.inferenceCropPercent || "0"}`;
   const previous = prefetchTasks.get(key);
   if (previous) previous.cancelled = true;
   const task = { cancelled: false };
@@ -382,6 +384,8 @@ async function runHlsPrefetch(task, client, options) {
         videoProfile: profile.videoProfile,
         stereoProcessor: profile.stereoProcessor,
         resolutionScale: profile.resolutionScale,
+        inferenceScale: profile.inferenceScale,
+        inferenceCropPercent: profile.inferenceCropPercent,
       }, info);
       cachedSegments += 1;
       postPrefetchProgress(client, "watch", sessionId, "hls", cachedSegments, totalSegments);
@@ -441,7 +445,15 @@ function buildHlsPlaylist(metadata, profile = hlsRequestProfile(metadata)) {
   if (sourceVersion) segmentParams.set("v", sourceVersion);
   if (profile.videoProfile && profile.videoProfile !== "2d") segmentParams.set("video_profile", profile.videoProfile);
   if (profile.stereoProcessor) segmentParams.set("stereo_processor", profile.stereoProcessor);
-  if (profile.videoProfile && profile.videoProfile !== "2d") segmentParams.set("stereo_scale", profile.resolutionScale || "0.5");
+  if (profile.videoProfile && profile.videoProfile !== "2d") {
+    segmentParams.set("stereo_scale", profile.resolutionScale || "1");
+    if (profile.stereoProcessor && profile.stereoProcessor !== "ffmpeg-shift") {
+      segmentParams.set("inference_scale", profile.inferenceScale || "0.5");
+      if (profile.inferenceCropPercent && profile.inferenceCropPercent !== "0") {
+        segmentParams.set("inference_crop", profile.inferenceCropPercent);
+      }
+    }
+  }
   const segmentQuery = segmentParams.toString() ? `?${segmentParams.toString()}` : "";
   const lines = [
     "#EXTM3U",
@@ -492,6 +504,24 @@ function hlsResolutionScale(metadata = {}) {
   );
 }
 
+function hlsInferenceScale(metadata = {}) {
+  return normalizeHlsInferenceScale(
+    metadata.inferenceScale
+      || metadata.hls?.inferenceScale
+      || metadata.playbackProfile?.inferenceScale
+      || "",
+  );
+}
+
+function hlsInferenceCropPercent(metadata = {}) {
+  return normalizeHlsInferenceCropPercent(
+    metadata.inferenceCropPercent
+      ?? metadata.hls?.inferenceCropPercent
+      ?? metadata.playbackProfile?.inferenceCropPercent
+      ?? "0",
+  );
+}
+
 function hlsRequestProfile(metadata = {}, url = null) {
   const params = url?.searchParams;
   const videoProfile = normalizeHlsVideoProfile(params?.get("video_profile") || params?.get("videoProfile") || hlsVideoProfile(metadata));
@@ -501,7 +531,13 @@ function hlsRequestProfile(metadata = {}, url = null) {
   const resolutionScale = videoProfile === "2d"
     ? "1"
     : normalizeHlsResolutionScale(params?.get("stereo_scale") || params?.get("resolution_scale") || params?.get("resolutionScale") || hlsResolutionScale(metadata));
-  return { videoProfile, stereoProcessor, resolutionScale };
+  const inferenceScale = videoProfile === "2d" || !stereoProcessor || stereoProcessor === "ffmpeg-shift"
+    ? "1"
+    : normalizeHlsInferenceScale(params?.get("inference_scale") || params?.get("inferenceScale") || params?.get("depth_scale") || params?.get("depthScale") || hlsInferenceScale(metadata));
+  const inferenceCropPercent = videoProfile === "2d" || !stereoProcessor || stereoProcessor === "ffmpeg-shift"
+    ? "0"
+    : normalizeHlsInferenceCropPercent(params?.get("inference_crop") || params?.get("inferenceCrop") || params?.get("inference_crop_percent") || params?.get("inferenceCropPercent") || hlsInferenceCropPercent(metadata));
+  return { videoProfile, stereoProcessor, resolutionScale, inferenceScale, inferenceCropPercent };
 }
 
 function normalizeHlsVideoProfile(value = "") {
@@ -514,7 +550,23 @@ function normalizeHlsResolutionScale(value = "") {
   const scale = String(value || "").trim().toLowerCase().replace(/x$/, "");
   if (["1", "1.0", "100", "100%"].includes(scale)) return "1";
   if (["0.75", ".75", "075", "75", "75%"].includes(scale)) return "0.75";
-  return "0.5";
+  if (["0.5", ".5", "05", "50", "50%"].includes(scale)) return "0.5";
+  return "1";
+}
+
+function normalizeHlsInferenceScale(value = "") {
+  let number = Number(String(value || "").trim().toLowerCase().replace(/x$/, "").replace(/%$/, "") || 0.5);
+  if (!Number.isFinite(number)) number = 0.5;
+  if (number > 1) number /= 100;
+  number = Math.max(0.1, Math.min(1, number));
+  return Math.abs(number - 1) < 0.001 ? "1" : String(Math.round(number * 100) / 100);
+}
+
+function normalizeHlsInferenceCropPercent(value = "") {
+  let number = Number(String(value ?? "").replace("%", ""));
+  if (!Number.isFinite(number)) number = 0;
+  number = Math.max(0, Math.min(25, number));
+  return String(Math.round(number * 100) / 100);
 }
 
 function isLinearProgressiveMetadata(metadata) {
@@ -698,7 +750,7 @@ function rangeCacheInfo(kind, metadata, start, end, contentType) {
 }
 
 function hlsCacheInfo(metadata, segmentIndex, contentType, profile = hlsRequestProfile(metadata)) {
-  const profileKey = `${profile.videoProfile || "2d"}:${profile.stereoProcessor || "none"}:${profile.resolutionScale || "1"}`;
+  const profileKey = `${profile.videoProfile || "2d"}:${profile.stereoProcessor || "none"}:${profile.resolutionScale || "1"}:${profile.inferenceScale || "1"}:${profile.inferenceCropPercent || "0"}`;
   return {
     kind: "hls",
     url: `https://file-pipe-cache.local/watch/${mediaIdentity(metadata)}/v${cacheVersion(metadata)}/${encodeURIComponent(profileKey)}/hls/${segmentIndex}`,

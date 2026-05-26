@@ -245,6 +245,13 @@ def main() -> int:
     local_connector.TRANSCODE_CACHE_MAX_BYTES = int(config.get("maxCacheBytes") or 0)
     local_connector.CONNECTOR_SERVICE_ENABLED = bool(config["serviceEnabled"])
     local_connector.CONNECTOR_SETTINGS = public_connector_settings(config)
+    local_connector.HLS_STEREO3D_REALTIME_PROCESSOR = str(config.get("realtimeStereo3dProcessor") or local_connector.HLS_STEREO3D_REALTIME_PROCESSOR)
+    local_connector.HLS_STEREO3D_PROCESSOR = local_connector.HLS_STEREO3D_REALTIME_PROCESSOR
+    local_connector.HLS_STEREO3D_PREBUILD_PROCESSOR = str(config.get("prebuildStereo3dProcessor") or local_connector.HLS_STEREO3D_PREBUILD_PROCESSOR)
+    local_connector.HLS_STEREO3D_INFERENCE_SCALE = str(config.get("realtimeStereo3dInferenceScale") or local_connector.HLS_STEREO3D_INFERENCE_SCALE)
+    local_connector.HLS_STEREO3D_INFERENCE_CROP_PERCENT = str(config.get("realtimeStereo3dInferenceCropPercent") or 0)
+    local_connector.HLS_STEREO3D_PREBUILD_INFERENCE_SCALE = str(config.get("prebuildStereo3dInferenceScale") or local_connector.HLS_STEREO3D_PREBUILD_INFERENCE_SCALE)
+    local_connector.HLS_STEREO3D_PREBUILD_INFERENCE_CROP_PERCENT = str(config.get("prebuildStereo3dInferenceCropPercent") or 0)
 
     ssl_context = ensure_local_certificate(str(config["host"])) if config["useTls"] else None
     scheme = "https" if ssl_context else "http"
