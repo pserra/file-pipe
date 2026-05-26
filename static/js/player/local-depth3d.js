@@ -5,6 +5,9 @@
   const DEFAULT_DEPTH_STRENGTH = 0.72;
   const DEFAULT_TEMPORAL_SMOOTHING = 0.55;
   const DEFAULT_CONVERGENCE = 0.42;
+  const FIXED_MODEL_INPUT_SIZES = {
+    "fastdepth-mobilenet-onnx": 224,
+  };
   const LOCAL_PROCESSORS = new Set([
     "midas-small-onnx",
     "fastdepth-mobilenet-onnx",
@@ -22,12 +25,15 @@
     ],
     "depth-anything-v2-tiny-onnx": [
       "/static/models/depth/depth-anything-v2-tiny.onnx",
+      "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/4472b7362082ad9968fee890ca0f1e5aca36b93d/onnx/model_quantized.onnx",
     ],
     "depth-anything-v2-small-onnx": [
       "/static/models/depth/depth-anything-v2-small.onnx",
+      "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/4472b7362082ad9968fee890ca0f1e5aca36b93d/onnx/model.onnx",
     ],
     "webgpu-depth-anything-v2-small": [
       "/static/models/depth/depth-anything-v2-small.onnx",
+      "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/4472b7362082ad9968fee890ca0f1e5aca36b93d/onnx/model.onnx",
     ],
   };
 
@@ -231,18 +237,19 @@
       this.sessionOutputName = outputName;
       const metadata = this.session?.inputMetadata?.[inputName] || {};
       const dimensions = Array.isArray(metadata.dimensions) ? metadata.dimensions : [];
+      const fallbackInputSize = FIXED_MODEL_INPUT_SIZES[this.processor] || this.inputSize;
       const dim = (index, fallback) => {
         const value = Number(dimensions[index]);
         return Number.isFinite(value) && value > 0 ? Math.round(value) : fallback;
       };
       if (dim(3, 0) === 3) {
         this.sessionInputLayout = "nhwc";
-        this.sessionInputHeight = dim(1, this.inputSize);
-        this.sessionInputWidth = dim(2, this.inputSize);
+        this.sessionInputHeight = dim(1, fallbackInputSize);
+        this.sessionInputWidth = dim(2, fallbackInputSize);
       } else {
         this.sessionInputLayout = "nchw";
-        this.sessionInputHeight = dim(2, this.inputSize);
-        this.sessionInputWidth = dim(3, this.inputSize);
+        this.sessionInputHeight = dim(2, fallbackInputSize);
+        this.sessionInputWidth = dim(3, fallbackInputSize);
       }
       this.inputCanvas.width = this.sessionInputWidth;
       this.inputCanvas.height = this.sessionInputHeight;
@@ -541,7 +548,7 @@
       const labels = {
         "midas-small-onnx": "MiDaS Small ONNX",
         "fastdepth-mobilenet-onnx": "FastDepth MobileNet ONNX",
-        "depth-anything-v2-tiny-onnx": "Depth Anything V2 Tiny ONNX",
+        "depth-anything-v2-tiny-onnx": "Depth Anything V2 Small Quantized ONNX",
         "depth-anything-v2-small-onnx": "Depth Anything V2 Small ONNX",
         "webgpu-depth-anything-v2-small": "Depth Anything V2 Small ONNX",
       };

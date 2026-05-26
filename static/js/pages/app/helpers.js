@@ -549,9 +549,9 @@ function stereo3dProcessorOptions() {
     },
     {
       id: "depth-anything-v2-tiny-onnx",
-      label: "Local Depth Anything V2 Tiny ONNX",
-      bestUse: "Better depth if device allows",
-      m3Practicality: "Experimental",
+      label: "Local Depth Anything V2 Small Quantized ONNX",
+      bestUse: "Better depth with lower download size",
+      m3Practicality: "Experimental local option",
       pipeline: "local",
       browserOnly: true,
     },
