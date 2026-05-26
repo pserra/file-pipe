@@ -32,12 +32,15 @@ document.addEventListener("alpine:init", () => {
     fileMediaStatus: {},
     transcodePlaybackMode: localStorage.getItem("filePipeTranscodePlaybackMode") || "segmented",
     hostVideoMode: localStorage.getItem("filePipeHostVideoMode") || "normal",
+    stereo3dPipeline: normalizeStereo3dPipeline(localStorage.getItem("filePipeStereo3dPipeline") || (isLocalStereo3dProcessor(localStorage.getItem("filePipeStereo3dProcessor")) ? "local" : "remote")),
     stereo3dLayout: localStorage.getItem("filePipeStereo3dLayout") || "half-sbs",
-    stereo3dProcessor: localStorage.getItem("filePipeStereo3dProcessor") || "depth-anything-v2-small",
+    stereo3dProcessor: normalizeStereo3dProcessor(localStorage.getItem("filePipeStereo3dProcessor") || "depth-anything-v2-small"),
     stereo3dResolutionScale: normalizeStereo3dResolutionScale(localStorage.getItem("filePipeStereo3dResolutionScale") || "1"),
     stereo3dInferenceScale: normalizeStereo3dInferenceScale(localStorage.getItem("filePipeStereo3dInferenceScale") || "0.5"),
     stereo3dInferenceCropPercent: normalizeStereo3dInferenceCropPercent(localStorage.getItem("filePipeStereo3dInferenceCropPercent") || "0"),
-    stereo3dPrebuildProcessor: localStorage.getItem("filePipeStereo3dPrebuildProcessor") || "depth-anything-v2-base",
+    stereo3dDepthStrength: normalizeStereo3dDepthStrength(localStorage.getItem("filePipeStereo3dDepthStrength") || "72"),
+    stereo3dTemporalSmoothing: normalizeStereo3dTemporalSmoothing(localStorage.getItem("filePipeStereo3dTemporalSmoothing") || "55"),
+    stereo3dPrebuildProcessor: isLocalStereo3dProcessor(localStorage.getItem("filePipeStereo3dPrebuildProcessor")) ? "depth-anything-v2-base" : normalizeStereo3dProcessor(localStorage.getItem("filePipeStereo3dPrebuildProcessor") || "depth-anything-v2-base"),
     stereo3dPrebuildInferenceScale: normalizeStereo3dInferenceScale(localStorage.getItem("filePipeStereo3dPrebuildInferenceScale") || "0.75"),
     stereo3dPrebuildInferenceCropPercent: normalizeStereo3dInferenceCropPercent(localStorage.getItem("filePipeStereo3dPrebuildInferenceCropPercent") || "7.5"),
     stereo3dResolutionScaleOptions: [
@@ -159,6 +162,7 @@ document.addEventListener("alpine:init", () => {
     error: "",
 
     initApp() {
+      this.ensureStereo3dProcessorForPipeline();
       window.addEventListener("offline", () => {
         this.networkOnline = false;
         this.recoveryStatus = "You are offline. Peer connections may pause or disconnect.";
@@ -800,6 +804,15 @@ document.addEventListener("alpine:init", () => {
       return this.stereo3dLayout === "full-sbs" ? "Full SBS" : "Half SBS";
     },
 
+    stereo3dPipelineLabel() {
+      return this.stereo3dPipeline === "local" ? "Local browser" : "Remote connector";
+    },
+
+    activeStereo3dProcessorOptions() {
+      const pipeline = normalizeStereo3dPipeline(this.stereo3dPipeline);
+      return this.stereo3dProcessorOptions.filter((candidate) => (candidate.pipeline || "remote") === pipeline);
+    },
+
     stereo3dProcessorLabel() {
       const option = this.stereo3dProcessorOptions.find((candidate) => candidate.id === this.stereo3dProcessor);
       return option?.label || "Fast ffmpeg shift";
@@ -815,6 +828,14 @@ document.addEventListener("alpine:init", () => {
       const normalized = normalizeStereo3dResolutionScale(scale);
       const option = this.stereo3dResolutionScaleOptions.find((candidate) => candidate.id === normalized);
       return option?.description || "";
+    },
+
+    stereo3dDepthStrengthLabel() {
+      return `${normalizeStereo3dDepthStrength(this.stereo3dDepthStrength)}%`;
+    },
+
+    stereo3dTemporalSmoothingLabel() {
+      return `${normalizeStereo3dTemporalSmoothing(this.stereo3dTemporalSmoothing)}%`;
     },
 
     stereo3dInferenceScaleLabel(scale = this.stereo3dInferenceScale) {
@@ -847,6 +868,7 @@ document.addEventListener("alpine:init", () => {
     playerSettingsSummary() {
       return [
         this.transcodePlaybackModeLabel(),
+        this.stereo3dPipelineLabel(),
         this.stereo3dLayoutLabel(),
         `3D ${this.stereo3dResolutionScaleLabel()} / ${this.stereo3dInferenceScaleLabel()}`,
         this.hostSpatialAudioEnabled() ? "Spatial audio" : "Stereo audio",
@@ -1175,8 +1197,8 @@ document.addEventListener("alpine:init", () => {
       }
       const videoProfile = videoProfileForStereo3dLayout(this.stereo3dLayout);
       const stereoProcessor = normalizeStereo3dProcessor(this.stereo3dPrebuildProcessor);
-      if (stereoProcessor === "webgpu-depth-anything-v2-small") {
-        this.error = "WebGPU 3D is generated inside the viewer and does not create connector cache. Choose ffmpeg, Depth Anything, or Core ML to prebuild.";
+      if (isLocalStereo3dProcessor(stereoProcessor)) {
+        this.error = "Local browser 3D is generated inside the viewer and does not create connector cache. Choose ffmpeg, Depth Anything, or Core ML to prebuild.";
         return;
       }
       const profileOptions = {
@@ -1396,15 +1418,76 @@ document.addEventListener("alpine:init", () => {
       if (changed) await this.refreshCurrentWatchRoom3dMetadata();
     },
 
+    ensureStereo3dProcessorForPipeline() {
+      const pipeline = normalizeStereo3dPipeline(this.stereo3dPipeline);
+      const processor = normalizeStereo3dProcessor(this.stereo3dProcessor);
+      const processorIsLocal = isLocalStereo3dProcessor(processor);
+      if ((pipeline === "local" && processorIsLocal) || (pipeline === "remote" && !processorIsLocal)) {
+        this.stereo3dProcessor = processor;
+        return false;
+      }
+      this.stereo3dProcessor = defaultStereo3dProcessorForPipeline(pipeline);
+      localStorage.setItem("filePipeStereo3dProcessor", this.stereo3dProcessor);
+      return true;
+    },
+
+    async setStereo3dPipeline(pipeline) {
+      const nextPipeline = normalizeStereo3dPipeline(pipeline);
+      const changed = this.stereo3dPipeline !== nextPipeline;
+      this.stereo3dPipeline = nextPipeline;
+      localStorage.setItem("filePipeStereo3dPipeline", this.stereo3dPipeline);
+      const processorChanged = this.ensureStereo3dProcessorForPipeline();
+      if ((changed || processorChanged) && this.hostVideoMode === "hls3d" && this.playerSource && !this.playerLoading) {
+        await this.launchHostStereo3dStream();
+      }
+      if (changed || processorChanged) await this.refreshCurrentWatchRoom3dMetadata();
+    },
+
     async setStereo3dProcessor(processor) {
       const nextProcessor = normalizeStereo3dProcessor(processor);
       const changed = this.stereo3dProcessor !== nextProcessor;
       this.stereo3dProcessor = nextProcessor;
+      this.stereo3dPipeline = isLocalStereo3dProcessor(nextProcessor) ? "local" : "remote";
+      localStorage.setItem("filePipeStereo3dPipeline", this.stereo3dPipeline);
       localStorage.setItem("filePipeStereo3dProcessor", this.stereo3dProcessor);
       if (changed && this.hostVideoMode === "hls3d" && this.playerSource && !this.playerLoading) {
         await this.launchHostStereo3dStream();
       }
       if (changed) await this.refreshCurrentWatchRoom3dMetadata();
+    },
+
+    async setStereo3dDepthStrength(value) {
+      const nextValue = normalizeStereo3dDepthStrength(value);
+      const changed = this.stereo3dDepthStrength !== nextValue;
+      this.stereo3dDepthStrength = nextValue;
+      localStorage.setItem("filePipeStereo3dDepthStrength", this.stereo3dDepthStrength);
+      this.updateAttachedLocalDepthSettings();
+      if (changed) await this.refreshCurrentWatchRoom3dMetadata();
+    },
+
+    async setStereo3dTemporalSmoothing(value) {
+      const nextValue = normalizeStereo3dTemporalSmoothing(value);
+      const changed = this.stereo3dTemporalSmoothing !== nextValue;
+      this.stereo3dTemporalSmoothing = nextValue;
+      localStorage.setItem("filePipeStereo3dTemporalSmoothing", this.stereo3dTemporalSmoothing);
+      this.updateAttachedLocalDepthSettings();
+      if (changed) await this.refreshCurrentWatchRoom3dMetadata();
+    },
+
+    localDepthSettings() {
+      return {
+        depthStrength: Number(normalizeStereo3dDepthStrength(this.stereo3dDepthStrength)) / 100,
+        temporalSmoothing: Number(normalizeStereo3dTemporalSmoothing(this.stereo3dTemporalSmoothing)) / 100,
+      };
+    },
+
+    updateAttachedLocalDepthSettings() {
+      if (this.hostXrPlayer?.updateLocalDepthSettings) {
+        this.hostXrPlayer.updateLocalDepthSettings(this.localDepthSettings());
+        return;
+      }
+      const video = document.getElementById("host-video-player");
+      if (video) this.attachHostXrPlayer(video);
     },
 
     async setStereo3dResolutionScale(scale) {
@@ -1441,7 +1524,8 @@ document.addEventListener("alpine:init", () => {
     },
 
     setStereo3dPrebuildProcessor(processor) {
-      const nextProcessor = normalizeStereo3dProcessor(processor);
+      const normalizedProcessor = normalizeStereo3dProcessor(processor);
+      const nextProcessor = isLocalStereo3dProcessor(normalizedProcessor) ? "depth-anything-v2-base" : normalizedProcessor;
       this.stereo3dPrebuildProcessor = nextProcessor;
       localStorage.setItem("filePipeStereo3dPrebuildProcessor", this.stereo3dPrebuildProcessor);
     },
@@ -2062,23 +2146,29 @@ document.addEventListener("alpine:init", () => {
       );
     },
 
-    localWebGpuHls3dSource(hlsSource, videoProfile) {
+    localBrowserHls3dSource(hlsSource, videoProfile) {
       if (!hlsSource?.readHlsSegment) return null;
       const targetVideoProfile = normalizeTranscodeVideoProfile(videoProfile);
       const targetVideoLayout = videoLayoutForTranscodeProfile(targetVideoProfile);
-      const stereoProcessor = "webgpu-depth-anything-v2-small";
+      const stereoProcessor = normalizeStereo3dProcessor(this.stereo3dProcessor);
+      const localDepthSettings = this.localDepthSettings();
       return {
         ...hlsSource,
-        sourceLabel: `${hlsSource.sourceLabel || "Live stream"} with local WebGPU 3D`,
+        sourceLabel: `${hlsSource.sourceLabel || "Live stream"} with local browser 3D`,
         variantContentKey: `${hlsSource.variantContentKey || hlsSource.contentKey || "hls"}:local:${stereoProcessor}:${targetVideoProfile}`,
         videoProfile: "2d",
         videoLayout: "mono",
         stereoscopic: false,
         stereoProcessor,
         resolutionScale: "1",
+        inferenceScale: "1",
+        inferenceCropPercent: "0",
         localStereoProcessor: true,
+        stereoPipeline: "local",
         targetVideoProfile,
         targetVideoLayout,
+        depthStrength: localDepthSettings.depthStrength,
+        temporalSmoothing: localDepthSettings.temporalSmoothing,
         playbackProfile: {
           ...(hlsSource.playbackProfile || {}),
           videoProfile: "2d",
@@ -2086,9 +2176,14 @@ document.addEventListener("alpine:init", () => {
           stereoscopic: false,
           stereoProcessor,
           resolutionScale: "1",
+          inferenceScale: "1",
+          inferenceCropPercent: "0",
           localStereoProcessor: true,
+          stereoPipeline: "local",
           targetVideoProfile,
           targetVideoLayout,
+          depthStrength: localDepthSettings.depthStrength,
+          temporalSmoothing: localDepthSettings.temporalSmoothing,
         },
       };
     },
@@ -2106,12 +2201,15 @@ document.addEventListener("alpine:init", () => {
     },
 
     hostDisplayingStereo3dStream() {
-      return Boolean(this.playerSource && isStereoVideoProfile(this.playerSource.videoProfile));
+      return Boolean(this.playerSource && (isStereoVideoProfile(this.playerSource.videoProfile) || this.playerSource.localStereoProcessor || this.playerSource.playbackProfile?.localStereoProcessor));
     },
 
     hostDisplayLabel() {
       if (this.hostDisplayingStereo3dStream()) {
-        return `${videoLayoutLabel(this.playerSource.videoLayout || this.stereo3dLayout)} 3D`;
+        const layout = this.playerSource.targetVideoLayout || this.playerSource.videoLayout || this.stereo3dLayout;
+        return this.playerSource.localStereoProcessor || this.playerSource.playbackProfile?.localStereoProcessor
+          ? `${videoLayoutLabel(layout)} local 3D`
+          : `${videoLayoutLabel(layout)} 3D`;
       }
       return "Normal";
     },
@@ -2150,22 +2248,19 @@ document.addEventListener("alpine:init", () => {
       const playbackRate = Number(video?.playbackRate || 1);
       const videoProfile = videoProfileForStereo3dLayout(this.stereo3dLayout);
       const stereoProcessor = normalizeStereo3dProcessor(this.stereo3dProcessor);
-      if (stereoProcessor === "webgpu-depth-anything-v2-small") {
-        this.hostVideoMode = "normal";
-        localStorage.setItem("filePipeHostVideoMode", this.hostVideoMode);
-        this.error = "Host 3D Stream needs a connector-generated SBS stream. Choose ffmpeg, Depth Anything, or Core ML instead of WebGPU.";
-        return;
-      }
+      const localStereo3d = this.stereo3dPipeline === "local" || isLocalStereo3dProcessor(stereoProcessor);
       this.playerLoading = true;
       this.error = "";
       try {
-        const source = await this.liveWatchSourceForCurrentPlayer({
-          videoProfile,
-          stereoProcessor,
-          resolutionScale: this.stereo3dResolutionScale,
-          inferenceScale: this.stereo3dInferenceScale,
-          inferenceCropPercent: this.stereo3dInferenceCropPercent,
-        });
+        const source = localStereo3d
+          ? this.localBrowserHls3dSource(await this.liveWatchSourceForCurrentPlayer(), videoProfile)
+          : await this.liveWatchSourceForCurrentPlayer({
+              videoProfile,
+              stereoProcessor,
+              resolutionScale: this.stereo3dResolutionScale,
+              inferenceScale: this.stereo3dInferenceScale,
+              inferenceCropPercent: this.stereo3dInferenceCropPercent,
+            });
         if (!source?.playlistUrl) throw new Error("Could not prepare the 3D stream for host playback.");
         this.teardownHostHlsPlayer();
         this.playerSource = {
@@ -2175,7 +2270,9 @@ document.addEventListener("alpine:init", () => {
         };
         this.playerUrl = source.playlistUrl;
         this.playerType = "application/vnd.apple.mpegurl";
-        this.playerStatus = `Host player switched to ${videoLayoutLabel(source.targetVideoLayout || source.videoLayout)} 3D stream.`;
+        this.playerStatus = localStereo3d
+          ? `Host player switched to ${videoLayoutLabel(source.targetVideoLayout || this.stereo3dLayout)} local browser 3D.`
+          : `Host player switched to ${videoLayoutLabel(source.targetVideoLayout || source.videoLayout)} 3D stream.`;
         setTimeout(() => this.attachHostHlsPlayerAt(currentTime, wasPaused, playbackRate), 0);
         if (this.playerRoomId && this.playerRoomKey) {
           await this.refreshCurrentWatchRoom3dMetadata();
@@ -3002,6 +3099,11 @@ document.addEventListener("alpine:init", () => {
         sourceLayout: xrSourceLayoutFromProfile(profile),
         localDepthProcessor: profile.localStereoProcessor ? profile.stereoProcessor : "",
         localDepthTargetLayout: profile.targetVideoLayout || "",
+        localDepthSettings: profile.localStereoProcessor ? {
+          ...this.localDepthSettings(),
+          depthStrength: profile.depthStrength ?? this.localDepthSettings().depthStrength,
+          temporalSmoothing: profile.temporalSmoothing ?? this.localDepthSettings().temporalSmoothing,
+        } : {},
       });
     },
 
@@ -3201,13 +3303,17 @@ document.addEventListener("alpine:init", () => {
       let hls3dSource = null;
       const stereo3dVideoProfile = videoProfileForStereo3dLayout(this.stereo3dLayout);
       const stereo3dProcessor = normalizeStereo3dProcessor(this.stereo3dProcessor);
-      if (isStereoVideoProfile(hlsSource?.videoProfile)) {
+      const localStereo3d = this.stereo3dPipeline === "local" || isLocalStereo3dProcessor(stereo3dProcessor);
+      if (hlsSource?.localStereoProcessor || hlsSource?.playbackProfile?.localStereoProcessor) {
+        hls3dSource = hlsSource;
+        this.playerRoom3dStatus = `${videoLayoutLabel(hls3dSource.targetVideoLayout || this.stereo3dLayout)} local 3D is active for this room.`;
+      } else if (isStereoVideoProfile(hlsSource?.videoProfile)) {
         hls3dSource = hlsSource;
         this.playerRoom3dStatus = `${videoLayoutLabel(hls3dSource.videoLayout || this.stereo3dLayout)} ${this.stereo3dResolutionScaleLabel(hls3dSource.resolutionScale)} ${this.stereo3dInferenceScaleLabel(hls3dSource.inferenceScale)} 3D stream is active for this room.`;
       } else if (hlsSource && mediaInfoStereo3dCandidate(hlsSource.mediaInfo || source.mediaInfo) && this.canCreateLiveWatchRoom()) {
-        if (stereo3dProcessor === "webgpu-depth-anything-v2-small") {
-          hls3dSource = this.localWebGpuHls3dSource(hlsSource, stereo3dVideoProfile);
-          this.playerRoom3dStatus = `${videoLayoutLabel(this.stereo3dLayout)} WebGPU 3D is XR-only and viewer-local; it does not build connector cache or change the normal video element.`;
+        if (localStereo3d) {
+          hls3dSource = this.localBrowserHls3dSource(hlsSource, stereo3dVideoProfile);
+          this.playerRoom3dStatus = `${videoLayoutLabel(this.stereo3dLayout)} local 3D uses browser ONNX depth and GPU reprojection; it does not build connector cache.`;
         } else {
           try {
             hls3dSource = await this.liveWatchSourceForCurrentPlayer({
@@ -3309,8 +3415,11 @@ document.addEventListener("alpine:init", () => {
             inferenceScale: hlsSource.inferenceScale || hlsSource.playbackProfile?.inferenceScale || "1",
             inferenceCropPercent: hlsSource.inferenceCropPercent ?? hlsSource.playbackProfile?.inferenceCropPercent ?? "0",
             localStereoProcessor: Boolean(hlsSource.localStereoProcessor),
+            stereoPipeline: hlsSource.stereoPipeline || hlsSource.playbackProfile?.stereoPipeline || "",
             targetVideoProfile: hlsSource.targetVideoProfile || "",
             targetVideoLayout: hlsSource.targetVideoLayout || "",
+            depthStrength: hlsSource.depthStrength ?? hlsSource.playbackProfile?.depthStrength,
+            temporalSmoothing: hlsSource.temporalSmoothing ?? hlsSource.playbackProfile?.temporalSmoothing,
             playbackProfile: hlsSource.playbackProfile || null,
             mediaInfo: mediaInfoSummary(hlsSource.mediaInfo),
             hls: {
@@ -3335,8 +3444,11 @@ document.addEventListener("alpine:init", () => {
             inferenceScale: hls3dSource.inferenceScale || hls3dSource.playbackProfile?.inferenceScale || "0.5",
             inferenceCropPercent: hls3dSource.inferenceCropPercent ?? hls3dSource.playbackProfile?.inferenceCropPercent ?? "0",
             localStereoProcessor: Boolean(hls3dSource.localStereoProcessor),
+            stereoPipeline: hls3dSource.stereoPipeline || hls3dSource.playbackProfile?.stereoPipeline || "",
             targetVideoProfile: hls3dSource.targetVideoProfile || "",
             targetVideoLayout: hls3dSource.targetVideoLayout || "",
+            depthStrength: hls3dSource.depthStrength ?? hls3dSource.playbackProfile?.depthStrength,
+            temporalSmoothing: hls3dSource.temporalSmoothing ?? hls3dSource.playbackProfile?.temporalSmoothing,
             playbackProfile: hls3dSource.playbackProfile || null,
             mediaInfo: mediaInfoSummary(hls3dSource.mediaInfo),
             hls: {

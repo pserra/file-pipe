@@ -1423,6 +1423,79 @@ progress {
   display: block;
 }
 
+.fp-local-depth3d-source-hidden {
+  height: 1px !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+  position: absolute !important;
+  width: 1px !important;
+}
+
+.fp-local-depth3d-standard {
+  --fp-local-depth3d-aspect: 1.7777778;
+  aspect-ratio: var(--fp-local-depth3d-aspect);
+  background: #000000;
+  border: 1px solid var(--fp-border);
+  border-radius: 8px;
+  margin-inline: auto;
+  overflow: hidden;
+  position: relative;
+  width: 100%;
+}
+
+.fp-local-depth3d-canvas {
+  background: #000000;
+  display: block;
+  height: 100%;
+  width: 100%;
+}
+
+.fp-local-depth3d-controls {
+  align-items: center;
+  background: rgba(8, 13, 24, 0.82);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 8px;
+  bottom: 0.75rem;
+  color: #ffffff;
+  display: grid;
+  gap: 0.65rem;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  left: 0.75rem;
+  padding: 0.55rem 0.65rem;
+  position: absolute;
+  right: 0.75rem;
+  z-index: 2;
+}
+
+.fp-local-depth3d-controls .form-range {
+  min-width: 0;
+}
+
+.fp-local-depth3d-controls [data-role="time"] {
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+  min-width: 5.5rem;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.fp-local-depth3d-status {
+  background: rgba(8, 13, 24, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  color: rgba(248, 250, 252, 0.82);
+  font-size: 0.76rem;
+  font-weight: 700;
+  left: 0.75rem;
+  line-height: 1.25;
+  max-width: calc(100% - 1.5rem);
+  overflow-wrap: anywhere;
+  padding: 0.35rem 0.5rem;
+  position: absolute;
+  top: 0.75rem;
+  z-index: 2;
+}
+
 .fp-xr-panel {
   --fp-xr-desktop-width: 100%;
   background: var(--fp-surface-muted);
@@ -1724,6 +1797,15 @@ progress {
   .fp-xr-playback-controls {
     align-items: stretch;
     flex-wrap: wrap;
+  }
+
+  .fp-local-depth3d-controls {
+    align-items: stretch;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+
+  .fp-local-depth3d-controls [data-role="time"] {
+    display: none;
   }
 
   .fp-xr-time {

@@ -547,7 +547,10 @@ function serviceWorkerSetupMessage(error) {
 
 function stereo3dModeDescription(mode = {}) {
   if (mode.localStereoProcessor || mode.playbackProfile?.localStereoProcessor) {
-    return "Experimental browser WebGPU depth for XR/headsets; the normal video remains 2D";
+    const layout = mode.targetVideoLayout || mode.playbackProfile?.targetVideoLayout || "full-sbs";
+    const strength = mode.depthStrength ?? mode.playbackProfile?.depthStrength;
+    const strengthLabel = Number.isFinite(Number(strength)) ? `, ${Math.round(Number(strength) * 100)}% depth` : "";
+    return `Browser-local ${layout === "half-sbs" ? "Half SBS" : "Full SBS"} 3D using ONNX depth and GPU reprojection${strengthLabel}`;
   }
   const layout = mode.targetVideoLayout || mode.videoLayout || mode.playbackProfile?.targetVideoLayout || mode.playbackProfile?.videoLayout;
   const scale = mode.resolutionScale || mode.hls?.resolutionScale || mode.playbackProfile?.resolutionScale || "";

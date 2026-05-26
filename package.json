@@ -1,0 +1,10 @@
+{
+  "name": "file-pipe",
+  "private": true,
+  "dependencies": {
+    "@react-three/fiber": "^9.6.1",
+    "@react-three/xr": "^6.6.29",
+    "onnxruntime-web": "^1.26.0",
+    "three": "^0.184.0"
+  }
+}

@@ -94,8 +94,10 @@
       this.themeRevision = 0;
       this.localDepthProcessor = String(this.options.localDepthProcessor || "");
       this.localDepthTargetLayout = isKnownLayout(this.options.localDepthTargetLayout) ? this.options.localDepthTargetLayout : "";
+      this.localDepthSettings = normalizeLocalDepthSettings(this.options.localDepthSettings || this.options.playbackProfile || {});
       this.localDepthStatus = this.describeLocalDepthStatus();
       this.localDepthAdapter = null;
+      this.localDepthMaterial = null;
       this.videoTexture = null;
       this.backlightGroup = null;
       this.backlightMesh = null;
@@ -187,8 +189,8 @@
         this.syncOverlayControls();
         this.updateInlineStatus();
       }
-      if ("localDepthProcessor" in options || "localDepthTargetLayout" in options) {
-        this.setLocalDepthProcessor(options.localDepthProcessor || "", options.localDepthTargetLayout || "");
+      if ("localDepthProcessor" in options || "localDepthTargetLayout" in options || "localDepthSettings" in options) {
+        this.setLocalDepthProcessor(options.localDepthProcessor || "", options.localDepthTargetLayout || "", options.localDepthSettings || options.playbackProfile || {});
       }
       if (this.settings.spatialAudio && this.spatialAudioGraph?.mode === "spatial") {
         this.rebuildSpatialAudioGraph();
@@ -211,21 +213,48 @@
       this.updateInlineStatus();
     }
 
-    setLocalDepthProcessor(processor = "", targetLayout = "") {
-      this.localDepthProcessor = String(processor || "");
-      this.localDepthTargetLayout = isKnownLayout(targetLayout) ? targetLayout : "";
+    setLocalDepthProcessor(processor = "", targetLayout = "", settings = {}) {
+      const nextProcessor = String(processor || "");
+      const nextTargetLayout = isKnownLayout(targetLayout) ? targetLayout : "";
+      const nextSettings = normalizeLocalDepthSettings(settings);
+      const processorChanged = this.localDepthProcessor !== nextProcessor || this.localDepthTargetLayout !== nextTargetLayout;
+      this.localDepthProcessor = nextProcessor;
+      this.localDepthTargetLayout = nextTargetLayout;
+      this.localDepthSettings = nextSettings;
       this.localDepthStatus = this.describeLocalDepthStatus();
-      this.configureLocalDepthAdapter();
+      if (processorChanged || !this.localDepthAdapter) {
+        this.configureLocalDepthAdapter();
+      } else {
+        this.updateLocalDepthSettings(nextSettings);
+      }
       this.updateInlineStatus();
+    }
+
+    updateLocalDepthSettings(settings = this.localDepthSettings) {
+      this.localDepthSettings = normalizeLocalDepthSettings(settings);
+      if (this.localDepthAdapter?.updateOptions) {
+        this.localDepthAdapter.updateOptions({
+          processor: this.localDepthProcessor,
+          targetLayout: this.localDepthTargetLayout,
+          ...this.localDepthSettings,
+          standardOutput: true,
+          xrPlayer: this,
+        });
+        if (this.localDepthAdapter?.status) this.localDepthStatus = ` ${this.localDepthAdapter.status}`;
+      } else {
+        this.localDepthStatus = this.describeLocalDepthStatus();
+      }
+      this.updateInlineStatus();
+      return this;
     }
 
     describeLocalDepthStatus() {
       if (!this.localDepthProcessor) return "";
-      if (this.localDepthProcessor !== "webgpu-depth-anything-v2-small") return "";
-      if (!navigator.gpu) return " Local WebGPU depth is selected, but WebGPU is unavailable in this browser.";
+      if (!isLocalDepthProcessor(this.localDepthProcessor)) return "";
       const target = LAYOUT_LABELS[this.localDepthTargetLayout] || "3D";
-      if (!window.FilePipeLocalDepth3dAdapter?.attach) return ` Local WebGPU depth is selected for ${target}; no local depth adapter is loaded.`;
-      return ` Local WebGPU depth adapter is active for ${target}.`;
+      if (!window.FilePipeLocalDepth3dAdapter?.attach) return ` Local depth is selected for ${target}; no local depth adapter is loaded.`;
+      if (this.localDepthAdapter?.status) return ` ${this.localDepthAdapter.status}`;
+      return ` Local browser depth adapter is active for ${target}.`;
     }
 
     configureLocalDepthAdapter() {
@@ -233,16 +262,20 @@
         this.localDepthAdapter.dispose();
       }
       this.localDepthAdapter = null;
-      if (this.localDepthProcessor !== "webgpu-depth-anything-v2-small" || !navigator.gpu || !window.FilePipeLocalDepth3dAdapter?.attach) return;
+      this.updateVideoMaterial();
+      if (!isLocalDepthProcessor(this.localDepthProcessor) || !window.FilePipeLocalDepth3dAdapter?.attach) return;
       try {
         this.localDepthAdapter = window.FilePipeLocalDepth3dAdapter.attach(this.video, {
           processor: this.localDepthProcessor,
           targetLayout: this.localDepthTargetLayout,
+          ...this.localDepthSettings,
+          standardOutput: true,
           xrPlayer: this,
         });
         if (this.localDepthAdapter?.status) this.localDepthStatus = ` ${this.localDepthAdapter.status}`;
+        this.updateVideoMaterial();
       } catch (error) {
-        this.localDepthStatus = ` Local WebGPU depth adapter failed: ${error.message || error}`;
+        this.localDepthStatus = ` Local depth adapter failed: ${error.message || error}`;
       }
     }
 
@@ -2306,7 +2339,7 @@
       this.videoTexture.minFilter = THREE.LinearFilter;
       this.videoTexture.magFilter = THREE.LinearFilter;
       this.videoTexture.generateMipmaps = false;
-      const material = new THREE.MeshBasicMaterial({ map: this.videoTexture, side: THREE.DoubleSide, transparent: true, opacity: 1 });
+      const material = this.createVideoMaterial();
       this.videoMesh = new THREE.Mesh(this.createVideoGeometry(), material);
       this.videoMesh.renderOrder = 2;
       this.videoMesh.onBeforeRender = (_renderer, _scene, camera) => this.applyVideoTextureUvForCamera(camera);
@@ -2319,6 +2352,24 @@
       }
       this.updateSceneLighting();
       this.updateDesktopCamera();
+    }
+
+    createVideoMaterial() {
+      if (this.localDepthAdapter?.isEnabled?.() && this.videoTexture) {
+        this.localDepthMaterial?.dispose?.();
+        this.localDepthMaterial = this.localDepthAdapter.createThreeMaterial(this.videoTexture, { outputMode: "eye" });
+        return this.localDepthMaterial;
+      }
+      this.localDepthMaterial = null;
+      return new THREE.MeshBasicMaterial({ map: this.videoTexture, side: THREE.DoubleSide, transparent: true, opacity: 1 });
+    }
+
+    updateVideoMaterial() {
+      if (!this.videoMesh || !this.videoTexture || !window.THREE) return;
+      const previousMaterial = this.videoMesh.material;
+      this.videoMesh.material = this.createVideoMaterial();
+      if (previousMaterial && previousMaterial !== this.videoMesh.material) previousMaterial.dispose?.();
+      this.updateVideoMaterialUv();
     }
 
     initMrDimLayer() {
@@ -2421,6 +2472,11 @@
       if (!this.videoTexture) return;
       this.videoTexture.offset.set(0, 0);
       this.videoTexture.repeat.set(1, 1);
+      if (this.localDepthAdapter?.isEnabled?.() && this.videoMesh?.material === this.localDepthMaterial) {
+        this.localDepthAdapter.setThreeEye?.(this.videoEyeForCamera(camera));
+        this.videoTexture.needsUpdate = true;
+        return;
+      }
       if (this.settings.layout === "half-sbs") {
         this.videoTexture.repeat.set(0.5, 1);
         this.videoTexture.offset.set(this.videoEyeForCamera(camera) === "right" ? 0.5 : 0, 0);
@@ -3325,6 +3381,7 @@
         if (this.videoTexture && this.video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
           this.videoTexture.needsUpdate = true;
         }
+        this.localDepthAdapter?.updateFrame?.(now);
         this.updateControllerDrag();
         this.updateXrThumbstickScrub();
         this.updateBacklight();
@@ -3717,6 +3774,30 @@
 
   function isKnownBacklightMode(value) {
     return ["off", "soft", "dynamic", "video"].includes(value);
+  }
+
+  function isLocalDepthProcessor(value) {
+    const processor = String(value || "").trim().toLowerCase();
+    if (!processor) return false;
+    if (window.FilePipeLocalDepth3dAdapter?.isLocalProcessor) {
+      return window.FilePipeLocalDepth3dAdapter.isLocalProcessor(processor);
+    }
+    return [
+      "midas-small-onnx",
+      "fastdepth-mobilenet-onnx",
+      "depth-anything-v2-tiny-onnx",
+      "depth-anything-v2-small-onnx",
+      "webgpu-depth-anything-v2-small",
+    ].includes(processor);
+  }
+
+  function normalizeLocalDepthSettings(settings = {}) {
+    return {
+      depthStrength: clampNumber(Number(settings.depthStrength), 0, 2, 0.72),
+      temporalSmoothing: clampNumber(Number(settings.temporalSmoothing), 0, 0.92, 0.55),
+      inferenceIntervalMs: clampNumber(Number(settings.inferenceIntervalMs), 80, 1000, 180),
+      inputSize: clampNumber(Number(settings.inputSize), 128, 512, 256),
+    };
   }
 
   function normalizeSpeakerChannel(value) {

@@ -432,6 +432,26 @@ function normalizeStereo3dInferenceCropPercent(value) {
   return String(Math.round(number * 100) / 100);
 }
 
+function normalizeStereo3dPipeline(value) {
+  return String(value || "").trim().toLowerCase() === "local" ? "local" : "remote";
+}
+
+function normalizeStereo3dDepthStrength(value) {
+  let number = Number(String(value ?? "").replace("%", ""));
+  if (!Number.isFinite(number)) number = 72;
+  if (number <= 2) number *= 100;
+  number = Math.max(0, Math.min(200, number));
+  return String(Math.round(number));
+}
+
+function normalizeStereo3dTemporalSmoothing(value) {
+  let number = Number(String(value ?? "").replace("%", ""));
+  if (!Number.isFinite(number)) number = 55;
+  if (number <= 1) number *= 100;
+  number = Math.max(0, Math.min(92, number));
+  return String(Math.round(number));
+}
+
 function normalizeStereo3dProcessor(value) {
   const processor = String(value || "").trim().toLowerCase().replace(/_/g, "-");
   const aliases = {
@@ -451,11 +471,34 @@ function normalizeStereo3dProcessor(value) {
     "coreml-small": "coreml-depth-anything-v2-small",
     "apple-coreml": "coreml-depth-anything-v2-small",
     "coreml-depth-anything-v2-small": "coreml-depth-anything-v2-small",
+    midas: "midas-small-onnx",
+    "midas-small": "midas-small-onnx",
+    "midas-small-onnx": "midas-small-onnx",
+    fastdepth: "fastdepth-mobilenet-onnx",
+    "fastdepth-mobilenet": "fastdepth-mobilenet-onnx",
+    "fastdepth-mobilenet-onnx": "fastdepth-mobilenet-onnx",
+    "depth-anything-v2-tiny": "depth-anything-v2-tiny-onnx",
+    "depth-anything-v2-tiny-onnx": "depth-anything-v2-tiny-onnx",
+    "depth-anything-v2-small-onnx": "depth-anything-v2-small-onnx",
     webgpu: "webgpu-depth-anything-v2-small",
     "webgpu-small": "webgpu-depth-anything-v2-small",
     "webgpu-depth-anything-v2-small": "webgpu-depth-anything-v2-small",
   };
   return aliases[processor] || "ffmpeg-shift";
+}
+
+function isLocalStereo3dProcessor(value) {
+  return [
+    "midas-small-onnx",
+    "fastdepth-mobilenet-onnx",
+    "depth-anything-v2-tiny-onnx",
+    "depth-anything-v2-small-onnx",
+    "webgpu-depth-anything-v2-small",
+  ].includes(normalizeStereo3dProcessor(value));
+}
+
+function defaultStereo3dProcessorForPipeline(pipeline) {
+  return normalizeStereo3dPipeline(pipeline) === "local" ? "midas-small-onnx" : "depth-anything-v2-small";
 }
 
 function stereo3dProcessorOptions() {
@@ -465,30 +508,68 @@ function stereo3dProcessorOptions() {
       label: "Fast ffmpeg shift",
       bestUse: "Near real-time fallback",
       m3Practicality: "Excellent",
+      pipeline: "remote",
     },
     {
       id: "depth-anything-v2-small",
       label: "Depth Anything V2 Small",
       bestUse: "Quality with lower latency",
       m3Practicality: "Good",
+      pipeline: "remote",
     },
     {
       id: "depth-anything-v2-base",
       label: "Depth Anything V2 Base",
       bestUse: "Quality/cache-ahead",
       m3Practicality: "Moderate",
+      pipeline: "remote",
     },
     {
       id: "coreml-depth-anything-v2-small",
       label: "Apple Core ML Depth Anything V2 Small",
       bestUse: "Apple Silicon local inference",
       m3Practicality: "Excellent",
+      pipeline: "remote",
+    },
+    {
+      id: "midas-small-onnx",
+      label: "Local MiDaS Small ONNX",
+      bestUse: "Browser real-time depth",
+      m3Practicality: "Quest/iPhone friendly",
+      pipeline: "local",
+      browserOnly: true,
+    },
+    {
+      id: "fastdepth-mobilenet-onnx",
+      label: "Local FastDepth MobileNet ONNX",
+      bestUse: "Lowest-latency local depth",
+      m3Practicality: "Good when model is installed",
+      pipeline: "local",
+      browserOnly: true,
+    },
+    {
+      id: "depth-anything-v2-tiny-onnx",
+      label: "Local Depth Anything V2 Tiny ONNX",
+      bestUse: "Better depth if device allows",
+      m3Practicality: "Experimental",
+      pipeline: "local",
+      browserOnly: true,
+    },
+    {
+      id: "depth-anything-v2-small-onnx",
+      label: "Local Depth Anything V2 Small ONNX",
+      bestUse: "Higher quality local depth",
+      m3Practicality: "High-end browser only",
+      pipeline: "local",
+      browserOnly: true,
     },
     {
       id: "webgpu-depth-anything-v2-small",
-      label: "Experimental WebGPU XR only",
-      bestUse: "Viewer-side XR depth; no connector cache",
-      m3Practicality: "Needs browser adapter",
+      label: "Legacy local WebGPU Depth Anything",
+      bestUse: "Viewer-side XR depth",
+      m3Practicality: "Compatibility alias",
+      pipeline: "local",
+      browserOnly: true,
     },
   ];
 }

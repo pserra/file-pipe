@@ -54,6 +54,11 @@ function plainData(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+function xrSourceLayoutFromProfile(profile = {}) {
+  if (profile.localStereoProcessor) return null;
+  return ["half-sbs", "full-sbs"].includes(profile.videoLayout) ? profile.videoLayout : null;
+}
+
 async function waitForIceGatheringComplete(peer) {
   if (peer.iceGatheringState === "complete") return;
   await new Promise((resolve) => {

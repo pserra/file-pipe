@@ -134,10 +134,19 @@ document.addEventListener("alpine:init", () => {
 
     attachXrPlayer(video) {
       if (!window.FilePipeXrPlayer || !video) return;
+      const profile = this.metadata?.playbackProfile || {};
       this.xrPlayer = window.FilePipeXrPlayer.attach(video, {
         fill: true,
         storageKey: "filePipeBigscreenXrPlayer",
         mediaInfo: () => this.metadata?.mediaInfo || null,
+        playbackProfile: profile,
+        sourceLayout: xrSourceLayoutFromProfile(profile),
+        localDepthProcessor: profile.localStereoProcessor ? profile.stereoProcessor : "",
+        localDepthTargetLayout: profile.targetVideoLayout || "",
+        localDepthSettings: profile.localStereoProcessor ? {
+          depthStrength: profile.depthStrength,
+          temporalSmoothing: profile.temporalSmoothing,
+        } : {},
       });
     },
 

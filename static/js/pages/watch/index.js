@@ -318,7 +318,7 @@ document.addEventListener("alpine:init", () => {
         const localStereo = Boolean(modes.hls3d.localStereoProcessor || modes.hls3d.playbackProfile?.localStereoProcessor);
         result.push({
           id: "hls3d",
-          label: localStereo ? "WebGPU XR 3D" : "3D Stream",
+          label: localStereo ? "Local 3D" : "3D Stream",
           description: stereo3dModeDescription(modes.hls3d),
         });
       }
@@ -1199,6 +1199,10 @@ document.addEventListener("alpine:init", () => {
         sourceLayout: xrSourceLayoutFromProfile(profile),
         localDepthProcessor: profile.localStereoProcessor ? profile.stereoProcessor : "",
         localDepthTargetLayout: profile.targetVideoLayout || "",
+        localDepthSettings: profile.localStereoProcessor ? {
+          depthStrength: profile.depthStrength,
+          temporalSmoothing: profile.temporalSmoothing,
+        } : {},
       });
     },
 
