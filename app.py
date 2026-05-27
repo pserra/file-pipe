@@ -373,7 +373,7 @@ def normalize_xr_theme(theme_dir: Path) -> Optional[dict]:
                     "url": url_for("static", filename=f"{XR_THEME_FOLDER}/{theme_dir.name}/{file_name}"),
                 }
             )
-        elif asset.get("type") in {"box", "light", "empty"}:
+        elif asset.get("type") in {"box", "circle", "disc", "disk", "ring", "light", "empty"}:
             normalized_assets.append(asset)
     return {
         **data,

@@ -1153,6 +1153,7 @@ progress {
   justify-content: space-between;
   min-width: 0;
   padding: 0.65rem 0.85rem;
+  transition: opacity 160ms ease, transform 160ms ease;
 }
 
 .fp-three-xr-topbar strong {
@@ -1248,6 +1249,22 @@ progress {
   z-index: 4;
 }
 
+.fp-three-xr-lite-mode.fp-three-xr-lite-controls-hidden .fp-three-xr-topbar,
+.fp-three-xr-lite-mode.fp-three-xr-lite-controls-hidden .fp-three-xr-playback {
+  display: none;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-0.4rem);
+}
+
+.fp-three-xr-lite-mode.fp-three-xr-lite-controls-hidden .fp-three-xr-playback {
+  transform: translateY(0.5rem);
+}
+
+.fp-three-xr-lite-mode.fp-three-xr-lite-controls-hidden .fp-three-xr-canvas {
+  cursor: none;
+}
+
 .fp-three-xr-canvas {
   cursor: grab;
   display: block;
@@ -1283,6 +1300,7 @@ progress {
   padding: 0.55rem 0.65rem;
   position: absolute;
   right: 0.85rem;
+  transition: opacity 160ms ease, transform 160ms ease;
   z-index: 2;
 }
 

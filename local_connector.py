@@ -273,39 +273,54 @@ TRANSCODE_VIDEO_PROFILES = {
 TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT = "ffmpeg-shift"
 TRANSCODE_STEREO_PROCESSOR_DA_V2_SMALL = "depth-anything-v2-small"
 TRANSCODE_STEREO_PROCESSOR_DA_V2_BASE = "depth-anything-v2-base"
+TRANSCODE_STEREO_PROCESSOR_DA_V3_SMALL = "depth-anything-v3-small"
+TRANSCODE_STEREO_PROCESSOR_DA_V3_BASE = "depth-anything-v3-base"
 TRANSCODE_STEREO_PROCESSOR_COREML_DA_V2_SMALL = "coreml-depth-anything-v2-small"
 TRANSCODE_STEREO_PROCESSOR_WEBGPU_DA_V2_SMALL = "webgpu-depth-anything-v2-small"
+TRANSCODE_STEREO_PROCESSOR_REALTIME_DA_SMALL_BALANCED = "pipeline-depth-small-balanced"
+TRANSCODE_STEREO_PROCESSOR_REALTIME_DA_SMALL_FAST = "pipeline-depth-small-fast"
 TRANSCODE_STEREO_PROCESSORS = {
     TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT,
     TRANSCODE_STEREO_PROCESSOR_DA_V2_SMALL,
     TRANSCODE_STEREO_PROCESSOR_DA_V2_BASE,
+    TRANSCODE_STEREO_PROCESSOR_DA_V3_SMALL,
+    TRANSCODE_STEREO_PROCESSOR_DA_V3_BASE,
     TRANSCODE_STEREO_PROCESSOR_COREML_DA_V2_SMALL,
     TRANSCODE_STEREO_PROCESSOR_WEBGPU_DA_V2_SMALL,
+    TRANSCODE_STEREO_PROCESSOR_REALTIME_DA_SMALL_BALANCED,
+    TRANSCODE_STEREO_PROCESSOR_REALTIME_DA_SMALL_FAST,
 }
 TRANSCODE_CACHE_DIR = Path(os.environ.get("FILE_PIPE_TRANSCODE_CACHE_DIR", "instance/transcodes"))
 HLS_SEGMENT_SECONDS = int(os.environ.get("FILE_PIPE_HLS_SEGMENT_SECONDS", "6"))
 HLS_PREFETCH_SEGMENTS = int(os.environ.get("FILE_PIPE_HLS_PREFETCH_SEGMENTS", "4"))
 HLS_STEREO3D_PREFETCH_SEGMENTS = int(os.environ.get("FILE_PIPE_HLS_STEREO3D_PREFETCH_SEGMENTS", "1"))
 HLS_ACCURATE_SEEK_WINDOW_SECONDS = float(os.environ.get("FILE_PIPE_HLS_ACCURATE_SEEK_WINDOW_SECONDS", "8"))
-HLS_SEGMENT_CACHE_VERSION = "hls-v3"
+HLS_SEGMENT_CACHE_VERSION = "hls-v4"
 HLS_STEREO3D_DEPTH_PERCENT = float(os.environ.get("FILE_PIPE_HLS_STEREO3D_DEPTH_PERCENT", "3.5"))
 HLS_STEREO3D_REALTIME_PROCESSOR = os.environ.get(
     "FILE_PIPE_HLS_STEREO3D_REALTIME_PROCESSOR",
-    os.environ.get("FILE_PIPE_HLS_STEREO3D_PROCESSOR", TRANSCODE_STEREO_PROCESSOR_DA_V2_SMALL),
+    os.environ.get("FILE_PIPE_HLS_STEREO3D_PROCESSOR", TRANSCODE_STEREO_PROCESSOR_REALTIME_DA_SMALL_BALANCED),
 )
 HLS_STEREO3D_PREBUILD_PROCESSOR = os.environ.get("FILE_PIPE_HLS_STEREO3D_PREBUILD_PROCESSOR", TRANSCODE_STEREO_PROCESSOR_DA_V2_BASE)
 HLS_STEREO3D_PROCESSOR = HLS_STEREO3D_REALTIME_PROCESSOR
 HLS_STEREO3D_RESOLUTION_SCALE = os.environ.get("FILE_PIPE_HLS_STEREO3D_RESOLUTION_SCALE", "1")
 HLS_STEREO3D_INFERENCE_SCALE = os.environ.get(
     "FILE_PIPE_HLS_STEREO3D_INFERENCE_SCALE",
-    os.environ.get("FILE_PIPE_DEPTH_INFERENCE_SCALE", "0.5"),
+    os.environ.get("FILE_PIPE_DEPTH_INFERENCE_SCALE", "0.33"),
 )
 HLS_STEREO3D_INFERENCE_CROP_PERCENT = os.environ.get(
     "FILE_PIPE_HLS_STEREO3D_INFERENCE_CROP_PERCENT",
     os.environ.get("FILE_PIPE_DEPTH_INFERENCE_CROP_PERCENT", "0"),
 )
-HLS_STEREO3D_PREBUILD_INFERENCE_SCALE = os.environ.get("FILE_PIPE_HLS_STEREO3D_PREBUILD_INFERENCE_SCALE", "0.75")
-HLS_STEREO3D_PREBUILD_INFERENCE_CROP_PERCENT = os.environ.get("FILE_PIPE_HLS_STEREO3D_PREBUILD_INFERENCE_CROP_PERCENT", "7.5")
+HLS_STEREO3D_PREBUILD_INFERENCE_SCALE = os.environ.get("FILE_PIPE_HLS_STEREO3D_PREBUILD_INFERENCE_SCALE", "0.6")
+HLS_STEREO3D_PREBUILD_INFERENCE_CROP_PERCENT = os.environ.get("FILE_PIPE_HLS_STEREO3D_PREBUILD_INFERENCE_CROP_PERCENT", "0")
+HLS_STEREO3D_PREBUILD_TEMPORAL_CONTEXT_SEGMENTS = int(os.environ.get("FILE_PIPE_HLS_STEREO3D_PREBUILD_TEMPORAL_CONTEXT_SEGMENTS", "1"))
+HLS_STEREO3D_PREBUILD_DA3_TEMPORAL_WINDOW_FRAMES = int(os.environ.get("FILE_PIPE_HLS_STEREO3D_PREBUILD_DA3_TEMPORAL_WINDOW_FRAMES", os.environ.get("FILE_PIPE_HLS_STEREO3D_PREBUILD_TEMPORAL_WINDOW_FRAMES", "2")))
+HLS_STEREO3D_PREBUILD_DA3_TEMPORAL_OVERLAP_FRAMES = int(os.environ.get("FILE_PIPE_HLS_STEREO3D_PREBUILD_DA3_TEMPORAL_OVERLAP_FRAMES", os.environ.get("FILE_PIPE_HLS_STEREO3D_PREBUILD_TEMPORAL_OVERLAP_FRAMES", "1")))
+HLS_STEREO3D_PREBUILD_DA2_TEMPORAL_WINDOW_FRAMES = int(os.environ.get("FILE_PIPE_HLS_STEREO3D_PREBUILD_DA2_TEMPORAL_WINDOW_FRAMES", "18"))
+HLS_STEREO3D_PREBUILD_DA2_TEMPORAL_OVERLAP_FRAMES = int(os.environ.get("FILE_PIPE_HLS_STEREO3D_PREBUILD_DA2_TEMPORAL_OVERLAP_FRAMES", "6"))
+HLS_STEREO3D_PREBUILD_TEMPORAL_SMOOTHING = os.environ.get("FILE_PIPE_HLS_STEREO3D_PREBUILD_TEMPORAL_SMOOTHING", "0.18")
+HLS_STEREO3D_PREBUILD_SEGMENT_BATCH_COUNT = int(os.environ.get("FILE_PIPE_HLS_STEREO3D_PREBUILD_SEGMENT_BATCH_COUNT", "2"))
 PROGRESSIVE_TRANSCODE_START_PERCENT = int(os.environ.get("FILE_PIPE_PROGRESSIVE_TRANSCODE_START_PERCENT", "3"))
 PROGRESSIVE_TRANSCODE_MIN_BYTES = int(os.environ.get("FILE_PIPE_PROGRESSIVE_TRANSCODE_MIN_BYTES", str(2 * 1024 * 1024)))
 TRANSCODE_WORKERS = max(1, int(os.environ.get("FILE_PIPE_TRANSCODE_WORKERS", "1")))
@@ -560,6 +575,8 @@ def register_local_resource(path: Path) -> str:
     RESOURCE_METADATA_CACHE[resource_id] = {
         "protocolInfo": f"http-get:*:{content_type}:*",
         "size": str(size),
+        "title": resolved.name,
+        "sourcePath": str(resolved),
     }
     return resource_id
 
@@ -868,6 +885,8 @@ def parse_didl(didl: ET.Element, base_url: str = "") -> List[Dict[str, object]]:
             {"albumArtURI", "albumarturi", "thumbnail", "icon", "iconUri", "coverArt"},
         )
         art_id = register_art_url(art_url, base_url)
+        item_title = child_text(node, "title") or "(untitled)"
+        item_class = child_text(node, "class")
         resources = []
         for child in node:
             if ns_name(child.tag) != "res":
@@ -880,6 +899,13 @@ def parse_didl(didl: ET.Element, base_url: str = "") -> List[Dict[str, object]]:
                 RESOURCE_CACHE[resource_id] = url
                 RESOURCE_METADATA_CACHE[resource_id] = {
                     **attributes,
+                    "title": item_title,
+                    "class": item_class,
+                    "parentId": node.attrib.get("parentID", ""),
+                    "objectId": node.attrib.get("id", ""),
+                    "metadata": metadata,
+                    "playback": playback,
+                    "artworkUrl": ART_CACHE.get(art_id, "") if art_id else "",
                     "sourceUrl": url,
                 }
             resources.append(
@@ -898,8 +924,8 @@ def parse_didl(didl: ET.Element, base_url: str = "") -> List[Dict[str, object]]:
             "id": node.attrib.get("id", ""),
             "parentId": node.attrib.get("parentID", ""),
             "type": kind,
-            "title": child_text(node, "title") or "(untitled)",
-            "class": child_text(node, "class"),
+            "title": item_title,
+            "class": item_class,
             "childCount": node.attrib.get("childCount"),
             "resources": resources,
         }
@@ -1227,12 +1253,33 @@ def normalize_stereo_processor(value: object) -> str:
         "shift": TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT,
         "ffmpeg": TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT,
         "ffmpeg-shift": TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT,
+        "realtime": TRANSCODE_STEREO_PROCESSOR_REALTIME_DA_SMALL_BALANCED,
+        "real-time": TRANSCODE_STEREO_PROCESSOR_REALTIME_DA_SMALL_BALANCED,
+        "balanced": TRANSCODE_STEREO_PROCESSOR_REALTIME_DA_SMALL_BALANCED,
+        "realtime-balanced": TRANSCODE_STEREO_PROCESSOR_REALTIME_DA_SMALL_BALANCED,
+        "real-time-balanced": TRANSCODE_STEREO_PROCESSOR_REALTIME_DA_SMALL_BALANCED,
+        "depth-small-balanced": TRANSCODE_STEREO_PROCESSOR_REALTIME_DA_SMALL_BALANCED,
+        "pipeline-depth-small-balanced": TRANSCODE_STEREO_PROCESSOR_REALTIME_DA_SMALL_BALANCED,
+        "fast-realtime": TRANSCODE_STEREO_PROCESSOR_REALTIME_DA_SMALL_FAST,
+        "realtime-fast": TRANSCODE_STEREO_PROCESSOR_REALTIME_DA_SMALL_FAST,
+        "real-time-fast": TRANSCODE_STEREO_PROCESSOR_REALTIME_DA_SMALL_FAST,
+        "depth-small-fast": TRANSCODE_STEREO_PROCESSOR_REALTIME_DA_SMALL_FAST,
+        "pipeline-depth-small-fast": TRANSCODE_STEREO_PROCESSOR_REALTIME_DA_SMALL_FAST,
         "depth-anything-small": TRANSCODE_STEREO_PROCESSOR_DA_V2_SMALL,
         "da-v2-small": TRANSCODE_STEREO_PROCESSOR_DA_V2_SMALL,
         "depth-anything-v2-small": TRANSCODE_STEREO_PROCESSOR_DA_V2_SMALL,
         "depth-anything-base": TRANSCODE_STEREO_PROCESSOR_DA_V2_BASE,
         "da-v2-base": TRANSCODE_STEREO_PROCESSOR_DA_V2_BASE,
         "depth-anything-v2-base": TRANSCODE_STEREO_PROCESSOR_DA_V2_BASE,
+        "da3": TRANSCODE_STEREO_PROCESSOR_DA_V3_BASE,
+        "depth-anything-v3": TRANSCODE_STEREO_PROCESSOR_DA_V3_BASE,
+        "depth-anything-3": TRANSCODE_STEREO_PROCESSOR_DA_V3_BASE,
+        "depth-anything-v3-small": TRANSCODE_STEREO_PROCESSOR_DA_V3_SMALL,
+        "da-v3-small": TRANSCODE_STEREO_PROCESSOR_DA_V3_SMALL,
+        "da3-small": TRANSCODE_STEREO_PROCESSOR_DA_V3_SMALL,
+        "depth-anything-v3-base": TRANSCODE_STEREO_PROCESSOR_DA_V3_BASE,
+        "da-v3-base": TRANSCODE_STEREO_PROCESSOR_DA_V3_BASE,
+        "da3-base": TRANSCODE_STEREO_PROCESSOR_DA_V3_BASE,
         "coreml": TRANSCODE_STEREO_PROCESSOR_COREML_DA_V2_SMALL,
         "coreml-small": TRANSCODE_STEREO_PROCESSOR_COREML_DA_V2_SMALL,
         "apple-coreml": TRANSCODE_STEREO_PROCESSOR_COREML_DA_V2_SMALL,
@@ -1318,6 +1365,84 @@ def transcode_video_layout(video_profile: str) -> str:
     if profile == TRANSCODE_VIDEO_PROFILE_STEREO_SBS:
         return "half-sbs"
     return "mono"
+
+
+def realtime_stereo_pipeline_settings(stereo_processor: str) -> Dict[str, object]:
+    processor = normalize_stereo_processor(stereo_processor)
+    pipelines = {
+        TRANSCODE_STEREO_PROCESSOR_REALTIME_DA_SMALL_BALANCED: {
+            "id": TRANSCODE_STEREO_PROCESSOR_REALTIME_DA_SMALL_BALANCED,
+            "label": "Realtime Depth Small Balanced",
+            "processor": TRANSCODE_STEREO_PROCESSOR_DA_V2_SMALL,
+            "inferenceScale": "0.33",
+            "inferenceCropPercent": "0",
+            "stereoFill": "inpaint",
+            "inpaintRadius": 2,
+            "temporal": True,
+            "temporalSmoothing": "0.10",
+            "temporalWindowFrames": 8,
+            "temporalOverlapFrames": 2,
+            "depthFrameStride": 4,
+            "encoderPreset": "ultrafast",
+            "fps": "30",
+            "target": "30fps 720p on MacBook Pro M3 18GB",
+        },
+        TRANSCODE_STEREO_PROCESSOR_REALTIME_DA_SMALL_FAST: {
+            "id": TRANSCODE_STEREO_PROCESSOR_REALTIME_DA_SMALL_FAST,
+            "label": "Realtime Depth Small Fast",
+            "processor": TRANSCODE_STEREO_PROCESSOR_DA_V2_SMALL,
+            "inferenceScale": "0.25",
+            "inferenceCropPercent": "0",
+            "stereoFill": "remap",
+            "inpaintRadius": 0,
+            "temporal": True,
+            "temporalSmoothing": "0.06",
+            "temporalWindowFrames": 4,
+            "temporalOverlapFrames": 1,
+            "depthFrameStride": 8,
+            "encoderPreset": "ultrafast",
+            "fps": "30",
+            "target": "Lower-latency 720p fallback with remap fill when balanced is too slow",
+        },
+    }
+    return dict(pipelines.get(processor) or {})
+
+
+def is_realtime_stereo_pipeline(stereo_processor: str) -> bool:
+    return bool(realtime_stereo_pipeline_settings(stereo_processor))
+
+
+def effective_realtime_stereo_settings(
+    stereo_processor: str,
+    inference_scale: str = "0.5",
+    inference_crop_percent: str = "0",
+) -> Dict[str, object]:
+    processor = normalize_stereo_processor(stereo_processor)
+    pipeline = realtime_stereo_pipeline_settings(processor)
+    if not pipeline:
+        return {
+            "pipeline": "",
+            "processor": processor,
+            "cacheProcessor": processor,
+            "inferenceScale": normalize_stereo3d_inference_scale(inference_scale),
+            "inferenceCropPercent": normalize_stereo3d_inference_crop_percent(inference_crop_percent),
+            "stereoFill": os.environ.get("FILE_PIPE_HLS_STEREO3D_STEREO_FILL", "inpaint"),
+            "inpaintRadius": int(os.environ.get("FILE_PIPE_HLS_STEREO3D_INPAINT_RADIUS", "2")),
+            "temporal": False,
+            "temporalSmoothing": "0",
+            "temporalWindowFrames": 1,
+            "temporalOverlapFrames": 0,
+            "depthFrameStride": 1,
+            "encoderPreset": os.environ.get("FILE_PIPE_HLS_STEREO3D_ENCODER_PRESET", "veryfast"),
+        }
+    return {
+        **pipeline,
+        "pipeline": processor,
+        "processor": normalize_stereo_processor(pipeline.get("processor")),
+        "cacheProcessor": processor,
+        "inferenceScale": normalize_stereo3d_inference_scale(pipeline.get("inferenceScale")),
+        "inferenceCropPercent": normalize_stereo3d_inference_crop_percent(pipeline.get("inferenceCropPercent")),
+    }
 
 
 def is_stereo_video_profile(video_profile: str) -> bool:
@@ -1458,6 +1583,32 @@ def stereo_processor_options() -> List[Dict[str, object]]:
             "requiresCommand": False,
         },
         {
+            "id": TRANSCODE_STEREO_PROCESSOR_REALTIME_DA_SMALL_BALANCED,
+            "label": "Realtime Depth Small Balanced",
+            "bestUse": "Default live 2D-to-3D pipeline: Depth Anything Small, 0.33x sparse depth, light smoothing, light inpaint.",
+            "m3Practicality": "Tuned target for 30fps 720p on M3-class Apple Silicon.",
+            "model": "depth-anything/Depth-Anything-V2-Small-hf",
+            "local": True,
+            "requiresCommand": True,
+            "realtimePipeline": True,
+            "realtimeOnly": True,
+            "settings": realtime_stereo_pipeline_settings(TRANSCODE_STEREO_PROCESSOR_REALTIME_DA_SMALL_BALANCED),
+            "commandAvailable": bool(stereo_processor_command_template(TRANSCODE_STEREO_PROCESSOR_DA_V2_SMALL)),
+        },
+        {
+            "id": TRANSCODE_STEREO_PROCESSOR_REALTIME_DA_SMALL_FAST,
+            "label": "Realtime Depth Small Fast",
+            "bestUse": "Snappier live fallback: lower sparse depth cadence, lighter temporal settings, and remap fill.",
+            "m3Practicality": "Use when the balanced live pipeline cannot stay ahead of playback.",
+            "model": "depth-anything/Depth-Anything-V2-Small-hf",
+            "local": True,
+            "requiresCommand": True,
+            "realtimePipeline": True,
+            "realtimeOnly": True,
+            "settings": realtime_stereo_pipeline_settings(TRANSCODE_STEREO_PROCESSOR_REALTIME_DA_SMALL_FAST),
+            "commandAvailable": bool(stereo_processor_command_template(TRANSCODE_STEREO_PROCESSOR_DA_V2_SMALL)),
+        },
+        {
             "id": TRANSCODE_STEREO_PROCESSOR_DA_V2_SMALL,
             "label": "Depth Anything V2 Small",
             "bestUse": "Better depth-aware stereo when latency still matters.",
@@ -1465,17 +1616,41 @@ def stereo_processor_options() -> List[Dict[str, object]]:
             "model": "depth-anything/Depth-Anything-V2-Small-hf",
             "local": True,
             "requiresCommand": True,
+            "temporalPrebuild": True,
             "commandAvailable": bool(stereo_processor_command_template(TRANSCODE_STEREO_PROCESSOR_DA_V2_SMALL)),
         },
         {
             "id": TRANSCODE_STEREO_PROCESSOR_DA_V2_BASE,
             "label": "Depth Anything V2 Base",
-            "bestUse": "Higher quality depth for prepared/cache-ahead segments.",
-            "m3Practicality": "Moderate; use when extra latency is acceptable.",
+            "bestUse": "Prepared/cache-ahead segments with a larger stabilization window.",
+            "m3Practicality": "Moderate; less memory pressure than DA3 sequence inference.",
             "model": "depth-anything/Depth-Anything-V2-Base-hf",
             "local": True,
             "requiresCommand": True,
+            "temporalPrebuild": True,
             "commandAvailable": bool(stereo_processor_command_template(TRANSCODE_STEREO_PROCESSOR_DA_V2_BASE)),
+        },
+        {
+            "id": TRANSCODE_STEREO_PROCESSOR_DA_V3_SMALL,
+            "label": "Depth Anything V3 Small",
+            "bestUse": "DA3 temporal prebuilds with a lighter model.",
+            "m3Practicality": "Good for prepared caches; uses sequence context and OpenCV inpaint.",
+            "model": "depth-anything/DA3-SMALL",
+            "local": True,
+            "requiresCommand": True,
+            "temporalPrebuild": True,
+            "commandAvailable": bool(stereo_processor_command_template(TRANSCODE_STEREO_PROCESSOR_DA_V3_SMALL)),
+        },
+        {
+            "id": TRANSCODE_STEREO_PROCESSOR_DA_V3_BASE,
+            "label": "Depth Anything V3 Base",
+            "bestUse": "Default prepared 3D cache path with temporally coherent depth.",
+            "m3Practicality": "Best prepared-cache quality target; higher latency than V2 Base.",
+            "model": "depth-anything/DA3-BASE",
+            "local": True,
+            "requiresCommand": True,
+            "temporalPrebuild": True,
+            "commandAvailable": bool(stereo_processor_command_template(TRANSCODE_STEREO_PROCESSOR_DA_V3_BASE)),
         },
         {
             "id": TRANSCODE_STEREO_PROCESSOR_COREML_DA_V2_SMALL,
@@ -1586,11 +1761,13 @@ def probe_media(url: str) -> Dict[str, object]:
         "defaultPrebuildProcessor": normalize_stereo_processor(HLS_STEREO3D_PREBUILD_PROCESSOR),
         "processors": stereo_processor_options(),
         "depthPercent": hls_stereo3d_depth_fraction() * 100,
-        "inferenceScales": ["1", "0.75", "0.5", "0.33", "0.25"],
-        "defaultInferenceScale": normalize_stereo3d_inference_scale(HLS_STEREO3D_INFERENCE_SCALE),
+        "inferenceScales": ["1", "0.75", "0.6", "0.5", "0.33", "0.25"],
+        "defaultInferenceScale": str(effective_realtime_stereo_settings(HLS_STEREO3D_REALTIME_PROCESSOR, HLS_STEREO3D_INFERENCE_SCALE, HLS_STEREO3D_INFERENCE_CROP_PERCENT).get("inferenceScale") or normalize_stereo3d_inference_scale(HLS_STEREO3D_INFERENCE_SCALE)),
         "defaultPrebuildInferenceScale": normalize_stereo3d_inference_scale(HLS_STEREO3D_PREBUILD_INFERENCE_SCALE),
-        "defaultInferenceCropPercent": normalize_stereo3d_inference_crop_percent(HLS_STEREO3D_INFERENCE_CROP_PERCENT),
+        "defaultInferenceCropPercent": str(effective_realtime_stereo_settings(HLS_STEREO3D_REALTIME_PROCESSOR, HLS_STEREO3D_INFERENCE_SCALE, HLS_STEREO3D_INFERENCE_CROP_PERCENT).get("inferenceCropPercent") or normalize_stereo3d_inference_crop_percent(HLS_STEREO3D_INFERENCE_CROP_PERCENT)),
         "defaultPrebuildInferenceCropPercent": normalize_stereo3d_inference_crop_percent(HLS_STEREO3D_PREBUILD_INFERENCE_CROP_PERCENT),
+        "defaultRealtimePipeline": normalize_stereo_processor(HLS_STEREO3D_REALTIME_PROCESSOR) if is_realtime_stereo_pipeline(HLS_STEREO3D_REALTIME_PROCESSOR) else "",
+        "realtimePipelineSettings": realtime_stereo_pipeline_settings(HLS_STEREO3D_REALTIME_PROCESSOR),
     }
     return media_info
 
@@ -1795,6 +1972,8 @@ def stereo_processor_command_template(stereo_processor: str) -> str:
     env_by_processor = {
         TRANSCODE_STEREO_PROCESSOR_DA_V2_SMALL: "FILE_PIPE_DEPTH_ANYTHING_V2_SMALL_COMMAND",
         TRANSCODE_STEREO_PROCESSOR_DA_V2_BASE: "FILE_PIPE_DEPTH_ANYTHING_V2_BASE_COMMAND",
+        TRANSCODE_STEREO_PROCESSOR_DA_V3_SMALL: "FILE_PIPE_DEPTH_ANYTHING_V3_SMALL_COMMAND",
+        TRANSCODE_STEREO_PROCESSOR_DA_V3_BASE: "FILE_PIPE_DEPTH_ANYTHING_V3_BASE_COMMAND",
         TRANSCODE_STEREO_PROCESSOR_COREML_DA_V2_SMALL: "FILE_PIPE_COREML_DEPTH_ANYTHING_V2_SMALL_COMMAND",
     }
     return (
@@ -1826,6 +2005,8 @@ def default_stereo_processor_command_template(processor: str) -> str:
     if normalized not in {
         TRANSCODE_STEREO_PROCESSOR_DA_V2_SMALL,
         TRANSCODE_STEREO_PROCESSOR_DA_V2_BASE,
+        TRANSCODE_STEREO_PROCESSOR_DA_V3_SMALL,
+        TRANSCODE_STEREO_PROCESSOR_DA_V3_BASE,
         TRANSCODE_STEREO_PROCESSOR_COREML_DA_V2_SMALL,
     }:
         return ""
@@ -1860,6 +2041,12 @@ def default_stereo_processor_command_template(processor: str) -> str:
             "{inference_scale}",
             "--inference-crop-percent",
             "{inference_crop_percent}",
+            "--stereo-fill",
+            "{stereo_fill}",
+            "--inpaint-radius",
+            "{inpaint_radius}",
+            "--preset",
+            "{encoder_preset}",
         ]
     )
 
@@ -1876,6 +2063,64 @@ def build_external_stereo_segment_command(
     inference_crop_percent: str = "0",
 ) -> List[str]:
     processor = normalize_stereo_processor(stereo_processor)
+    if is_realtime_stereo_pipeline(processor):
+        settings = effective_realtime_stereo_settings(processor, inference_scale, inference_crop_percent)
+        home = depth_processor_home()
+        helper = home / "depth_anything_stereo.py"
+        python_path = Path(os.environ.get("FILE_PIPE_DEPTH_PROCESSOR_PYTHON") or home / ".venv" / "bin" / "python").expanduser()
+        if not helper.exists() or not python_path.exists():
+            raise RuntimeError(
+                f"{processor} requires the local Depth Anything helper. Run scripts/setup_depth_processors.sh."
+            )
+        command = [
+            str(python_path),
+            str(helper),
+            "--processor",
+            str(settings["processor"]),
+            "--input",
+            url,
+            "--output",
+            output_path,
+            "--start",
+            f"{float(start_time):.3f}",
+            "--duration",
+            f"{float(duration):.3f}",
+            "--layout",
+            transcode_video_layout(video_profile),
+            "--video-profile",
+            normalize_transcode_video_profile(video_profile),
+            "--depth-percent",
+            f"{hls_stereo3d_depth_fraction() * 100:.3f}",
+            "--resolution-scale",
+            normalize_stereo3d_resolution_scale(resolution_scale),
+            "--inference-scale",
+            str(settings["inferenceScale"]),
+            "--inference-crop-percent",
+            str(settings["inferenceCropPercent"]),
+            "--stereo-fill",
+            str(settings["stereoFill"]),
+            "--inpaint-radius",
+            str(settings["inpaintRadius"]),
+            "--preset",
+            str(settings["encoderPreset"]),
+            "--fps",
+            str(settings["fps"]),
+            "--depth-frame-stride",
+            str(settings["depthFrameStride"]),
+        ]
+        if settings.get("temporal"):
+            command.extend(
+                [
+                    "--realtime-temporal",
+                    "--temporal-smoothing",
+                    str(settings["temporalSmoothing"]),
+                    "--temporal-window-frames",
+                    str(settings["temporalWindowFrames"]),
+                    "--temporal-overlap-frames",
+                    str(settings["temporalOverlapFrames"]),
+                ]
+            )
+        return command
     template = stereo_processor_command_template(processor)
     if not template:
         raise RuntimeError(
@@ -1894,9 +2139,138 @@ def build_external_stereo_segment_command(
         "resolution_scale": normalize_stereo3d_resolution_scale(resolution_scale),
         "inference_scale": normalize_stereo3d_inference_scale(inference_scale),
         "inference_crop_percent": normalize_stereo3d_inference_crop_percent(inference_crop_percent),
+        "stereo_fill": os.environ.get("FILE_PIPE_HLS_STEREO3D_STEREO_FILL", "inpaint"),
+        "inpaint_radius": os.environ.get("FILE_PIPE_HLS_STEREO3D_INPAINT_RADIUS", "2"),
+        "encoder_preset": os.environ.get("FILE_PIPE_HLS_STEREO3D_ENCODER_PRESET", "veryfast"),
+        "depth_frame_stride": os.environ.get("FILE_PIPE_HLS_STEREO3D_DEPTH_FRAME_STRIDE", "1"),
     }
     quoted = {key: shlex.quote(str(value)) for key, value in values.items()}
     return shlex.split(template.format(**quoted))
+
+
+def is_da2_depth_processor(stereo_processor: str) -> bool:
+    return normalize_stereo_processor(stereo_processor) in {
+        TRANSCODE_STEREO_PROCESSOR_DA_V2_SMALL,
+        TRANSCODE_STEREO_PROCESSOR_DA_V2_BASE,
+    }
+
+
+def is_da3_depth_processor(stereo_processor: str) -> bool:
+    return normalize_stereo_processor(stereo_processor) in {
+        TRANSCODE_STEREO_PROCESSOR_DA_V3_SMALL,
+        TRANSCODE_STEREO_PROCESSOR_DA_V3_BASE,
+    }
+
+
+def is_temporal_prebuild_processor(stereo_processor: str) -> bool:
+    return normalize_stereo_processor(stereo_processor) in {
+        TRANSCODE_STEREO_PROCESSOR_DA_V2_SMALL,
+        TRANSCODE_STEREO_PROCESSOR_DA_V2_BASE,
+        TRANSCODE_STEREO_PROCESSOR_DA_V3_SMALL,
+        TRANSCODE_STEREO_PROCESSOR_DA_V3_BASE,
+    }
+
+
+def temporal_prebuild_window_frames(stereo_processor: str) -> int:
+    if is_da2_depth_processor(stereo_processor):
+        return max(1, HLS_STEREO3D_PREBUILD_DA2_TEMPORAL_WINDOW_FRAMES)
+    return max(1, HLS_STEREO3D_PREBUILD_DA3_TEMPORAL_WINDOW_FRAMES)
+
+
+def temporal_prebuild_overlap_frames(stereo_processor: str) -> int:
+    if is_da2_depth_processor(stereo_processor):
+        return max(0, HLS_STEREO3D_PREBUILD_DA2_TEMPORAL_OVERLAP_FRAMES)
+    return max(0, HLS_STEREO3D_PREBUILD_DA3_TEMPORAL_OVERLAP_FRAMES)
+
+
+def build_external_stereo_prebuild_command(
+    url: str,
+    output_dir: str,
+    metadata_path: str,
+    video_profile: str,
+    stereo_processor: str,
+    resolution_scale: str = "1",
+    inference_scale: str = "0.6",
+    inference_crop_percent: str = "0",
+) -> List[str]:
+    processor = normalize_stereo_processor(stereo_processor)
+    override_by_processor = {
+        TRANSCODE_STEREO_PROCESSOR_DA_V2_SMALL: "FILE_PIPE_DEPTH_ANYTHING_V2_PREBUILD_COMMAND",
+        TRANSCODE_STEREO_PROCESSOR_DA_V2_BASE: "FILE_PIPE_DEPTH_ANYTHING_V2_PREBUILD_COMMAND",
+        TRANSCODE_STEREO_PROCESSOR_DA_V3_SMALL: "FILE_PIPE_DEPTH_ANYTHING_V3_PREBUILD_COMMAND",
+        TRANSCODE_STEREO_PROCESSOR_DA_V3_BASE: "FILE_PIPE_DEPTH_ANYTHING_V3_PREBUILD_COMMAND",
+    }
+    override = (
+        os.environ.get(override_by_processor.get(processor, ""), "").strip()
+        or os.environ.get("FILE_PIPE_DEPTH_ANYTHING_PREBUILD_COMMAND", "").strip()
+    )
+    values = {
+        "input": url,
+        "output_dir": output_dir,
+        "metadata": metadata_path,
+        "layout": transcode_video_layout(video_profile),
+        "video_profile": normalize_transcode_video_profile(video_profile),
+        "processor": processor,
+        "depth_percent": f"{hls_stereo3d_depth_fraction() * 100:.3f}",
+        "resolution_scale": normalize_stereo3d_resolution_scale(resolution_scale),
+        "inference_scale": normalize_stereo3d_inference_scale(inference_scale),
+        "inference_crop_percent": normalize_stereo3d_inference_crop_percent(inference_crop_percent),
+        "segment_seconds": str(HLS_SEGMENT_SECONDS),
+        "temporal_context_segments": str(max(0, HLS_STEREO3D_PREBUILD_TEMPORAL_CONTEXT_SEGMENTS)),
+        "temporal_window_frames": str(temporal_prebuild_window_frames(processor)),
+        "temporal_overlap_frames": str(temporal_prebuild_overlap_frames(processor)),
+        "temporal_smoothing": str(HLS_STEREO3D_PREBUILD_TEMPORAL_SMOOTHING),
+        "segment_batch_count": str(max(1, HLS_STEREO3D_PREBUILD_SEGMENT_BATCH_COUNT)),
+    }
+    if override:
+        quoted = {key: shlex.quote(str(value)) for key, value in values.items()}
+        return shlex.split(override.format(**quoted))
+    home = depth_processor_home()
+    helper = home / "depth_anything_stereo.py"
+    python_path = Path(os.environ.get("FILE_PIPE_DEPTH_PROCESSOR_PYTHON") or home / ".venv" / "bin" / "python").expanduser()
+    if not helper.exists() or not python_path.exists():
+        raise RuntimeError(
+            f"{processor} requires the local Depth Anything helper. Run scripts/setup_depth_processors.sh."
+        )
+    return [
+        str(python_path),
+        str(helper),
+        "--processor",
+        processor,
+        "--prebuild-hls",
+        "--input",
+        url,
+        "--output-dir",
+        output_dir,
+        "--metadata",
+        metadata_path,
+        "--segment-seconds",
+        str(HLS_SEGMENT_SECONDS),
+        "--layout",
+        str(values["layout"]),
+        "--video-profile",
+        str(values["video_profile"]),
+        "--depth-percent",
+        str(values["depth_percent"]),
+        "--resolution-scale",
+        str(values["resolution_scale"]),
+        "--inference-scale",
+        str(values["inference_scale"]),
+        "--inference-crop-percent",
+        str(values["inference_crop_percent"]),
+        "--temporal-context-segments",
+        str(values["temporal_context_segments"]),
+        "--temporal-window-frames",
+        str(values["temporal_window_frames"]),
+        "--temporal-overlap-frames",
+        str(values["temporal_overlap_frames"]),
+        "--temporal-smoothing",
+        str(values["temporal_smoothing"]),
+        "--segment-batch-count",
+        str(values["segment_batch_count"]),
+        "--stereo-fill",
+        "inpaint",
+    ]
 
 
 def external_stereo_processor_env(ffmpeg_path: str = "") -> Dict[str, str]:
@@ -1937,11 +2311,18 @@ def transcode_profile_cache_suffix(
     if video != TRANSCODE_VIDEO_PROFILE_2D:
         parts.append(video)
         if processor != TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT:
+            effective_settings = effective_realtime_stereo_settings(processor, inference_scale, inference_crop_percent)
+            effective_inference_scale = str(effective_settings["inferenceScale"])
+            effective_inference_crop_percent = str(effective_settings["inferenceCropPercent"])
             parts.append(processor)
-            parts.append(f"infer-{profile_cache_token(normalize_stereo3d_inference_scale(inference_scale))}")
-            crop = normalize_stereo3d_inference_crop_percent(inference_crop_percent)
+            parts.append(f"infer-{profile_cache_token(effective_inference_scale)}")
+            crop = normalize_stereo3d_inference_crop_percent(effective_inference_crop_percent)
             if crop != "0":
                 parts.append(f"crop-{profile_cache_token(crop)}")
+            if is_temporal_prebuild_processor(processor):
+                parts.append(f"tw-{temporal_prebuild_window_frames(processor)}")
+                parts.append(f"to-{temporal_prebuild_overlap_frames(processor)}")
+                parts.append(f"tb-{max(1, HLS_STEREO3D_PREBUILD_SEGMENT_BATCH_COUNT)}")
         scale = normalize_stereo3d_resolution_scale(resolution_scale)
         parts.append(f"scale-{profile_cache_token(scale)}")
     return f"-{'-'.join(parts)}" if parts else ""
@@ -1964,11 +2345,18 @@ def transcode_profile_cache_key(
     if video != TRANSCODE_VIDEO_PROFILE_2D:
         parts.append(video)
         if processor != TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT:
+            effective_settings = effective_realtime_stereo_settings(processor, inference_scale, inference_crop_percent)
+            effective_inference_scale = str(effective_settings["inferenceScale"])
+            effective_inference_crop_percent = str(effective_settings["inferenceCropPercent"])
             parts.append(processor)
-            parts.append(f"infer-{normalize_stereo3d_inference_scale(inference_scale)}")
-            crop = normalize_stereo3d_inference_crop_percent(inference_crop_percent)
+            parts.append(f"infer-{normalize_stereo3d_inference_scale(effective_inference_scale)}")
+            crop = normalize_stereo3d_inference_crop_percent(effective_inference_crop_percent)
             if crop != "0":
                 parts.append(f"crop-{crop}")
+            if is_temporal_prebuild_processor(processor):
+                parts.append(f"tw-{temporal_prebuild_window_frames(processor)}")
+                parts.append(f"to-{temporal_prebuild_overlap_frames(processor)}")
+                parts.append(f"tb-{max(1, HLS_STEREO3D_PREBUILD_SEGMENT_BATCH_COUNT)}")
         parts.append(f"scale-{normalize_stereo3d_resolution_scale(resolution_scale)}")
     return f":{':'.join(parts)}" if parts else ""
 
@@ -2319,6 +2707,100 @@ def write_json_atomic(path: Path, payload: Dict[str, object]) -> None:
     temp_path.replace(path)
 
 
+def read_json_file(path: Path) -> Dict[str, object]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def hls_cache_metadata_path(path: Path) -> Path:
+    return path / ".cache-metadata.json"
+
+
+def hls_prebuild_request_path(path: Path) -> Path:
+    return path / ".prebuild-request.json"
+
+
+def hls_cache_metadata(
+    path: Path,
+    resource_id: str,
+    url: str,
+    media_info: Dict[str, object],
+    audio_profile: str,
+    video_profile: str,
+    stereo_processor: str,
+    resolution_scale: str,
+    inference_scale: str,
+    inference_crop_percent: str,
+    mode: str = "segment",
+) -> Dict[str, object]:
+    descriptor = resource_descriptor(resource_id) or {}
+    source_path = str(descriptor.get("path") or "") if descriptor.get("kind") == "file" else ""
+    title = Path(source_path).name if source_path else str(RESOURCE_METADATA_CACHE.get(resource_id, {}).get("title") or resource_id)
+    processor = normalize_stereo_processor(stereo_processor) if is_stereo_video_profile(video_profile) else ""
+    realtime_settings = effective_realtime_stereo_settings(processor, inference_scale, inference_crop_percent) if processor else {}
+    temporal_enabled = bool(realtime_settings.get("temporal")) or is_temporal_prebuild_processor(processor)
+    stereo_fill = str(realtime_settings.get("stereoFill") or ("inpaint" if processor and processor != TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT else "ffmpeg-shift"))
+    return {
+        "version": 1,
+        "kind": "hls",
+        "mode": mode,
+        "resourceId": resource_id,
+        "sourceUrl": url,
+        "sourcePath": source_path,
+        "sourceTitle": title,
+        "mediaInfo": media_info,
+        "settings": {
+            "audioProfile": normalize_transcode_audio_profile(audio_profile),
+            "videoProfile": normalize_transcode_video_profile(video_profile),
+            "videoLayout": transcode_video_layout(video_profile),
+            "stereoProcessor": processor,
+            "depthProcessor": str(realtime_settings.get("processor") or processor),
+            "realtimePipeline": str(realtime_settings.get("pipeline") or ""),
+            "resolutionScale": normalize_stereo3d_resolution_scale(resolution_scale) if is_stereo_video_profile(video_profile) else "1",
+            "inferenceScale": str(realtime_settings.get("inferenceScale") or "1") if processor and processor != TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT else "1",
+            "inferenceCropPercent": str(realtime_settings.get("inferenceCropPercent") or "0") if processor and processor != TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT else "0",
+            "depthPercent": hls_stereo3d_depth_fraction() * 100,
+            "stereoFill": stereo_fill,
+            "inpaintRadius": realtime_settings.get("inpaintRadius") if stereo_fill == "inpaint" else 0,
+            "temporalCoherence": temporal_enabled,
+            "temporalContextSegments": HLS_STEREO3D_PREBUILD_TEMPORAL_CONTEXT_SEGMENTS if is_temporal_prebuild_processor(processor) else 0,
+            "temporalWindowFrames": realtime_settings.get("temporalWindowFrames") if realtime_settings.get("temporal") else (temporal_prebuild_window_frames(processor) if is_temporal_prebuild_processor(processor) else 0),
+            "temporalOverlapFrames": realtime_settings.get("temporalOverlapFrames") if realtime_settings.get("temporal") else (temporal_prebuild_overlap_frames(processor) if is_temporal_prebuild_processor(processor) else 0),
+            "temporalSmoothing": realtime_settings.get("temporalSmoothing") if realtime_settings.get("temporal") else (HLS_STEREO3D_PREBUILD_TEMPORAL_SMOOTHING if is_temporal_prebuild_processor(processor) else "0"),
+            "depthFrameStride": realtime_settings.get("depthFrameStride") if realtime_settings.get("temporal") else 1,
+            "segmentBatchCount": HLS_STEREO3D_PREBUILD_SEGMENT_BATCH_COUNT if is_temporal_prebuild_processor(processor) else 1,
+            "cacheVersion": TRANSCODE_CACHE_VERSION,
+            "hlsVersion": HLS_SEGMENT_CACHE_VERSION,
+            "segmentSeconds": HLS_SEGMENT_SECONDS,
+        },
+        "updatedAt": int(time.time()),
+    }
+
+
+def ensure_hls_cache_metadata(
+    path: Path,
+    resource_id: str,
+    url: str,
+    media_info: Dict[str, object],
+    audio_profile: str,
+    video_profile: str,
+    stereo_processor: str,
+    resolution_scale: str,
+    inference_scale: str,
+    inference_crop_percent: str,
+    mode: str = "segment",
+) -> Dict[str, object]:
+    metadata = hls_cache_metadata(path, resource_id, url, media_info, audio_profile, video_profile, stereo_processor, resolution_scale, inference_scale, inference_crop_percent, mode)
+    existing = read_json_file(hls_cache_metadata_path(path))
+    if existing.get("settings") == metadata.get("settings") and existing.get("sourceUrl") == metadata.get("sourceUrl"):
+        return existing
+    write_json_atomic(hls_cache_metadata_path(path), metadata)
+    return metadata
+
+
 def write_transcode_job(
     path: Path,
     resource_id: str,
@@ -2477,10 +2959,11 @@ def hls_playlist(
         if normalize_transcode_video_profile(video_profile) == TRANSCODE_VIDEO_PROFILE_STEREO_FULL_SBS:
             query_parts.append("sbs_layout=full")
         processor = normalize_stereo_processor(stereo_processor)
+        realtime_settings = effective_realtime_stereo_settings(processor, inference_scale, inference_crop_percent)
         if processor != TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT:
             query_parts.append(f"stereo_processor={processor}")
-            query_parts.append(f"inference_scale={normalize_stereo3d_inference_scale(inference_scale)}")
-            crop = normalize_stereo3d_inference_crop_percent(inference_crop_percent)
+            query_parts.append(f"inference_scale={realtime_settings['inferenceScale']}")
+            crop = str(realtime_settings["inferenceCropPercent"])
             if crop != "0":
                 query_parts.append(f"inference_crop={crop}")
         query_parts.append(f"stereo_scale={normalize_stereo3d_resolution_scale(resolution_scale)}")
@@ -2536,8 +3019,10 @@ def create_hls_segment(
     normalized_video_profile = normalize_transcode_video_profile(video_profile)
     normalized_stereo_processor = normalize_stereo_processor(stereo_processor) if is_stereo_video_profile(normalized_video_profile) else TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT
     normalized_resolution_scale = normalize_stereo3d_resolution_scale(resolution_scale) if is_stereo_video_profile(normalized_video_profile) else "1"
-    normalized_inference_scale = normalize_stereo3d_inference_scale(inference_scale) if is_stereo_video_profile(normalized_video_profile) and normalized_stereo_processor != TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT else "1"
-    normalized_inference_crop_percent = normalize_stereo3d_inference_crop_percent(inference_crop_percent) if is_stereo_video_profile(normalized_video_profile) and normalized_stereo_processor != TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT else "0"
+    realtime_settings = effective_realtime_stereo_settings(normalized_stereo_processor, inference_scale, inference_crop_percent)
+    command_stereo_processor = str(realtime_settings["processor"])
+    normalized_inference_scale = str(realtime_settings["inferenceScale"]) if is_stereo_video_profile(normalized_video_profile) and normalized_stereo_processor != TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT else "1"
+    normalized_inference_crop_percent = str(realtime_settings["inferenceCropPercent"]) if is_stereo_video_profile(normalized_video_profile) and normalized_stereo_processor != TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT else "0"
     ffmpeg_path = find_media_tool("ffmpeg")
     if not ffmpeg_path:
         raise RuntimeError("ffmpeg is not installed or is not on PATH.")
@@ -2552,8 +3037,9 @@ def create_hls_segment(
     path = hls_segment_path(resource_id, url, segment_index, audio_profile, normalized_video_profile, normalized_stereo_processor, normalized_resolution_scale, normalized_inference_scale, normalized_inference_crop_percent)
     lock = lock_for_transcode(path)
     with lock:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        ensure_hls_cache_metadata(path.parent, resource_id, url, media_info, audio_profile, normalized_video_profile, normalized_stereo_processor, normalized_resolution_scale, normalized_inference_scale, normalized_inference_crop_percent)
         if not path.exists() or path.stat().st_size == 0:
-            path.parent.mkdir(parents=True, exist_ok=True)
             source_size = parse_int(media_info.get("size")) or parse_int(RESOURCE_METADATA_CACHE.get(resource_id, {}).get("size")) or 0
             estimated_segment_size = int(math.ceil(source_size / max(1, segment_count))) if source_size else 0
             enforce_transcode_cache_limit([path.parent], estimated_segment_size)
@@ -2562,7 +3048,7 @@ def create_hls_segment(
                 temp_path.unlink()
             clear_hls_segment_error(path)
             command_env = None
-            if normalized_stereo_processor == TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT:
+            if command_stereo_processor == TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT:
                 command = build_hls_segment_command(
                     url,
                     media_info,
@@ -2595,7 +3081,7 @@ def create_hls_segment(
                 if temp_path.exists():
                     temp_path.unlink()
                 detail = (exc.stderr or exc.stdout or str(exc)).strip()
-                tool_name = "ffmpeg" if normalized_stereo_processor == TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT else normalized_stereo_processor
+                tool_name = "ffmpeg" if command_stereo_processor == TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT else normalized_stereo_processor
                 message = f"{tool_name} could not create HLS segment {segment_index}: {detail}"
                 write_hls_segment_error(path, segment_index, audio_profile, normalized_video_profile, normalized_stereo_processor, message)
                 raise RuntimeError(message) from exc
@@ -2704,8 +3190,9 @@ def hls_cache_summary(
 ) -> Dict[str, object]:
     info = hls_duration_info(media_info)
     normalized_processor = normalize_stereo_processor(stereo_processor) if is_stereo_video_profile(video_profile) else ""
-    normalized_inference_scale = normalize_stereo3d_inference_scale(inference_scale) if normalized_processor and normalized_processor != TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT else "1"
-    normalized_inference_crop_percent = normalize_stereo3d_inference_crop_percent(inference_crop_percent) if normalized_processor and normalized_processor != TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT else "0"
+    realtime_settings = effective_realtime_stereo_settings(normalized_processor, inference_scale, inference_crop_percent) if normalized_processor else {}
+    normalized_inference_scale = str(realtime_settings.get("inferenceScale") or "1") if normalized_processor and normalized_processor != TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT else "1"
+    normalized_inference_crop_percent = str(realtime_settings.get("inferenceCropPercent") or "0") if normalized_processor and normalized_processor != TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT else "0"
     path = hls_cache_dir(resource_id, url, audio_profile, video_profile, stereo_processor, resolution_scale, normalized_inference_scale, normalized_inference_crop_percent)
     cached_segments = 0
     size = 0
@@ -2718,6 +3205,7 @@ def hls_cache_summary(
             if stat.st_size > 0:
                 cached_segments += 1
                 size += stat.st_size
+    metadata = read_json_file(hls_cache_metadata_path(path)) if path.exists() else {}
     segment_count = int(info["segmentCount"])
     return {
         "path": str(path),
@@ -2732,6 +3220,7 @@ def hls_cache_summary(
         "resolutionScale": normalize_stereo3d_resolution_scale(resolution_scale) if is_stereo_video_profile(video_profile) else "1",
         "inferenceScale": normalized_inference_scale,
         "inferenceCropPercent": normalized_inference_crop_percent,
+        "metadata": metadata,
         **info,
     }
 
@@ -2758,6 +3247,49 @@ def resource_has_stereo3d_hls_cache(resource_id: str) -> bool:
     return False
 
 
+def create_temporal_hls_prebuild(
+    resource_id: str,
+    url: str,
+    media_info: Dict[str, object],
+    audio_profile: str,
+    video_profile: str,
+    stereo_processor: str,
+    resolution_scale: str,
+    inference_scale: str,
+    inference_crop_percent: str,
+) -> None:
+    processor = normalize_stereo_processor(stereo_processor)
+    if not is_temporal_prebuild_processor(processor):
+        raise RuntimeError(f"{processor} does not support temporal HLS prebuild.")
+    path = hls_cache_dir(resource_id, url, audio_profile, video_profile, processor, resolution_scale, inference_scale, inference_crop_percent)
+    path.mkdir(parents=True, exist_ok=True)
+    metadata = ensure_hls_cache_metadata(path, resource_id, url, media_info, audio_profile, video_profile, processor, resolution_scale, inference_scale, inference_crop_percent, "temporal-prebuild")
+    request_path = hls_prebuild_request_path(path)
+    write_json_atomic(request_path, metadata)
+    ffmpeg_path = find_media_tool("ffmpeg")
+    if not ffmpeg_path:
+        raise RuntimeError("ffmpeg is not installed or is not on PATH.")
+    command = build_external_stereo_prebuild_command(
+        url,
+        str(path),
+        str(hls_cache_metadata_path(path)),
+        video_profile,
+        processor,
+        resolution_scale,
+        inference_scale,
+        inference_crop_percent,
+    )
+    command_env = external_stereo_processor_env(ffmpeg_path)
+    try:
+        subprocess.run(command, capture_output=True, text=True, check=True, env=command_env)
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or str(exc)).strip()
+        write_hls_segment_error(path / "segment-000000.ts", 0, audio_profile, video_profile, processor, detail)
+        raise RuntimeError(f"{processor} temporal prebuild failed: {detail}") from exc
+    clear_hls_segment_error(path / "segment-000000.ts")
+    ensure_hls_cache_metadata(path, resource_id, url, media_info, audio_profile, video_profile, processor, resolution_scale, inference_scale, inference_crop_percent, "temporal-prebuild")
+
+
 def start_hls_prebuild(
     resource_id: str,
     url: str,
@@ -2771,6 +3303,8 @@ def start_hls_prebuild(
 ) -> Dict[str, object]:
     if not is_stereo_video_profile(video_profile):
         raise RuntimeError("3D prebuild requires a generated stereo video profile.")
+    if is_realtime_stereo_pipeline(stereo_processor):
+        raise RuntimeError("Realtime stereo pipelines are for live HLS generation only. Choose a Depth Anything processor for 3D prebuild caches.")
     key = hls_prebuild_progress_key(resource_id, audio_profile, video_profile, stereo_processor, resolution_scale, inference_scale, inference_crop_percent)
     summary = hls_cache_summary(resource_id, url, media_info, audio_profile, video_profile, stereo_processor, resolution_scale, inference_scale, inference_crop_percent)
     if summary["complete"]:
@@ -2782,11 +3316,17 @@ def start_hls_prebuild(
             total = int(summary["segmentCount"])
             cached = int(summary["cachedSegments"])
             HLS_PREBUILD_PROGRESS[key] = {"status": "running", "percent": int((cached / total) * 100) if total else 0, **summary}
-            for index in range(total):
-                create_hls_segment(resource_id, url, media_info, index, audio_profile, video_profile, stereo_processor, resolution_scale, inference_scale, inference_crop_percent)
+            if is_temporal_prebuild_processor(stereo_processor):
+                create_temporal_hls_prebuild(resource_id, url, media_info, audio_profile, video_profile, stereo_processor, resolution_scale, inference_scale, inference_crop_percent)
                 current = hls_cache_summary(resource_id, url, media_info, audio_profile, video_profile, stereo_processor, resolution_scale, inference_scale, inference_crop_percent)
                 percent = int((int(current["cachedSegments"]) / max(1, total)) * 100)
                 HLS_PREBUILD_PROGRESS[key] = {"status": "running", "percent": min(99, percent), **current}
+            else:
+                for index in range(total):
+                    create_hls_segment(resource_id, url, media_info, index, audio_profile, video_profile, stereo_processor, resolution_scale, inference_scale, inference_crop_percent)
+                    current = hls_cache_summary(resource_id, url, media_info, audio_profile, video_profile, stereo_processor, resolution_scale, inference_scale, inference_crop_percent)
+                    percent = int((int(current["cachedSegments"]) / max(1, total)) * 100)
+                    HLS_PREBUILD_PROGRESS[key] = {"status": "running", "percent": min(99, percent), **current}
             current = hls_cache_summary(resource_id, url, media_info, audio_profile, video_profile, stereo_processor, resolution_scale, inference_scale, inference_crop_percent)
             HLS_PREBUILD_PROGRESS[key] = {"status": "complete", "percent": 100, **current}
         except Exception as exc:
@@ -2799,7 +3339,10 @@ def start_hls_prebuild(
 
     submitted = submit_transcode_future(key, worker)
     status = {"status": "queued" if submitted else "running", "percent": int((int(summary["cachedSegments"]) / max(1, int(summary["segmentCount"]))) * 100), **summary}
-    HLS_PREBUILD_PROGRESS.setdefault(key, status)
+    if submitted or HLS_PREBUILD_PROGRESS.get(key, {}).get("status") == "error":
+        HLS_PREBUILD_PROGRESS[key] = status
+    else:
+        HLS_PREBUILD_PROGRESS.setdefault(key, status)
     return HLS_PREBUILD_PROGRESS[key]
 
 
@@ -3196,6 +3739,8 @@ def cleanup_empty_hls_cache_dirs() -> int:
                     child.suffix == ".ts"
                     or ".part" in child.name
                     or child.name == ".last-error.json"
+                    or child.name == ".cache-metadata.json"
+                    or child.name == ".prebuild-manifest.json"
                 )
                 for child in path.iterdir()
             )
@@ -3206,6 +3751,50 @@ def cleanup_empty_hls_cache_dirs() -> int:
         except OSError:
             continue
     return deleted
+
+
+def recover_hls_prebuild(metadata_path: Path) -> bool:
+    metadata = read_json_file(metadata_path)
+    settings = metadata.get("settings") if isinstance(metadata.get("settings"), dict) else {}
+    processor = normalize_stereo_processor(settings.get("stereoProcessor"))
+    if not is_temporal_prebuild_processor(processor):
+        return False
+    media_info = metadata.get("mediaInfo") if isinstance(metadata.get("mediaInfo"), dict) else {}
+    resource_id = str(metadata.get("resourceId") or "").strip()
+    url = str(metadata.get("sourceUrl") or "").strip()
+    if not resource_id or not url or not media_info:
+        return False
+    try:
+        summary = hls_cache_summary(
+            resource_id,
+            url,
+            media_info,
+            str(settings.get("audioProfile") or TRANSCODE_AUDIO_PROFILE_STEREO),
+            str(settings.get("videoProfile") or TRANSCODE_VIDEO_PROFILE_STEREO_SBS),
+            processor,
+            str(settings.get("resolutionScale") or "1"),
+            str(settings.get("inferenceScale") or "0.6"),
+            str(settings.get("inferenceCropPercent") or "0"),
+        )
+    except Exception:
+        return False
+    if summary.get("complete"):
+        return False
+
+    def worker() -> None:
+        create_temporal_hls_prebuild(
+            resource_id,
+            url,
+            media_info,
+            str(settings.get("audioProfile") or TRANSCODE_AUDIO_PROFILE_STEREO),
+            str(settings.get("videoProfile") or TRANSCODE_VIDEO_PROFILE_STEREO_SBS),
+            processor,
+            str(settings.get("resolutionScale") or "1"),
+            str(settings.get("inferenceScale") or "0.6"),
+            str(settings.get("inferenceCropPercent") or "0"),
+        )
+
+    return submit_transcode_future(f"hls-prebuild-recover:{metadata_path.parent}", worker)
 
 
 def recover_interrupted_work() -> Dict[str, object]:
@@ -3219,16 +3808,24 @@ def recover_interrupted_work() -> Dict[str, object]:
     deleted_empty_hls_dirs = cleanup_empty_hls_cache_dirs()
     recovered_jobs = 0
     failed_jobs = 0
+    recovered_hls_prebuilds = 0
     for job_path in TRANSCODE_CACHE_DIR.glob("*.job.json"):
         try:
             if recover_transcode_job(job_path):
                 recovered_jobs += 1
         except Exception:
             failed_jobs += 1
+    for metadata_path in TRANSCODE_CACHE_DIR.glob("*-hls/.cache-metadata.json"):
+        try:
+            if recover_hls_prebuild(metadata_path):
+                recovered_hls_prebuilds += 1
+        except Exception:
+            failed_jobs += 1
     prune_result = enforce_transcode_cache_limit()
     return {
         "started": True,
         "recoveredJobs": recovered_jobs,
+        "recoveredHlsPrebuilds": recovered_hls_prebuilds,
         "failedJobs": failed_jobs,
         "deletedTempFiles": deleted_temp_files,
         "deletedEmptyHlsDirs": deleted_empty_hls_dirs,
@@ -3966,11 +4563,13 @@ def create_connector_app(security: Optional[ConnectorSecurity] = None):
             "processors": stereo_processor_options(),
             "resolutionScales": ["1", "0.75", "0.5"],
             "defaultResolutionScale": normalize_stereo3d_resolution_scale(HLS_STEREO3D_RESOLUTION_SCALE),
-            "inferenceScales": ["1", "0.75", "0.5", "0.33", "0.25"],
-            "defaultInferenceScale": normalize_stereo3d_inference_scale(HLS_STEREO3D_INFERENCE_SCALE),
+            "inferenceScales": ["1", "0.75", "0.6", "0.5", "0.33", "0.25"],
+            "defaultInferenceScale": str(effective_realtime_stereo_settings(HLS_STEREO3D_REALTIME_PROCESSOR, HLS_STEREO3D_INFERENCE_SCALE, HLS_STEREO3D_INFERENCE_CROP_PERCENT).get("inferenceScale") or normalize_stereo3d_inference_scale(HLS_STEREO3D_INFERENCE_SCALE)),
             "defaultPrebuildInferenceScale": normalize_stereo3d_inference_scale(HLS_STEREO3D_PREBUILD_INFERENCE_SCALE),
-            "defaultInferenceCropPercent": normalize_stereo3d_inference_crop_percent(HLS_STEREO3D_INFERENCE_CROP_PERCENT),
+            "defaultInferenceCropPercent": str(effective_realtime_stereo_settings(HLS_STEREO3D_REALTIME_PROCESSOR, HLS_STEREO3D_INFERENCE_SCALE, HLS_STEREO3D_INFERENCE_CROP_PERCENT).get("inferenceCropPercent") or normalize_stereo3d_inference_crop_percent(HLS_STEREO3D_INFERENCE_CROP_PERCENT)),
             "defaultPrebuildInferenceCropPercent": normalize_stereo3d_inference_crop_percent(HLS_STEREO3D_PREBUILD_INFERENCE_CROP_PERCENT),
+            "defaultRealtimePipeline": normalize_stereo_processor(HLS_STEREO3D_REALTIME_PROCESSOR) if is_realtime_stereo_pipeline(HLS_STEREO3D_REALTIME_PROCESSOR) else "",
+            "realtimePipelineSettings": realtime_stereo_pipeline_settings(HLS_STEREO3D_REALTIME_PROCESSOR),
         }
         return jsonify(media_info)
 
@@ -4029,6 +4628,7 @@ def create_connector_app(security: Optional[ConnectorSecurity] = None):
             resolution_scale = request_stereo3d_resolution_scale()
             inference_scale = request_stereo3d_inference_scale()
             inference_crop_percent = request_stereo3d_inference_crop_percent()
+            realtime_settings = effective_realtime_stereo_settings(stereo_processor, inference_scale, inference_crop_percent)
             media_info = cached_probe_media(url)
             info = hls_duration_info(media_info)
             prefetch_hls_segments(resource_id, url, media_info, 0, audio_profile, video_profile, stereo_processor, resolution_scale, inference_scale, inference_crop_percent)
@@ -4047,9 +4647,11 @@ def create_connector_app(security: Optional[ConnectorSecurity] = None):
                 "videoProfile": video_profile,
                 "videoLayout": transcode_video_layout(video_profile),
                 "stereoProcessor": normalize_stereo_processor(stereo_processor) if is_stereo_video_profile(video_profile) else "",
+                "depthProcessor": str(realtime_settings.get("processor") or "") if is_stereo_video_profile(video_profile) else "",
+                "realtimePipeline": str(realtime_settings.get("pipeline") or "") if is_stereo_video_profile(video_profile) else "",
                 "resolutionScale": normalize_stereo3d_resolution_scale(resolution_scale) if is_stereo_video_profile(video_profile) else "1",
-                "inferenceScale": normalize_stereo3d_inference_scale(inference_scale) if is_stereo_video_profile(video_profile) and normalize_stereo_processor(stereo_processor) != TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT else "1",
-                "inferenceCropPercent": normalize_stereo3d_inference_crop_percent(inference_crop_percent) if is_stereo_video_profile(video_profile) and normalize_stereo_processor(stereo_processor) != TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT else "0",
+                "inferenceScale": str(realtime_settings.get("inferenceScale") or "1") if is_stereo_video_profile(video_profile) and normalize_stereo_processor(stereo_processor) != TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT else "1",
+                "inferenceCropPercent": str(realtime_settings.get("inferenceCropPercent") or "0") if is_stereo_video_profile(video_profile) and normalize_stereo_processor(stereo_processor) != TRANSCODE_STEREO_PROCESSOR_FFMPEG_SHIFT else "0",
                 "mediaInfo": media_info,
                 **info,
             }
@@ -4082,8 +4684,11 @@ def create_connector_app(security: Optional[ConnectorSecurity] = None):
             return jsonify({"error": str(exc)}), 422
         status = progress.get("status") or ("complete" if summary["complete"] else ("partial" if summary["cachedSegments"] else "idle"))
         percent = progress.get("percent")
+        summary_percent = int((int(summary["cachedSegments"]) / max(1, int(summary["segmentCount"]))) * 100)
         if percent is None:
-            percent = int((int(summary["cachedSegments"]) / max(1, int(summary["segmentCount"]))) * 100)
+            percent = summary_percent
+        else:
+            percent = max(int(percent), summary_percent)
         return jsonify({"ok": True, "status": status, "percent": percent, **summary, **({"error": progress.get("error")} if progress.get("error") else {})})
 
     @app.post("/resources/<resource_id>/hls-prebuild")

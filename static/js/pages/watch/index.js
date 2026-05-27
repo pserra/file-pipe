@@ -36,6 +36,7 @@ document.addEventListener("alpine:init", () => {
     videoUrl: "",
     viewerHls: null,
     viewerXrPlayer: null,
+    remoteAvatarPoses: {},
     viewerProgressTracker: null,
     viewerProgressiveMse: null,
     streamingReady: false,
@@ -1194,8 +1195,12 @@ document.addEventListener("alpine:init", () => {
       this.viewerXrPlayer = window.FilePipeXrPlayer.attach(video, {
         panelSelector: ".xr-side-panel",
         storageKey: "filePipeViewerXrPlayer",
+        avatarId: this.participantId || "viewer",
+        avatarName: this.viewerName || "Viewer",
         mediaInfo: () => this.playbackMetadata()?.mediaInfo || this.metadata?.mediaInfo || null,
         playbackProfile: profile,
+        onAvatarPose: (pose) => this.publishViewerAvatarPose(pose),
+        onAvatarLeave: () => this.publishViewerAvatarLeave(),
         sourceLayout: xrSourceLayoutFromProfile(profile),
         localDepthProcessor: profile.localStereoProcessor ? profile.stereoProcessor : "",
         localDepthTargetLayout: profile.targetVideoLayout || "",
@@ -1207,12 +1212,91 @@ document.addEventListener("alpine:init", () => {
           minInferenceHeight: profile.minInferenceHeight,
         } : {},
       });
+      this.syncViewerXrAvatarPoses();
+    },
+
+    openViewerXrTheater() {
+      const video = document.getElementById("viewer-video-player");
+      if (!video || !this.videoUrl) {
+        this.error = "Load the room video before opening XR Theater.";
+        return;
+      }
+      this.attachViewerXrPlayer(video);
+      if (!this.viewerXrPlayer?.openTheater) {
+        this.error = "XR Theater is unavailable in this browser.";
+        return;
+      }
+      this.viewerXrPlayer.openTheater();
+    },
+
+    openViewerXrLite() {
+      const video = document.getElementById("viewer-video-player");
+      if (!video || !this.videoUrl) {
+        this.error = "Load the room video before opening XR Lite.";
+        return;
+      }
+      this.attachViewerXrPlayer(video);
+      if (!this.viewerXrPlayer?.openLiteTheater) {
+        this.error = "XR Lite is unavailable in this browser.";
+        return;
+      }
+      this.viewerXrPlayer.openLiteTheater();
     },
 
     detachViewerXrPlayer() {
       if (!this.viewerXrPlayer) return;
       this.viewerXrPlayer.dispose();
       this.viewerXrPlayer = null;
+    },
+
+    publishViewerAvatarPose(pose) {
+      if (!this.channel || this.channel.readyState !== "open") return;
+      sendChannelJson(this.channel, {
+        type: "avatar-pose",
+        participantId: this.participantId,
+        name: this.viewerName || "Viewer",
+        pose,
+      });
+    },
+
+    publishViewerAvatarLeave() {
+      if (!this.channel || this.channel.readyState !== "open") return;
+      sendChannelJson(this.channel, {
+        type: "avatar-left",
+        participantId: this.participantId,
+      });
+    },
+
+    applyRemoteAvatarPoseMessage(message) {
+      const participantId = String(message.participantId || "");
+      if (!participantId || participantId === this.participantId) return;
+      if (!message.pose || message.pose.enabled === false) {
+        this.handleRemoteAvatarLeave(message);
+        return;
+      }
+      this.remoteAvatarPoses[participantId] = {
+        name: message.name || participantId,
+        pose: message.pose,
+      };
+      this.viewerXrPlayer?.applyRemoteAvatarPose?.(participantId, message.pose, {
+        name: message.name || participantId,
+      });
+    },
+
+    handleRemoteAvatarLeave(message) {
+      const participantId = String(message.participantId || "");
+      if (!participantId || participantId === this.participantId) return;
+      delete this.remoteAvatarPoses[participantId];
+      this.viewerXrPlayer?.removeRemoteAvatar?.(participantId);
+    },
+
+    syncViewerXrAvatarPoses() {
+      if (!this.viewerXrPlayer) return;
+      for (const [participantId, record] of Object.entries(this.remoteAvatarPoses || {})) {
+        if (record?.pose) {
+          this.viewerXrPlayer.applyRemoteAvatarPose?.(participantId, record.pose, { name: record.name || participantId });
+        }
+      }
     },
 
     detachViewerPlaybackProgress() {
@@ -1797,6 +1881,14 @@ document.addEventListener("alpine:init", () => {
         }
         if (message.type === "voice-control") {
           this.handleVoiceControl(message);
+          return;
+        }
+        if (message.type === "avatar-pose") {
+          this.applyRemoteAvatarPoseMessage(message);
+          return;
+        }
+        if (message.type === "avatar-left") {
+          this.handleRemoteAvatarLeave(message);
           return;
         }
         if (message.type === "kicked") {

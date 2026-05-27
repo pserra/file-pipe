@@ -11,11 +11,24 @@
   const FIXED_MODEL_INPUT_SIZES = {
     "fastdepth-mobilenet-onnx": 224,
   };
+  const MODEL_INPUT_NORMALIZATION = {
+    "depth-pro-onnx": {
+      mean: [0.5, 0.5, 0.5],
+      std: [0.5, 0.5, 0.5],
+    },
+  };
+  const PREFERRED_OUTPUT_NAMES = {
+    "depth-pro-onnx": ["predicted_depth", "depth", "depths"],
+  };
+  const DEFAULT_INVERT_DEPTH_BY_PROCESSOR = {
+    "depth-pro-onnx": true,
+  };
   const LOCAL_PROCESSORS = new Set([
     "midas-small-onnx",
     "fastdepth-mobilenet-onnx",
     "depth-anything-v2-tiny-onnx",
     "depth-anything-v2-small-onnx",
+    "depth-pro-onnx",
     "webgpu-depth-anything-v2-small",
   ]);
   const DEFAULT_MODEL_URLS = {
@@ -33,6 +46,10 @@
     "depth-anything-v2-small-onnx": [
       "/static/models/depth/depth-anything-v2-small.onnx",
       "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/4472b7362082ad9968fee890ca0f1e5aca36b93d/onnx/model.onnx",
+    ],
+    "depth-pro-onnx": [
+      "/static/models/depth/depth-pro-q4.onnx",
+      "https://huggingface.co/onnx-community/DepthPro-ONNX/resolve/feefb662b967b477367485dc4f133aeecd638ba4/onnx/model_q4.onnx",
     ],
     "webgpu-depth-anything-v2-small": [
       "/static/models/depth/depth-anything-v2-small.onnx",
@@ -101,6 +118,7 @@
       this.options = { ...this.options, ...options };
       const previousProcessor = this.processor;
       this.processor = normalizeLocalProcessor(options.processor || this.processor);
+      const processorChanged = previousProcessor !== this.processor;
       this.targetLayout = normalizeStereoLayout(options.targetLayout || this.targetLayout);
       this.depthStrength = clampNumber(Number(options.depthStrength ?? options.playbackProfile?.depthStrength), 0, 2, this.depthStrength);
       this.temporalSmoothing = clampNumber(Number(options.temporalSmoothing ?? options.playbackProfile?.temporalSmoothing), 0, 0.92, this.temporalSmoothing);
@@ -110,11 +128,15 @@
       this.minInferenceWidth = Math.round(clampNumber(Number(options.minInferenceWidth), 64, 2048, this.minInferenceWidth));
       this.minInferenceHeight = Math.round(clampNumber(Number(options.minInferenceHeight), 64, 2048, this.minInferenceHeight));
       this.convergence = clampNumber(Number(options.convergence), 0, 1, this.convergence);
-      this.invertDepth = Boolean(options.invertDepth ?? this.invertDepth);
+      if (Object.prototype.hasOwnProperty.call(options, "invertDepth")) {
+        this.invertDepth = Boolean(options.invertDepth);
+      } else if (processorChanged) {
+        this.invertDepth = Boolean(DEFAULT_INVERT_DEPTH_BY_PROCESSOR[this.processor]);
+      }
       this.standardOutputEnabled = options.standardOutput !== false;
       this.updateMaterialUniforms();
       this.updateStandardAspect();
-      if (previousProcessor !== this.processor) {
+      if (processorChanged) {
         this.session = null;
         this.sessionInitializing = null;
         this.modelStatus = "idle";
@@ -243,7 +265,7 @@
 
     configureSessionMetadata() {
       const inputName = this.session?.inputNames?.[0] || "";
-      const outputName = this.session?.outputNames?.[0] || "";
+      const outputName = this.preferredOutputName();
       this.sessionInputName = inputName;
       this.sessionOutputName = outputName;
       const metadata = this.session?.inputMetadata?.[inputName] || {};
@@ -314,8 +336,9 @@
       this.inputContext.drawImage(this.video, 0, 0, width, height);
       const pixels = this.inputContext.getImageData(0, 0, width, height).data;
       const data = new Float32Array(width * height * 3);
-      const mean = [0.485, 0.456, 0.406];
-      const std = [0.229, 0.224, 0.225];
+      const normalization = MODEL_INPUT_NORMALIZATION[this.processor] || {};
+      const mean = normalization.mean || [0.485, 0.456, 0.406];
+      const std = normalization.std || [0.229, 0.224, 0.225];
       if (this.sessionInputLayout === "nhwc") {
         for (let pixel = 0; pixel < width * height; pixel += 1) {
           const rgba = pixel * 4;
@@ -571,9 +594,16 @@
         "fastdepth-mobilenet-onnx": "FastDepth MobileNet ONNX",
         "depth-anything-v2-tiny-onnx": "Depth Anything V2 Small Quantized ONNX",
         "depth-anything-v2-small-onnx": "Depth Anything V2 Small ONNX",
+        "depth-pro-onnx": "Apple Depth Pro Q4 ONNX",
         "webgpu-depth-anything-v2-small": "Depth Anything V2 Small ONNX",
       };
       return labels[this.processor] || this.processor;
+    }
+
+    preferredOutputName() {
+      const names = Array.isArray(this.session?.outputNames) ? this.session.outputNames : [];
+      const preferred = PREFERRED_OUTPUT_NAMES[this.processor] || [];
+      return preferred.find((name) => names.includes(name)) || names[0] || "";
     }
 
     dispose() {
@@ -734,6 +764,14 @@
       "depth-anything-v2-tiny-onnx": "depth-anything-v2-tiny-onnx",
       "depth-anything-v2-small": "depth-anything-v2-small-onnx",
       "depth-anything-v2-small-onnx": "depth-anything-v2-small-onnx",
+      depthpro: "depth-pro-onnx",
+      "depthpro-onnx": "depth-pro-onnx",
+      "depth-pro": "depth-pro-onnx",
+      "depth-pro-q4": "depth-pro-onnx",
+      "depth-pro-onnx": "depth-pro-onnx",
+      "apple-depthpro": "depth-pro-onnx",
+      "apple-depth-pro": "depth-pro-onnx",
+      "apple-depth-pro-onnx": "depth-pro-onnx",
     };
     return aliases[processor] || (LOCAL_PROCESSORS.has(processor) ? processor : "midas-small-onnx");
   }

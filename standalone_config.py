@@ -7,6 +7,10 @@ from typing import Any, Dict, Optional
 
 APP_NAME = "File Pipe"
 CONFIG_FILE_NAME = "connector-config.json"
+REALTIME_STEREO3D_PIPELINES = {
+    "pipeline-depth-small-balanced": {"inferenceScale": "0.33", "inferenceCropPercent": 0},
+    "pipeline-depth-small-fast": {"inferenceScale": "0.25", "inferenceCropPercent": 0},
+}
 
 
 def user_data_dir() -> Path:
@@ -48,12 +52,12 @@ def default_config() -> Dict[str, Any]:
         "allowInsecurePassword": False,
         "cacheDir": str(default_cache_dir()),
         "maxCacheBytes": 0,
-        "realtimeStereo3dProcessor": "depth-anything-v2-small",
-        "realtimeStereo3dInferenceScale": "0.5",
+        "realtimeStereo3dProcessor": "pipeline-depth-small-balanced",
+        "realtimeStereo3dInferenceScale": "0.33",
         "realtimeStereo3dInferenceCropPercent": 0,
         "prebuildStereo3dProcessor": "depth-anything-v2-base",
-        "prebuildStereo3dInferenceScale": "0.75",
-        "prebuildStereo3dInferenceCropPercent": 7.5,
+        "prebuildStereo3dInferenceScale": "0.6",
+        "prebuildStereo3dInferenceCropPercent": 0,
         "passwordHash": None,
         "hostName": "",
         "pinnedWatchRoom": False,
@@ -123,12 +127,33 @@ def normalize_stereo3d_processor(value: Any, default: str = "depth-anything-v2-s
         "shift": "ffmpeg-shift",
         "ffmpeg": "ffmpeg-shift",
         "ffmpeg-shift": "ffmpeg-shift",
+        "realtime": "pipeline-depth-small-balanced",
+        "real-time": "pipeline-depth-small-balanced",
+        "balanced": "pipeline-depth-small-balanced",
+        "realtime-balanced": "pipeline-depth-small-balanced",
+        "real-time-balanced": "pipeline-depth-small-balanced",
+        "depth-small-balanced": "pipeline-depth-small-balanced",
+        "pipeline-depth-small-balanced": "pipeline-depth-small-balanced",
+        "fast-realtime": "pipeline-depth-small-fast",
+        "realtime-fast": "pipeline-depth-small-fast",
+        "real-time-fast": "pipeline-depth-small-fast",
+        "depth-small-fast": "pipeline-depth-small-fast",
+        "pipeline-depth-small-fast": "pipeline-depth-small-fast",
         "depth-anything-small": "depth-anything-v2-small",
         "da-v2-small": "depth-anything-v2-small",
         "depth-anything-v2-small": "depth-anything-v2-small",
         "depth-anything-base": "depth-anything-v2-base",
         "da-v2-base": "depth-anything-v2-base",
         "depth-anything-v2-base": "depth-anything-v2-base",
+        "da3": "depth-anything-v3-base",
+        "depth-anything-v3": "depth-anything-v3-base",
+        "depth-anything-3": "depth-anything-v3-base",
+        "depth-anything-v3-small": "depth-anything-v3-small",
+        "da-v3-small": "depth-anything-v3-small",
+        "da3-small": "depth-anything-v3-small",
+        "depth-anything-v3-base": "depth-anything-v3-base",
+        "da-v3-base": "depth-anything-v3-base",
+        "da3-base": "depth-anything-v3-base",
         "coreml": "coreml-depth-anything-v2-small",
         "coreml-small": "coreml-depth-anything-v2-small",
         "apple-coreml": "coreml-depth-anything-v2-small",
@@ -195,10 +220,16 @@ def normalize_config(raw: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         raw.get("realtimeStereo3dInferenceCropPercent", raw.get("stereo3dInferenceCropPercent")),
         defaults["realtimeStereo3dInferenceCropPercent"],
     )
+    realtime_pipeline = REALTIME_STEREO3D_PIPELINES.get(config["realtimeStereo3dProcessor"])
+    if realtime_pipeline:
+        config["realtimeStereo3dInferenceScale"] = realtime_pipeline["inferenceScale"]
+        config["realtimeStereo3dInferenceCropPercent"] = realtime_pipeline["inferenceCropPercent"]
     config["prebuildStereo3dProcessor"] = normalize_stereo3d_processor(
         raw.get("prebuildStereo3dProcessor"),
         defaults["prebuildStereo3dProcessor"],
     )
+    if config["prebuildStereo3dProcessor"] in REALTIME_STEREO3D_PIPELINES:
+        config["prebuildStereo3dProcessor"] = defaults["prebuildStereo3dProcessor"]
     config["prebuildStereo3dInferenceScale"] = normalize_scale(
         raw.get("prebuildStereo3dInferenceScale"),
         defaults["prebuildStereo3dInferenceScale"],

@@ -11,12 +11,12 @@
     <script defer src="{{ local_static_or_cdn('vendor/hls.js/hls.min.js', 'https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js') }}"></script>
     <script defer src="{{ local_static_or_cdn('vendor/three/three.min.js', 'https://cdn.jsdelivr.net/npm/three@0.160.1/build/three.min.js') }}"></script>
     <script defer src="{{ local_static_or_cdn('vendor/onnxruntime-web/ort.webgpu.min.js', 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.26.0/dist/ort.webgpu.min.js') }}"></script>
-    <script defer src="{{ url_for('static', filename='js/player/local-depth3d.js', v='3') }}"></script>
-    <script defer src="{{ url_for('static', filename='js/player/xr-player.js', v='52') }}"></script>
+    <script defer src="{{ url_for('static', filename='js/player/local-depth3d.js', v='4') }}"></script>
+    {% include '_xr_player_scripts.html' %}
     <script defer src="{{ url_for('static', filename='js/player/playback-progress.js', v='2') }}"></script>
     <script>window.FILE_PIPE_P2P_CONFIG = {{ p2p_config()|tojson }};</script>
     <script defer src="{{ url_for('static', filename='js/pages/watch/helpers.js', v='5') }}"></script>
-    <script defer src="{{ url_for('static', filename='js/pages/watch/index.js', v='65') }}"></script>
+    <script defer src="{{ url_for('static', filename='js/pages/watch/index.js', v='67') }}"></script>
     <script defer src="{{ local_static_or_cdn('vendor/alpinejs/cdn.min.js', 'https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js') }}"></script>
   </head>
   <body class="app-body" x-data="watchRoom('{{ room_id }}')" x-init="initWatchRoom()">
@@ -198,6 +198,18 @@
               <div class="list-group-item d-flex justify-content-between">
                 <span>Playback control</span>
                 <span class="badge" :class="remoteControlAllowed ? 'text-bg-success' : 'text-bg-secondary'" x-text="remoteControlAllowed ? 'Shared' : 'Host only'"></span>
+              </div>
+              <div class="list-group-item">
+                <div class="btn-group w-100" role="group" aria-label="XR launch">
+                  <button class="btn btn-sm btn-outline-primary" type="button" @click="openViewerXrTheater()" :disabled="!videoUrl">
+                    <i class="bi bi-badge-vr"></i>
+                    <span>Open XR Theater</span>
+                  </button>
+                  <button class="btn btn-sm btn-outline-primary" type="button" @click="openViewerXrLite()" :disabled="!videoUrl">
+                    <i class="bi bi-badge-3d"></i>
+                    <span>XR Lite</span>
+                  </button>
+                </div>
               </div>
               <div class="list-group-item">
                 <button class="btn btn-sm btn-outline-primary w-100" type="button" @click="reconnectToHost()" :disabled="!participantId || reconnecting">

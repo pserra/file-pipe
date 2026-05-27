@@ -1,12 +1,94 @@
 id: enterprise-d-bridge
 name: Enterprise-D Bridge
 background: "#060504"
-settingsRevision: 1
+settingsRevision: 4
+settingsRevisionDefaults:
+  bridge_key_light: 0.18
+  bridge_display_glow: 0.22
+  bridge_dome_opacity: 0.18
+calibration:
+  units: meters
+  roomScale: 0.359
+  reference:
+    kind: bridge_width
+    actualMeters: 10.67
+    assetMeters: 29.7
+defaultsRevision: 7
+defaults:
+  roomDim: 25
+  roomViewX: 0
+  roomViewY: 1.45
+  roomViewZ: 0.9
+  roomViewYaw: 0
+  roomViewPitch: -12
+screenMount:
+  label: Main viewer
+  defaults:
+    panelWidth: 2.08
+    panelHeight: 1.17
+    screenCurve: 15
+    viewportWarp: 0
+    panelX: -0.05
+    panelY: 0.15
+    panelYaw: 0
+    panelPitch: 0
+    distance: 2.5
 desktop:
   fov: 72
+seating:
+  - id: captains-chair
+    label: Captain's chair
+    position: [0, 0.56, 0.18]
+    avatarPosition: [0, -0.39, 0.18]
+    yaw: 0
+    pitch: -10
+    avatarOffset: [0, 0, 0.18]
+    avatarCushionToTop: 0.66
+    avatarBackOffset: 0.025
+  - id: first-officer
+    label: First officer
+    position: [-0.58, 0.52, 0.04]
+    avatarPosition: [-0.58, -0.43, 0.04]
+    yaw: 4
+    pitch: -10
+    avatarOffset: [0, 0, 0.18]
+    avatarCushionToTop: 0.66
+    avatarBackOffset: 0.025
+  - id: counselor
+    label: Counselor
+    position: [0.5, 0.52, 0.04]
+    avatarPosition: [0.5, -0.43, 0.04]
+    yaw: -4
+    pitch: -10
+    avatarOffset: [0, 0, 0.18]
+    avatarCushionToTop: 0.66
+    avatarBackOffset: 0.025
+  - id: conn
+    label: Conn
+    position: [-0.41, 0.48, -1.55]
+    avatarPosition: [-0.41, -0.47, -1.55]
+    yaw: 0
+    pitch: -8
+    avatarOffset: [0, 0, 0.16]
+    avatarCushionToTop: 0.64
+    avatarBackOffset: 0.025
+  - id: ops
+    label: Ops
+    position: [0.29, 0.48, -1.55]
+    avatarPosition: [0.29, -0.47, -1.55]
+    yaw: 0
+    pitch: -8
+    avatarOffset: [0, 0, 0.16]
+    avatarCushionToTop: 0.64
+    avatarBackOffset: 0.025
 videoSampling: true
 floor:
   grid: false
+render:
+  globalAmbient: 0.18
+  exposure: 1.08
+  shadows: true
+  xrFramebufferScale: 0.9
 settings:
   - id: bridge_key_light
     label: Bridge key light
@@ -14,29 +96,56 @@ settings:
     min: 0
     max: 2.5
     step: 0.05
-    default: 1.1
+    default: 0.18
   - id: bridge_display_glow
     label: Console glow
     type: number
     min: 0
     max: 1.6
     step: 0.05
-    default: 0.38
+    default: 0.22
+  - id: bridge_dome_opacity
+    label: Dome glass
+    type: number
+    min: 0
+    max: 0.95
+    step: 0.02
+    default: 0.18
 lights:
   - id: bridge-ambient
     type: ambient
     color: "#d8c6a8"
-    intensity: 0.48
+    intensity: 0.08
   - id: bridge-key
     type: directional
     color: "#fff4d5"
     intensitySetting: bridge_key_light
     position: [0.4, 2.4, -1.8]
     target: [0, -0.2, -3.2]
+    castShadow: true
+    shadowMapSize: 1024
+    shadowCameraSize: 4
+    shadowNear: 0.1
+    shadowFar: 8
+  - id: bridge-dome-fill
+    type: hemisphere
+    color: "#fff8e7"
+    groundColor: "#382315"
+    intensitySetting: bridge_dome_opacity
+    intensityMultiplier: 3.4
+    position: [0, 2.22, -0.52]
+  - id: bridge-dome-wash
+    type: point
+    color: "#fff8e7"
+    intensitySetting: bridge_dome_opacity
+    intensityMultiplier: 9.5
+    distance: 5.2
+    decay: 1.25
+    position: [0, 2.18, -0.52]
   - id: bridge-screen-wash
     type: point
     color: "#9ec9ff"
-    intensity: 0.95
+    intensity: 0.62
     videoSample: average
     videoSampleMultiplier: 0.72
     videoSampleMinIntensity: 0.15
@@ -49,8 +158,9 @@ assets:
     id: enterprise-d-bridge-model
     file: assets/enterprise_d_bridge.glb
     position: [0, -0.6, 0.64]
-    rotation: [90, 180, 0]
+    rotation: [0, 180, 0]
     scale: [0.00655, 0.00655, 0.00655]
+    preferEmbeddedTextures: true
     excludeNodes:
       - Tomalok
       - D'deridex
@@ -58,14 +168,71 @@ assets:
       - "498006_4.001"
       - directional
       - directional.001
+      - White Ceiling Light
+    excludeNodePrefixes:
+      - Text
     glassOpacity: 0.26
     displayEmissiveIntensity: "$bridge_display_glow"
+    castShadow: true
+    receiveShadow: true
+    nodeAdjustments:
+      - name: plaque
+        positionOffset: [0, 0, 0.305]
+    materialMap:
+      Grey Carpet:
+        color: "#6b6b60"
+        roughness: 0.9
+      Red Carpet:
+        color: "#77170f"
+        roughness: 0.86
+      Beige:
+        color: "#b28a48"
+        roughness: 0.48
+      Beige Lighter:
+        color: "#c7a865"
+        roughness: 0.52
+      Beige Leather:
+        color: "#a36e34"
+        roughness: 0.34
+      Beige Leather Light:
+        color: "#c8ad73"
+        roughness: 0.58
+      Beige Leather.002:
+        color: "#9f672f"
+        roughness: 0.36
+      White Panneling:
+        color: "#d0bd86"
+        roughness: 0.72
+      White Panneling.001:
+        color: "#d4c69d"
+        roughness: 0.76
+      Grey Panels n doors:
+        color: "#777875"
+        roughness: 0.55
+      Grey Plain:
+        color: "#676966"
+        roughness: 0.62
+      Viewscreen Surround:
+        color: "#9b9a8f"
+        roughness: 0.6
+      Black Gloss:
+        color: "#050505"
+        roughness: 0.08
+        metalness: 0.45
+      Glass:
+        color: "#f4efe0"
+        opacity: "$bridge_dome_opacity"
+        emissive: "#fff8e7"
+        emissiveIntensity: "$bridge_dome_opacity"
+        emissiveIntensityMultiplier: 0.58
+        roughness: 0.72
+        transmission: 0.12
+        thickness: 0.28
     textureMap:
       Acacia Koa Wood:
         map: acacia_koa_wood_basecolor.jpg
         normalMap: acacia_koa_wood_normal.jpg
         roughnessMap: acacia_koa_wood_roughness.jpg
-        metalnessMap: acacia_koa_wood_metallic.jpg
       "498006_4": 498006_4.png
       D'deridex: d_deridex.png
       d80ffec233c8104ae5ce8e4c9e747383: d80ffec233c8104ae5ce8e4c9e747383.png
@@ -85,3 +252,62 @@ assets:
       Untitled-2.001: untitled-2.png
       yelent: yelen3t.png
       yelent.001: entdside2.png
+  - type: image
+    id: enterprise-d-overhead-starfield-front-left
+    file: assets/starfield_overhead.webp
+    position: [-7.6, 2.33, -5.57]
+    rotation: [90, 0, 0]
+    scale: [16, 10.67, 1]
+    depthWrite: false
+    renderOrder: -4
+  - type: image
+    id: enterprise-d-overhead-starfield-front-right
+    file: assets/starfield_overhead.webp
+    position: [7.6, 2.33, -5.57]
+    rotation: [90, 0, 0]
+    scale: [16, 10.67, 1]
+    depthWrite: false
+    renderOrder: -4
+  - type: image
+    id: enterprise-d-overhead-starfield-back-left
+    file: assets/starfield_overhead.webp
+    position: [-7.6, 2.33, 4.53]
+    rotation: [90, 0, 0]
+    scale: [16, 10.67, 1]
+    depthWrite: false
+    renderOrder: -4
+  - type: image
+    id: enterprise-d-overhead-starfield-back-right
+    file: assets/starfield_overhead.webp
+    position: [7.6, 2.33, 4.53]
+    rotation: [90, 0, 0]
+    scale: [16, 10.67, 1]
+    depthWrite: false
+    renderOrder: -4
+  - type: ring
+    id: enterprise-d-ceiling-glass-layer
+    material: glass
+    color: "#fff8e7"
+    opacitySetting: bridge_dome_opacity
+    opacityMultiplier: 0.58
+    roughness: 0.64
+    transmission: 0.22
+    thickness: 0.06
+    emissive: "#fff8e7"
+    emissiveIntensity: "$bridge_dome_opacity"
+    innerRadius: 0.49
+    outerRadius: 1
+    segments: 96
+    position: [0, 1.305, -0.63]
+    rotation: [90, 0, 0]
+    scale: [2.34, 2.56, 1]
+    depthWrite: false
+    renderOrder: -2
+  - type: box
+    id: enterprise-d-right-upper-wall-cover
+    color: "#b28a48"
+    lit: true
+    roughness: 0.55
+    position: [1.545, 0.758, -0.76]
+    size: [0.026, 0.045, 1.72]
+    renderOrder: 1

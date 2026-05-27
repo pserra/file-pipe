@@ -461,12 +461,33 @@ function normalizeStereo3dProcessor(value) {
     shift: "ffmpeg-shift",
     ffmpeg: "ffmpeg-shift",
     "ffmpeg-shift": "ffmpeg-shift",
+    realtime: "pipeline-depth-small-balanced",
+    "real-time": "pipeline-depth-small-balanced",
+    balanced: "pipeline-depth-small-balanced",
+    "realtime-balanced": "pipeline-depth-small-balanced",
+    "real-time-balanced": "pipeline-depth-small-balanced",
+    "depth-small-balanced": "pipeline-depth-small-balanced",
+    "pipeline-depth-small-balanced": "pipeline-depth-small-balanced",
+    "fast-realtime": "pipeline-depth-small-fast",
+    "realtime-fast": "pipeline-depth-small-fast",
+    "real-time-fast": "pipeline-depth-small-fast",
+    "depth-small-fast": "pipeline-depth-small-fast",
+    "pipeline-depth-small-fast": "pipeline-depth-small-fast",
     "depth-anything-small": "depth-anything-v2-small",
     "da-v2-small": "depth-anything-v2-small",
     "depth-anything-v2-small": "depth-anything-v2-small",
     "depth-anything-base": "depth-anything-v2-base",
     "da-v2-base": "depth-anything-v2-base",
     "depth-anything-v2-base": "depth-anything-v2-base",
+    da3: "depth-anything-v3-base",
+    "depth-anything-v3": "depth-anything-v3-base",
+    "depth-anything-3": "depth-anything-v3-base",
+    "depth-anything-v3-small": "depth-anything-v3-small",
+    "da-v3-small": "depth-anything-v3-small",
+    "da3-small": "depth-anything-v3-small",
+    "depth-anything-v3-base": "depth-anything-v3-base",
+    "da-v3-base": "depth-anything-v3-base",
+    "da3-base": "depth-anything-v3-base",
     coreml: "coreml-depth-anything-v2-small",
     "coreml-small": "coreml-depth-anything-v2-small",
     "apple-coreml": "coreml-depth-anything-v2-small",
@@ -480,6 +501,14 @@ function normalizeStereo3dProcessor(value) {
     "depth-anything-v2-tiny": "depth-anything-v2-tiny-onnx",
     "depth-anything-v2-tiny-onnx": "depth-anything-v2-tiny-onnx",
     "depth-anything-v2-small-onnx": "depth-anything-v2-small-onnx",
+    depthpro: "depth-pro-onnx",
+    "depthpro-onnx": "depth-pro-onnx",
+    "depth-pro": "depth-pro-onnx",
+    "depth-pro-q4": "depth-pro-onnx",
+    "depth-pro-onnx": "depth-pro-onnx",
+    "apple-depthpro": "depth-pro-onnx",
+    "apple-depth-pro": "depth-pro-onnx",
+    "apple-depth-pro-onnx": "depth-pro-onnx",
     webgpu: "webgpu-depth-anything-v2-small",
     "webgpu-small": "webgpu-depth-anything-v2-small",
     "webgpu-depth-anything-v2-small": "webgpu-depth-anything-v2-small",
@@ -493,12 +522,62 @@ function isLocalStereo3dProcessor(value) {
     "fastdepth-mobilenet-onnx",
     "depth-anything-v2-tiny-onnx",
     "depth-anything-v2-small-onnx",
+    "depth-pro-onnx",
     "webgpu-depth-anything-v2-small",
   ].includes(normalizeStereo3dProcessor(value));
 }
 
+function realtimeStereo3dPipelineSettings(value) {
+  const processor = normalizeStereo3dProcessor(value);
+  if (processor === "pipeline-depth-small-fast") {
+    return {
+      id: "pipeline-depth-small-fast",
+      model: "depth-anything-v2-small",
+      inferenceScale: "0.25",
+      inferenceCropPercent: "0",
+      temporalSmoothing: "0.06",
+      temporalWindowFrames: 4,
+      temporalOverlapFrames: 1,
+      depthFrameStride: 8,
+      stereoFill: "remap",
+      inpaintRadius: 0,
+      fps: "30",
+      description: "Depth Small at 0.25x, sparse 8-frame depth cadence, very light smoothing, and remap fill.",
+    };
+  }
+  if (processor === "pipeline-depth-small-balanced") {
+    return {
+      id: "pipeline-depth-small-balanced",
+      model: "depth-anything-v2-small",
+      inferenceScale: "0.33",
+      inferenceCropPercent: "0",
+      temporalSmoothing: "0.10",
+      temporalWindowFrames: 8,
+      temporalOverlapFrames: 2,
+      depthFrameStride: 4,
+      stereoFill: "inpaint",
+      inpaintRadius: 2,
+      fps: "30",
+      description: "Depth Small at 0.33x, sparse 4-frame depth cadence, light smoothing, and inpaint radius 2.",
+    };
+  }
+  return null;
+}
+
+function isRealtimeStereo3dPipelineProcessor(value) {
+  return Boolean(realtimeStereo3dPipelineSettings(value));
+}
+
+function effectiveStereo3dInferenceScale(processor, fallback = "0.33") {
+  return realtimeStereo3dPipelineSettings(processor)?.inferenceScale || normalizeStereo3dInferenceScale(fallback);
+}
+
+function effectiveStereo3dInferenceCropPercent(processor, fallback = "0") {
+  return realtimeStereo3dPipelineSettings(processor)?.inferenceCropPercent || normalizeStereo3dInferenceCropPercent(fallback);
+}
+
 function defaultStereo3dProcessorForPipeline(pipeline) {
-  return normalizeStereo3dPipeline(pipeline) === "local" ? "midas-small-onnx" : "depth-anything-v2-small";
+  return normalizeStereo3dPipeline(pipeline) === "local" ? "midas-small-onnx" : "pipeline-depth-small-balanced";
 }
 
 function stereo3dProcessorOptions() {
@@ -511,18 +590,56 @@ function stereo3dProcessorOptions() {
       pipeline: "remote",
     },
     {
+      id: "pipeline-depth-small-balanced",
+      label: "Realtime Depth Small Balanced",
+      bestUse: "Depth Small, 0.33x sparse depth, light smoothing, light inpaint",
+      m3Practicality: "Targeted for 30fps 720p on M3",
+      pipeline: "remote",
+      realtimePipeline: true,
+      realtimeOnly: true,
+      settings: realtimeStereo3dPipelineSettings("pipeline-depth-small-balanced"),
+    },
+    {
+      id: "pipeline-depth-small-fast",
+      label: "Realtime Depth Small Fast",
+      bestUse: "Snappier Depth Small fallback with lower sparse depth cadence and remap fill",
+      m3Practicality: "Use when balanced cannot stay ahead",
+      pipeline: "remote",
+      realtimePipeline: true,
+      realtimeOnly: true,
+      settings: realtimeStereo3dPipelineSettings("pipeline-depth-small-fast"),
+    },
+    {
       id: "depth-anything-v2-small",
       label: "Depth Anything V2 Small",
       bestUse: "Quality with lower latency",
       m3Practicality: "Good",
       pipeline: "remote",
+      temporalPrebuild: true,
     },
     {
       id: "depth-anything-v2-base",
       label: "Depth Anything V2 Base",
-      bestUse: "Quality/cache-ahead",
-      m3Practicality: "Moderate",
+      bestUse: "Cache-ahead with stabilization",
+      m3Practicality: "Moderate; lower memory than DA3",
       pipeline: "remote",
+      temporalPrebuild: true,
+    },
+    {
+      id: "depth-anything-v3-small",
+      label: "Depth Anything V3 Small",
+      bestUse: "Temporal 3D cache with lighter DA3",
+      m3Practicality: "Good for prepared cache",
+      pipeline: "remote",
+      temporalPrebuild: true,
+    },
+    {
+      id: "depth-anything-v3-base",
+      label: "Depth Anything V3 Base",
+      bestUse: "Best prepared 3D cache quality",
+      m3Practicality: "Temporal prebuild; higher latency",
+      pipeline: "remote",
+      temporalPrebuild: true,
     },
     {
       id: "coreml-depth-anything-v2-small",
@@ -560,6 +677,14 @@ function stereo3dProcessorOptions() {
       label: "Local Depth Anything V2 Small ONNX",
       bestUse: "Higher quality local depth",
       m3Practicality: "High-end browser only",
+      pipeline: "local",
+      browserOnly: true,
+    },
+    {
+      id: "depth-pro-onnx",
+      label: "Local Apple Depth Pro Q4 ONNX",
+      bestUse: "Highest quality local depth",
+      m3Practicality: "Experimental; very large download",
       pipeline: "local",
       browserOnly: true,
     },
